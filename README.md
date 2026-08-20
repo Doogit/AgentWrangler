@@ -45,7 +45,7 @@ AgentWrangler is **not another coding agent**. It sits around an existing agent 
 
 ## Why build this?
 
-First off, I like to design and build things to understand them better. I also couldn't find a tool that solves these problems cohesively.
+First off, I like to design and build things to understand them better. I also couldn't find a tool that solves both agent control + visibility cohesively.
 
 Overall, the tool is aimed at solving these challenges from AI agents:
 
