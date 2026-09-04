@@ -1,0 +1,62 @@
+name: stranger-smoke
+
+# Follows the README Quick Start verbatim on a machine that has never seen the repo,
+# on Linux and macOS. Proves the curated tree clones-and-runs (OS2 acceptance) and that
+# the daemon binds loopback and serves the dashboard. The macOS job additionally seeds a
+# fake Claude Code Keychain entry so the darwin credential-read path (NU6) is exercised.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  stranger-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      # macOS only: seed a fake Keychain entry under the service NU6 reads,
+      # so the darwin `security find-generic-password` path runs during boot scan.
+      - name: Seed fake Claude Code Keychain entry (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          security add-generic-password -U \
+            -a "$USER" -s "Claude Code-credentials" \
+            -w '{"claudeAiOauth":{"accessToken":"fake-smoke-token"}}' \
+            "$HOME/Library/Keychains/login.keychain-db" || true
+
+      # README Quick Start, verbatim.
+      - name: npm ci
+        run: npm ci
+
+      - name: Build the dashboard
+        run: npm run build:ui
+
+      - name: Start daemon and poll the dashboard for HTTP 200
+        env:
+          AW_NO_OPEN: "1"
+        run: |
+          npm run daemon &
+          DAEMON_PID=$!
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:47821/ > /dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:47821/)
+          kill $DAEMON_PID 2>/dev/null || true
+          echo "HTTP status: $HTTP_STATUS"
+          [ "$HTTP_STATUS" = "200" ]
