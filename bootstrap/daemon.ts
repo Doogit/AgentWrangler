@@ -10,8 +10,11 @@
  */
 
 import * as http from "node:http";
-import * as process from "node:process";
 import Database from "better-sqlite3";
+// Use the global `process` (matches the rest of the codebase). A namespace
+// import from "node:process" does NOT expose `.on` as a named ESM export, so
+// `process.on(...)` below would throw "process.on is not a function" under
+// `node --import tsx/esm`.
 
 const VERSION = "0.0.1";
 const PORT = 47821;
