@@ -187,7 +187,10 @@ export function openTerminal(
   if (typeof prompt !== "string" || prompt.length === 0) {
     return { launched: false, reason: "No prompt to seed — Copy prompt instead." };
   }
-  if (typeof cwd !== "string" || cwd.length === 0 || !path.isAbsolute(cwd)) {
+  // Validate absoluteness against the TARGET platform, not the host: a daemon on
+  // Linux (or a cross-platform CI run) must still recognize a Windows `C:\…` cwd.
+  const targetPath = d.platform === "win32" ? path.win32 : path.posix;
+  if (typeof cwd !== "string" || cwd.length === 0 || !targetPath.isAbsolute(cwd)) {
     return { launched: false, reason: "Workspace folder is not a valid absolute path." };
   }
 

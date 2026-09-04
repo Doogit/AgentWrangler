@@ -17,7 +17,9 @@
 import * as http from "node:http";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { runMigrations } from "../../src/db/migrate.js";
 import { createServer } from "../../src/daemon/http.js";
+import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -75,7 +77,13 @@ let db: Database.Database;
 beforeAll(async () => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
-  // No migration needed for HTTP tests; the router stubs don't use the DB.
+  // The POST /api/settings write path reaches the DB through the query-db
+  // context (getQueryDb), not the `db` handed to createServer. Migrate this
+  // in-memory DB and inject it so the handler is hermetic — otherwise it falls
+  // through to getQueryDb()'s lazy-open of the real ~/.agentwrangler/db.sqlite,
+  // which exists on a dev machine (→200) but not on CI (→400).
+  runMigrations(db);
+  setQueryDb(db);
 });
 
 beforeEach(
@@ -99,6 +107,7 @@ afterEach(
 );
 
 afterAll(() => {
+  resetQueryDb();
   db.close();
 });
 
