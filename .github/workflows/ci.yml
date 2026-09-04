@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Smoke (daemon loopback)
+        run: |
+          # Start daemon in background; wait for it to bind; curl the hello endpoint.
+          node --import tsx/esm bootstrap/daemon.ts &
+          DAEMON_PID=$!
+          # Poll until the port is open (up to 10s)
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:47821/ > /dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:47821/)
+          kill $DAEMON_PID || true
+          echo "HTTP status: $HTTP_STATUS"
+          [ "$HTTP_STATUS" = "200" ]

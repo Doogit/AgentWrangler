@@ -1,0 +1,1 @@
+CREATE TABLE reports (report_id TEXT PRIMARY KEY, kind TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL, generated_at TEXT NOT NULL, content_json TEXT NOT NULL, UNIQUE(kind, period_start));

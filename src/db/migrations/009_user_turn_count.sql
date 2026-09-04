@@ -1,0 +1,1 @@
+ALTER TABLE sessions ADD COLUMN user_turn_count INTEGER NOT NULL DEFAULT 0;

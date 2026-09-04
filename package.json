@@ -1,0 +1,59 @@
+{
+  "name": "agentwrangler",
+  "version": "0.1.0",
+  "bin": { "agentwrangler": "dist/cli/agentwrangler.js" },
+  "description": "Local observability for Claude Code agent token spend and outcomes",
+  "type": "module",
+  "license": "Apache-2.0",
+  "files": ["dist", "README.md", "LICENSE"],
+  "repository": { "type": "git", "url": "git+https://github.com/Doogit/AgentWrangler.git" },
+  "homepage": "https://github.com/Doogit/AgentWrangler#readme",
+  "bugs": { "url": "https://github.com/Doogit/AgentWrangler/issues" },
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "lint": "biome check src test",
+    "typecheck": "tsc --noEmit --project tsconfig.node.json && tsc --noEmit --project tsconfig.ui.json",
+    "test": "vitest run && vitest run --config vitest.ui.config.ts",
+    "smoke": "node --import tsx/esm src/daemon/index.ts --smoke --no-open",
+    "daemon": "node --import tsx/esm src/daemon/index.ts",
+    "install-hook": "node --import tsx/esm src/daemon/index.ts --install-hook",
+    "uninstall-hook": "node --import tsx/esm src/daemon/index.ts --uninstall-hook",
+    "evidence:create-approval": "node --import tsx/esm src/evidence/create-approval.ts",
+    "evidence:discover-approval": "node --import tsx/esm src/evidence/discover-approval.ts",
+    "evidence:create-scratch": "node --import tsx/esm src/evidence/create-scratch.ts",
+    "evidence:cond1": "node --import tsx/esm src/evidence/cond1/cli.ts",
+    "evidence:r3-u4": "node --import tsx/esm src/evidence/r3/cli.ts",
+    "evidence:d7-coverage": "node --import tsx/esm src/evidence/d7/cli.ts",
+    "evidence:prepare-g2": "node --import tsx/esm scripts/evidence/prepare-g2.ts",
+    "evidence:prepare-b6": "node --import tsx/esm scripts/evidence/prepare-b6.ts",
+    "evidence:judge-g2": "node --import tsx/esm src/evidence/g2/cli.ts",
+    "build:daemon": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "build:ui": "vite build",
+    "build": "npm run build:daemon && npm run build:ui",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^3.10.1",
+    "sirv": "^3.0.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@testing-library/react": "^14.3.1",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^25.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}

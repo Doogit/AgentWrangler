@@ -1,0 +1,27 @@
+{
+  "_comment": "AgentWrangler dangerous-command guard deny-list. Extend this file directly; it is data, not code. Each rule has a `pattern` (a JavaScript RegExp source, tested against the Bash command) and a static `reason` (never the command text). `deny` = hard-block via permissionDecision:deny (bypass-mode-proof); `ask` = prompt for confirmation. Deny is checked before ask. An invalid regex or bad shape makes the whole file fall back to the embedded baseline in danger-guard-hook.mjs (fail-closed on the deny tier).",
+  "deny": [
+    {
+      "pattern": "(?:^|[\\s;&|(])rm\\s+(?:-\\S*\\s+)*-\\S*r\\S*\\s+(?:[^;&|]*\\s)?(?:/|~|\\$HOME)(?:\\s|/|\\*|$)",
+      "reason": "recursive delete targeting your home directory or the filesystem root"
+    },
+    {
+      "pattern": "git\\s+push\\b(?=[^;&|]*(?:--force|-f)\\b)(?=[^;&|]*\\b(?:main|master)\\b)",
+      "reason": "force-push to a protected branch (main/master)"
+    },
+    {
+      "pattern": "\\b(?:curl|wget)\\b[^;&|]*\\|\\s*(?:sudo\\s+)?(?:sh|bash|zsh|dash|ksh)\\b",
+      "reason": "piping a downloaded script straight into a shell"
+    }
+  ],
+  "ask": [
+    {
+      "pattern": "(?:^|[\\s;&|(])rm\\s+(?:-\\S*\\s+)*-\\S*r\\S*\\b",
+      "reason": "recursive delete — confirm the target before running"
+    },
+    {
+      "pattern": "git\\s+push\\b(?=[^;&|]*(?:--force|-f)\\b)",
+      "reason": "force-push — confirm the branch before running"
+    }
+  ]
+}

@@ -1,126 +1,116 @@
-<p align="center">
-  <img src="./docs/agentwrangler-logo.png" alt="AgentWrangler — cowboy lassoing a robot" width="420">
-</p>
+# AgentWrangler
 
-<h1 align="center">AgentWrangler</h1>
+Local-first observability for Claude Code that **joins your token spend to the pull requests it
+actually merged or closed** — entirely on your machine — and ships **installable guardrails** (a
+dangerous-command block, a pre-compaction checkpoint, a context-budget warning) you turn on from the
+dashboard. See where your agent budget goes, whether the work shipped, and cut the waste.
 
-<p align="center">
-  <strong>See where your coding agent spends — then cut the waste, not the results.</strong>
-</p>
+## Local-only — your data never leaves your machine
 
-<p align="center">
-  A local, privacy-preserving observability tool for Claude Code token spend and session outcomes.
-</p>
+AgentWrangler runs entirely on your computer: a daemon bound to **`127.0.0.1`** and a dashboard in
+your browser that talks only to that loopback address. **No cloud backend, no telemetry, nothing
+phones home.** It reads your local Claude Code transcripts, stores only aggregates in a local SQLite
+file (`~/.agentwrangler/db.sqlite`), and never persists raw transcript or PR content — only counts,
+ids, and structural anchors (the SEC-101 privacy invariant). An optional GitHub token, used only for
+the outcomes feature, is read locally, never logged, and never leaves your machine.
 
-> **Status: design / pre-alpha.** This README describes the intended product and current direction —
-> not a claim that every feature below is complete or production-ready.
+**Privacy exception (opt-in):** `npm run evidence:judge-g2 -- --execute` is the only path where PR
+content leaves the machine. It calls the Claude API with your local Claude Code OAuth credential to
+adjudicate G2 deferral findings, and runs only when `g2_claude_judge_opt_in` is enabled; otherwise it
+refuses to run. No rationale text is persisted.
 
----
+![AgentWrangler dashboard — spend verdict, model mix, recommendations, and per-repo efficiency](docs/assets/dashboard.gif)
 
-## What is AgentWrangler?
+<!--
+  Captured from a SANITIZED instance (Vite test-mode fixtures — anonymized names, no
+  live data) so no real workspace/repository names/paths are committed (SEC-101).
+  Regenerate with the ce-demo-reel skill against `npx vite --mode test`.
+-->
 
-AgentWrangler watches your normal, interactive Claude Code usage across all your local workspaces and
-answers three questions:
+## Quick start
 
-1. **What is my agent usage costing** — live and over time, by workspace / session / model / turn?
-2. **Is the work actually succeeding** — including work the agent created but deferred?
-3. **What specific, evidence-backed changes would cut spend without cutting success — and did they work
-   after I adopted them?**
+Requirements: **Node `>=22 <25`** and npm.
 
-The daemon runs on `127.0.0.1` and serves a web UI in your browser. It streams your
-`~/.claude/projects/**/*.jsonl` transcripts, stores **derived metadata only** in local SQLite (never
-prompt or code content), and surfaces cost trends, session hygiene, GitHub outcome linkage, and
-recommendations. **No cloud. No data leaves your machine.**
+```sh
+git clone https://github.com/Doogit/AgentWrangler && cd AgentWrangler
+npm ci
+npm run build:ui       # build the dashboard
+npm run daemon         # starts the daemon and opens your browser
+```
 
-> **Run Claude Code exactly as you do today.** AgentWrangler shows spend and burn across every workspace,
-> links sessions to observed outcomes (merged PRs, CI, review debt), and produces recommendations whose
-> impact is *measured*, not asserted.
+Then open **http://127.0.0.1:47821** (the daemon opens it for you unless `AW_NO_OPEN=1`).
 
----
+After installing dependencies you can also do it in one step:
 
-## Principles
+```sh
+npm ci                 # required first — the CLI runs via tsx, a devDependency
+npx agentwrangler      # builds the UI if needed, then launches the daemon + browser
+```
 
-- **Evidence over assertion.** Every number has a versioned definition, an explicit denominator, and
-  drill-down to its contributing rows (global → workspace → session → turn).
-- **Truthful claims.** Costs computed from transcripts are labeled **cost-equivalent (API list price)**,
-  never "billed," unless a billing source is connected. Outcomes are labeled *observed*, not *verified*.
-- **The resource is rate-limit headroom, not raw tokens.** Cache reads draw against the weekly cap at the
-  cached rate (~0.1×), so savings are valued **cap-weighted** and anchored on $/week — never a raw token
-  count.
-- **Modeled vs measured.** A recommendation's projected savings are *modeled*; only a post-adoption delta
-  is *measured*. The two are never mixed.
-- **Observation only.** The MVP never blocks, routes, sandboxes, or modifies agent behavior.
+On first launch the daemon binds the port immediately and serves a loading page, then scans your
+`~/.claude/projects/**/*.jsonl` transcripts in the background — the dashboard appears right away and
+fills in as the scan completes, so a large history won't block the page from opening.
 
----
+## Optional setup
 
-## Dashboard
+- **GitHub outcomes sync** — links sessions to the PRs/commits they produced. Provide a read-only
+  GitHub PAT via the `AW_GITHUB_TOKEN` environment variable (works on all platforms). On Windows you
+  may instead store it in Credential Manager as `AgentWrangler-GithubToken`. Without a token the
+  outcomes feature stays inert and Settings tells you so — nothing fails silently.
+- **Usage reader** — reads your Claude Code OAuth credentials locally to calibrate the weekly limit
+  and burn forecast. Sign in through Claude Code as usual; Settings shows the reader status.
+- **Context-budget hook** — an optional PreToolUse hook that warns before long sessions balloon.
+  Install it from the Settings page (or `npm run install-hook`).
 
-**Global → Workspace → Session**, plus Recommendations and Settings.
+## Configuration (environment variables)
 
-- **Overview** — 7-day spend, weekly-limit burn forecast, observed success rate, context-per-turn trend,
-  a workspace comparison table, and a live strip of currently active sessions.
-- **Workspaces** — per-workspace spend, session hygiene, linked work items / outcomes, and deferred-review
-  backlog *(EXPERIMENTAL)*.
-- **Recommendations** — evidence-backed proposals with modeled savings, an impact ledger (modeled vs
-  realized), and an on-demand "Analyze with Claude" action. See
-  [Recommendations Engine (overview)](./docs/recommendations-engine-overview.md).
-- **Settings** — transcript roots, workspace→repo mapping, GitHub connection (read-only), pricing-snapshot
-  status, weekly-limit configuration, and privacy toggles (content inclusion default-off).
+All are optional; sensible defaults apply. See [`.env.example`](.env.example) for the full list.
 
----
+| Variable | Purpose | Default |
+|---|---|---|
+| `AW_PORT` | Daemon HTTP port | `47821` |
+| `AW_DB_PATH` | SQLite database path | `~/.agentwrangler/db.sqlite` |
+| `AW_SCAN_ROOT` | Transcript corpus to scan | `~/.claude/projects` |
+| `AW_UI_ROOT` | Directory the built UI is served from | `<repo>/dist/ui` |
+| `AW_GITHUB_TOKEN` | Read-only GitHub PAT for outcomes sync | *(unset)* |
+| `AW_NO_OPEN` | Set to `1` to not auto-open the browser | *(unset)* |
 
-## Privacy by construction
+## What it measures
 
-- The metrics database stores derived metadata only — counts, sizes, timings, ids, hashes — **never**
-  prompt, code, or model-response content.
-- Transcript files are read in place; AgentWrangler never modifies, moves, or re-permissions them.
-- The only network egress is the read-only GitHub sync, explicit "Analyze with Claude" runs, and an
-  optional pricing refresh — each visible in Settings.
+AgentWrangler ingests your transcripts and surfaces cost trends, cache-efficiency, session hygiene
+findings (e.g. long sessions never `/clear`ed, limit-burn risk), and — with a GitHub token — outcome
+linkage between sessions and the work they shipped. Numbers are cap-weighted and honesty-tiered: the
+UI is explicit about what is measured versus estimated, and never invents a proxy it can't ground.
+Definitions live in [`docs/planning/AgentWrangler_Data_Model_and_Metrics_v2.md`](docs/planning/AgentWrangler_Data_Model_and_Metrics_v2.md).
 
----
+## Limitations
 
-## Project documents
-
-- **[Product Requirements Document — v0.7.2](./docs/AgentWrangler_PRD_v0_7_2.md)** — the source of truth
-  for the Observe MVP.
-- **[Recommendations Engine (overview)](./docs/recommendations-engine-overview.md)** — how the detector /
-  recommendation engine works.
-
-### Background: the earlier control-plane design (now planned as "P1 — Govern")
-
-AgentWrangler began as a local *control plane* for coding agents (bounded authority, governed spend,
-independent verification). That design is **preserved as the future P1 "Govern" layer** and is promoted
-only once the Observe MVP proves value. It is kept for reference:
-
-- [PRD — v0.6.2 (control-plane design, now P1)](./docs/AgentWrangler_PRD_v0_6_2.md)
-- [Technical Architecture — v4.4.2 (now P1)](./docs/AgentWrangler_Technical_Architecture_v4_4_2.md)
-
----
-
-## Contributing
-
-AgentWrangler is in the design / pre-alpha stage. Contributions are especially useful when they validate
-or falsify a measurement assumption, improve the accuracy of spend attribution or outcome linkage, or
-sharpen an honesty label. Please check the PRD to see what problem a change solves and what observable
-criteria would prove it works.
-
----
-
-## Security & privacy
-
-This is pre-alpha software. If you discover a security or privacy issue, please **do not** publish details
-in a public issue — use GitHub's private vulnerability-reporting / Security Advisory mechanism, or contact
-the maintainers privately.
-
----
+- **Platform support.** Tested on Windows; macOS/Linux are believed working — reports welcome.
+- **Transcript-format coupling.** AgentWrangler reads Claude Code's JSONL transcript format; a change
+  to that format upstream can require an ingestion update.
+- **Outcomes credential sources.** The cross-platform path is `AW_GITHUB_TOKEN`; the OS credential
+  store integration currently covers Windows Credential Manager only (macOS/Linux keychain is a
+  follow-on).
+- **Single local user.** It observes one machine's Claude Code history; there is no multi-user or
+  team-aggregation mode by design.
 
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE). Copyright 2026 AgentWrangler contributors.
 
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) to build and test, [SECURITY.md](SECURITY.md) to report a
+vulnerability, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-<p align="center">
-  <strong>AgentWrangler</strong><br>
-  See the spend. Cut the waste. Keep the results.
-</p>
+## Documentation index
+
+| Path | Purpose |
+|---|---|
+| `docs/adr/ADR-100-stack.md` | Accepted MVP stack: Node 22 LTS + TypeScript + better-sqlite3, localhost UI (no Tauri/Electron for MVP) |
+| `docs/adr/ADR-100-shell-research-2026-08-21.md` | External research backing the localhost-UI decision |
+| `docs/planning/AgentWrangler_PRD_v0_7_0.md` | Product requirements v0.7.0 |
+| `docs/planning/AgentWrangler_Technical_Architecture_v4_5_0.md` | Architecture v4.5.0 |
+| `docs/planning/AgentWrangler_Data_Model_and_Metrics_v2.md` | SQLite schema + metric definitions v2 |
+| `docs/planning/AgentWrangler_Ingestion_and_Findings_Spec_v1.md` | Transcript ingestion + findings extractor spec |
+| `docs/planning/AgentWrangler_Recommendations_Engine_Spec_v1.md` | Recommendations engine spec |
+| `docs/planning/AgentWrangler_Spike_Plan_v2.md` | Spike exit criteria (authoritative) |
+| `docs/planning/AgentWrangler_PreImplementation_Plan_v1.md` | Session map + session prompts |

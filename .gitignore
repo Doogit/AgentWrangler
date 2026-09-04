@@ -1,0 +1,39 @@
+# Node
+node_modules/
+dist/
+.next/
+out/
+build/
+
+# TypeScript build output
+*.js.map
+*.d.ts.map
+
+# Vite / build artifacts
+bootstrap/ui/dist/
+
+# Spike scratch databases
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Claude Code local config
+.claude/local/
+.claude/settings.local.json
+
+# Environment files (may hold secrets like AW_GITHUB_TOKEN)
+.env
+.env.*
+!.env.example
+
+# Worktrees (nested inside repo per convention)
+.worktrees/
+
+# Session handoff briefs (disposable; not tracked)
+docs/handoffs/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+# Normalize all text to LF in the repo; check out per-platform.
+# Fixes the autocrlf/no-attributes trap where committed-LF files check out as
+# CRLF on Windows and fail biome (LF-default).
+* text=auto eol=lf
+
+# Real binaries — never touch line endings.
+*.png binary
