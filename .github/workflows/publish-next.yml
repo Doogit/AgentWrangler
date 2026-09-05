@@ -30,11 +30,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NOTE: do NOT set `registry-url` here. It makes setup-node write
+      # `_authToken=${NODE_AUTH_TOKEN}` into .npmrc; with no token set that expands
+      # to empty, npm assumes auth is configured, and it never starts the OIDC
+      # exchange → publish 404s ("do not have permission"). npm defaults to
+      # registry.npmjs.org regardless. Refs: actions/setup-node#1551, npm/documentation#1960.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
           cache: "npm"
 
       # OIDC Trusted Publishing requires npm >= 11.5.0; Node 22 ships an older npm.
