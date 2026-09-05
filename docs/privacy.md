@@ -52,4 +52,4 @@ Everything else works with zero network calls to anyone.
 
 The daemon is reachable from other machines only if you deliberately expose the port (tunnel,
 reverse proxy) — don't. For the full threat model and how to report a vulnerability privately,
-see [SECURITY.md](../SECURITY.md).
+see [SECURITY.md](../.github/SECURITY.md).

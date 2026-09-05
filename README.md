@@ -66,8 +66,8 @@ context-per-turn tiles.
 
 ### Recommendations — waste-source detectors, ranked by impact
 
-Ten detector families watch your corpus for the patterns that actually burn tokens: cache
-misses (the highest-leverage lever), session hygiene, retry/redundant-read loops, tool-result
+Ten detector families watch your sessions for the patterns that actually burn tokens: cache
+misses (the biggest single lever), session hygiene, retry/redundant-read loops, tool-result
 bloat, model routing, idle background sessions, and more. Each recommendation shows modeled
 weekly savings, a confidence tier, and a concrete action — install a hook, copy a config
 snippet, or copy a guided prompt straight into Claude Code. Adopted changes flow into an
@@ -134,7 +134,7 @@ Every metric carries an honesty-tier chip — `EXACT`, `LIST_EQUIV`, `MODELED`, 
 `DIRECTIONAL`, `EXPERIMENTAL` — so you always know what is measured versus estimated. Dollar
 figures are list-price *equivalents* (subscription plans aren't billed per token; tokens drive
 rate limits), and the built-in glossary ("How to read this dashboard") defines every
-load-bearing metric in plain language. The full tour: **[Dashboard tour →](docs/dashboard-tour.md)**
+key metric in plain language. The full tour: **[Dashboard tour →](docs/dashboard-tour.md)**
 
 ## Privacy — local-only by design
 
@@ -162,8 +162,8 @@ and [`.env.example`](.env.example).
 | [Privacy model](docs/privacy.md) | What's stored, what never is, and the two opt-in exceptions |
 | [Architecture](docs/planning/AgentWrangler_Technical_Architecture_v4_5_0.md) | Daemon, ingestion, detector, and query design |
 | [Data model & metrics](docs/planning/AgentWrangler_Data_Model_and_Metrics_v2.md) | SQLite schema and metric definitions |
-| [Contributing](CONTRIBUTING.md) | Dev setup, checks, PR expectations |
-| [Security policy](SECURITY.md) | Threat model and how to report a vulnerability |
+| [Contributing](.github/CONTRIBUTING.md) | Dev setup, checks, PR expectations |
+| [Security policy](.github/SECURITY.md) | Threat model and how to report a vulnerability |
 
 ## Limitations
 
@@ -177,5 +177,5 @@ and [`.env.example`](.env.example).
 ## License
 
 [Apache 2.0](LICENSE) © 2026 AgentWrangler contributors.
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md), [SECURITY.md](.github/SECURITY.md), and
+[CODE_OF_CONDUCT.md](.github/CODE_OF_CONDUCT.md).

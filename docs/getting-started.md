@@ -83,7 +83,7 @@ All environment variables are optional; sensible defaults apply. See
 |---|---|---|
 | `AW_PORT` | Daemon HTTP port | `47821` |
 | `AW_DB_PATH` | SQLite database path | `~/.agentwrangler/db.sqlite` |
-| `AW_SCAN_ROOT` | Transcript corpus to scan | `~/.claude/projects` |
+| `AW_SCAN_ROOT` | Transcript directory to scan | `~/.claude/projects` |
 | `AW_UI_ROOT` | Directory the built UI is served from | `<package>/dist/ui` |
 | `AW_GITHUB_TOKEN` | Read-only GitHub PAT for outcomes sync | *(unset)* |
 | `AW_NO_OPEN` | Set to `1` to not auto-open the browser | *(unset)* |

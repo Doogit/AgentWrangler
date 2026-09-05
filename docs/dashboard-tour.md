@@ -80,7 +80,7 @@ The detector families:
 
 | Detector | Watches for |
 |---|---|
-| Cache misses | Broken prompt-cache reuse — flagged as the highest-leverage lever (~10× the impact of memory trims) |
+| Cache misses | Broken prompt-cache reuse — flagged as the biggest single lever (~10× the impact of memory trims) |
 | Session hygiene | Long sessions never `/clear`ed, mid-task compactions |
 | Retry / redundant-read | Loops re-reading the same files or repeating failing calls |
 | Tool-result bloat | Oversized tool outputs re-read every turn |
@@ -130,7 +130,7 @@ per-workspace scope selector; and **Copy as Markdown** for standups.
 
 ![Glossary — how to read this dashboard](assets/glossary.png)
 
-Plain-language definitions for every load-bearing metric, rendered with the same chip
+Plain-language definitions for every key metric, rendered with the same chip
 components the rest of the UI uses:
 
 - **Honesty tiers** — `EXACT` (counted), `LIST_EQUIV` (list-price equivalent), `MODELED`,
