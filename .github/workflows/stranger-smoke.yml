@@ -1,6 +1,7 @@
 name: stranger-smoke
 
-# Follows the README Quick Start verbatim on a machine that has never seen the repo,
+# Follows the from-source install path (docs/getting-started.md) verbatim on a machine
+# that has never seen the repo,
 # on Linux and macOS. Proves the curated tree clones-and-runs (OS2 acceptance) and that
 # the daemon binds loopback and serves the dashboard. The macOS job additionally seeds a
 # fake Claude Code Keychain entry so the darwin credential-read path (NU6) is exercised.
@@ -37,7 +38,7 @@ jobs:
             -w '{"claudeAiOauth":{"accessToken":"fake-smoke-token"}}' \
             "$HOME/Library/Keychains/login.keychain-db" || true
 
-      # README Quick Start, verbatim.
+      # From-source install path (docs/getting-started.md), verbatim.
       - name: npm ci
         run: npm ci
 

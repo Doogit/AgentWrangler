@@ -11,6 +11,9 @@ overview, recommendations, sessions, workspaces, settings), `detector/`, `eviden
 
 | Path | Purpose |
 |---|---|
+| `docs/getting-started.md` | Install paths, optional setup, configuration, troubleshooting |
+| `docs/dashboard-tour.md` | Every dashboard tab in depth + metric vocabulary |
+| `docs/privacy.md` | Privacy model — what's stored, what never is, opt-in exceptions |
 | `docs/adr/` | Accepted architecture decisions (stack, parser, live-tail, outcome linkage, attribution, forecasting) |
 | `docs/planning/AgentWrangler_PRD_v0_7_0.md` | Product requirements |
 | `docs/planning/AgentWrangler_Technical_Architecture_v4_5_0.md` | Architecture |
