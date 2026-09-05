@@ -12,6 +12,11 @@
   "engines": {
     "node": ">=22 <25"
   },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "esbuild": true,
+    "@biomejs/biome": true
+  },
   "scripts": {
     "lint": "biome check src test",
     "typecheck": "tsc --noEmit --project tsconfig.node.json && tsc --noEmit --project tsconfig.ui.json",
