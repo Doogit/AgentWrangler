@@ -1,0 +1,61 @@
+name: publish-next
+
+# Publish an npm PRERELEASE to the `next` dist-tag on every merge to main.
+# The `latest` tag is never touched here — it moves only on a GitHub Release (publish.yml).
+#
+# Uses Trusted Publishing (OIDC): no token secret, provenance is attached automatically.
+# Configure Trusted Publishing for THIS workflow filename on npmjs.com (package → Settings →
+# Trusted Publisher) — it is keyed by filename, so publish-next.yml needs its own entry
+# separate from publish.yml. Until that exists the publish step fails with a 4xx.
+# Do NOT pass --provenance manually — it is automatic under Trusted Publishing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One publish per merge; a newer push supersedes an in-flight run.
+concurrency:
+  group: publish-next
+  cancel-in-progress: true
+
+jobs:
+  publish-next:
+    # Never run on forks — OIDC + publish only make sense on the canonical repo.
+    if: github.repository == 'Doogit/AgentWrangler'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+
+      # OIDC Trusted Publishing requires npm >= 11.5.0; Node 22 ships an older npm.
+      - name: Upgrade npm (OIDC support)
+        run: npm install -g npm@latest
+
+      # Prerelease version: strip any prerelease suffix, bump patch so `next` sorts ABOVE
+      # `latest`, append the short SHA for uniqueness (npm rejects re-publishing a version).
+      # Set in-job only — the tarball carries it; the tracked package.json is NOT committed.
+      - name: Compute prerelease version
+        run: |
+          BASE="$(node -p "require('./package.json').version.split('-')[0]")"
+          NEXTV="$(node -e "const v=process.argv[1].split('.'); v[2]=String(+v[2]+1); console.log(v.join('.'))" "$BASE")"
+          PRE="${NEXTV}-next.$(git rev-parse --short HEAD)"
+          echo "Publishing prerelease version: $PRE"
+          npm pkg set version="$PRE"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # prepublishOnly runs build + test (a red test blocks the publish); --tag next keeps
+      # `latest` untouched; publish uses the OIDC credential.
+      - name: Publish prerelease to npm (next)
+        run: npm publish --tag next
