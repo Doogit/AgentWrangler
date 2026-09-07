@@ -34,6 +34,8 @@ const V2_TABLES = [
   "tool_event_metadata",
   "analysis_runs",
   "ingest_quarantine",
+  "ingest_metric_events",
+  "ingest_metric_baselines",
   "ingest_offsets",
   "schema_migrations",
   "user_config",
@@ -87,7 +89,7 @@ describe("runMigrations", () => {
       expect(rows.length).toBe(applied.length);
       // The first migration must be 001_observe.
       expect(rows[0]?.version).toBe("001_observe");
-      expect(rows.at(-1)?.version).toBe("016_ingest_offset_file_version");
+      expect(rows.at(-1)?.version).toBe("017_ingest_metric_events");
     } finally {
       db.close();
     }
@@ -136,7 +138,10 @@ describe("runMigrations", () => {
          VALUES (?, ?, ?, ?)`,
       ).run("C:/synthetic/session.jsonl", 1234, "old-head-hash", "2026-01-01T00:00:00.000Z");
 
-      expect(runMigrations(db)).toEqual(["016_ingest_offset_file_version"]);
+      expect(runMigrations(db)).toEqual([
+        "016_ingest_offset_file_version",
+        "017_ingest_metric_events",
+      ]);
       const row = db
         .prepare(
           `SELECT byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms

@@ -61,6 +61,7 @@ async function fixture(
     "014_session_churn",
     "015_gap_aggregates",
     "016_ingest_offset_file_version",
+    "017_ingest_metric_events",
   ]) {
     db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(version);
   }

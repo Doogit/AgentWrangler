@@ -127,6 +127,8 @@ if (isSmoke) {
     "apply_jobs",
     "analysis_runs",
     "ingest_quarantine",
+    "ingest_metric_events",
+    "ingest_metric_baselines",
     "ingest_offsets",
     "schema_migrations",
     "user_config",
