@@ -30,15 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # NOTE: do NOT set `registry-url` here. It makes setup-node write
-      # `_authToken=${NODE_AUTH_TOKEN}` into .npmrc; with no token set that expands
-      # to empty, npm assumes auth is configured, and it never starts the OIDC
-      # exchange → publish 404s ("do not have permission"). npm defaults to
-      # registry.npmjs.org regardless. Refs: actions/setup-node#1551, npm/documentation#1960.
+      # setup-node@v6 (NOT v4): v4 exports a default NODE_AUTH_TOKEN (the runner GITHUB_TOKEN)
+      # and points npm at $NPM_CONFIG_USERCONFIG ($RUNNER_TEMP/.npmrc), so npm sees auth as
+      # "configured but failing" and skips the OIDC exchange entirely → ENEEDAUTH. v6 only
+      # exports NODE_AUTH_TOKEN when one is explicitly provided, so registry-url is safe and
+      # gives npm the explicit registry directive OIDC needs. Do NOT set NODE_AUTH_TOKEN.
+      # Refs: actions/setup-node#1440, #1551; npm/documentation#1960.
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
+          registry-url: "https://registry.npmjs.org"
           cache: "npm"
 
       # Prerelease version: strip any prerelease suffix, bump patch so `next` sorts ABOVE
@@ -71,6 +73,10 @@ jobs:
           npm install -g npm@latest
           echo "node $(node -v) / npm $(npm -v)"
           node -e "const v=require('child_process').execSync('npm -v').toString().trim();const [x,y]=v.split('.').map(Number);if(x<11||(x===11&&y<5)){console.error('npm '+v+' < 11.5.1 — tokenless OIDC unavailable; publish would fail with ENEEDAUTH');process.exit(1);}"
-          echo '--- ~/.npmrc (must have NO _authToken line for OIDC) ---'
-          cat ~/.npmrc 2>/dev/null || echo '(no ~/.npmrc — good)'
+          echo "--- npm user config (the file npm actually reads: \$NPM_CONFIG_USERCONFIG) ---"
+          echo "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG:-<unset, npm uses ~/.npmrc>}"
+          cat "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}" 2>/dev/null || echo '(no user npmrc — good)'
+          echo "NODE_AUTH_TOKEN=${NODE_AUTH_TOKEN:+(set — will block OIDC)}"
+          # OIDC needs the runner id-token endpoint; absent => org policy blocks id-token
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL}" ]; then echo 'OIDC token endpoint: present'; else echo 'OIDC token endpoint: ABSENT — org/repo Actions policy is suppressing id-token'; fi
           npm publish --tag next
