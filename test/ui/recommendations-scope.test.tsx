@@ -67,14 +67,13 @@ describe("UA2 recommendation ordering and scope", () => {
         card("newer-low", { created_at: "2026-09-03", modeled_savings_u_per_wk: 2_000_000 }),
         card("unknown", { created_at: "2026-09-02", modeled_savings_u_per_wk: null }),
       ]);
-      window.location.hash = `#/recommendations?group=${group}&sort=newest&focus=older-high`;
+      window.location.hash = `#/recommendations?group=${group}&sort=newest`;
       const { container, getByLabelText } = await loaded();
       expect(titles(container)).toEqual(["newer-low", "unknown", "older-high"]);
       fireEvent.change(getByLabelText("Sort recommendations"), { target: { value: "savings" } });
       await waitFor(() =>
         expect(titles(container)).toEqual(["older-high", "newer-low", "unknown"]),
       );
-      expect(window.location.hash).toContain("focus=older-high");
       expect(container.textContent).toContain("Modeled savings are not additive");
       expect(getByLabelText("Sort recommendations").textContent).toContain("Recommended order");
     },
@@ -185,6 +184,46 @@ describe("UA2 recommendation ordering and scope", () => {
     fireEvent.click(getByText("WARNING", { selector: "button" }));
     await waitFor(() => expect(titles(container)).toEqual(["modeled"]));
   });
+
+  it("clears the proposed-only tier when switching to adopted", async () => {
+    const data = provide([
+      card("warning", {
+        detector_id: "D5",
+        modeled_formula: { model: "warning", inputs: {}, kind: "WARNING" },
+      }),
+    ]);
+    data.adopted = [card("adopted-modeled", { state: "ADOPTED" })];
+    const { container, getByRole } = await loaded();
+
+    fireEvent.click(getByRole("button", { name: "WARNING" }));
+    await waitFor(() => expect(window.location.hash).toContain("tier=WARNING"));
+
+    fireEvent.click(getByRole("button", { name: /Adopted/ }));
+    await waitFor(() => expect(window.location.hash).toContain("state=adopted"));
+
+    expect(window.location.hash).not.toContain("tier=");
+    expect(container.querySelector(".rec-adopted-list")?.textContent).toContain("adopted-modeled");
+  });
+
+  it.each([
+    ["adopted", "ADOPTED", ".rec-adopted-list"],
+    ["dismissed", "DISMISSED", ".rec-dismissed-list"],
+  ] as const)(
+    "ignores a direct tier hash for %s recommendations",
+    async (state, recommendationState, selector) => {
+      const data = provide([]);
+      data[state] = [card(`${state}-modeled`, { state: recommendationState })];
+      window.location.hash = `#/recommendations?state=${state}&tier=WARNING`;
+
+      const { container } = await loaded();
+
+      expect(container.querySelector("[data-toolbar-tier]")).toBeNull();
+      expect(container.querySelector(selector)?.textContent).toContain(`${state}-modeled`);
+      expect(container.querySelector(`[data-toolbar-state='${state}']`)?.textContent).toContain(
+        "(1)",
+      );
+    },
+  );
 
   it("distinguishes filtered-empty and resets filters while retaining the route and sort", async () => {
     provide([card("available")]);

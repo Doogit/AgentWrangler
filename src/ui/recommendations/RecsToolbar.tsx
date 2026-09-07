@@ -125,10 +125,11 @@ function countVisible(
   view: RecommendationsView,
   params: ToolbarParams,
 ): { proposed: number; adopted: number; dismissed: number } {
+  const lifecycleParams = { ...params, tier: null };
   return {
     proposed: filterRecommendations([...view.active, ...view.limit_warnings], params).length,
-    adopted: filterRecommendations(view.adopted, params).length,
-    dismissed: filterRecommendations(view.dismissed, params).length,
+    adopted: filterRecommendations(view.adopted, lifecycleParams).length,
+    dismissed: filterRecommendations(view.dismissed, lifecycleParams).length,
   };
 }
 
@@ -142,6 +143,14 @@ export default function RecsToolbar({ view, params }: RecsToolbarProps) {
 
   function toggle(key: string, value: string, currentValue: string | null) {
     setToolbarParam(key, currentValue === value ? null : value);
+  }
+
+  function selectLifecycle(value: LifecycleState) {
+    // Confidence tier applies only to proposed findings. Clear it before
+    // changing views so adopted/dismissed results are never filtered by a
+    // control that is no longer shown.
+    if (value !== "proposed") setToolbarParam("tier", null);
+    toggle("state", value, params.state);
   }
 
   return (
@@ -165,7 +174,7 @@ export default function RecsToolbar({ view, params }: RecsToolbarProps) {
               className={`recs-chip recs-chip--lifecycle${active ? " recs-chip--active" : ""}`}
               aria-pressed={active}
               data-toolbar-state={value}
-              onClick={() => toggle("state", value, params.state)}
+              onClick={() => selectLifecycle(value)}
             >
               {label} <span className="recs-chip-count">({count})</span>
             </button>

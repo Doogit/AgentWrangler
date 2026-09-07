@@ -295,8 +295,11 @@ export default function RecommendationsPage() {
 
   const view = state.status === "ok" ? state.value.data : null;
   const visibleWarnings = applyFilters(view?.limit_warnings ?? [], toolbarParams);
-  const visibleAdopted = applyFilters(view?.adopted ?? [], toolbarParams);
-  const visibleDismissed = applyFilters(view?.dismissed ?? [], toolbarParams);
+  // Confidence tier is a proposed-finding filter. Ignore a stale/manual tier
+  // hash parameter for lifecycle lists where that control is not available.
+  const lifecycleFilterParams = { ...toolbarParams, tier: null };
+  const visibleAdopted = applyFilters(view?.adopted ?? [], lifecycleFilterParams);
+  const visibleDismissed = applyFilters(view?.dismissed ?? [], lifecycleFilterParams);
   const hasFilters =
     toolbarParams.scope !== null || toolbarParams.ws !== null || toolbarParams.tier !== null;
   const resetFilters = () => {
@@ -384,9 +387,14 @@ export default function RecommendationsPage() {
               const visibleGroups = toolbarGroups(view, toolbarParams);
               // Put one applicable recommendation first so its action and tracking gate are
               // immediately available. Its siblings remain in their original family and order.
-              const selectedRec = visibleGroups
-                .flatMap((group) => group.recs)
-                .find((rec) => rec.detector_id !== "D5");
+              const visibleRecs = visibleGroups.flatMap((group) => group.recs);
+              // A valid deep link must remain visible: if its target would otherwise be
+              // nested in the closed remaining queue, promote it to the action card.
+              const selectedRec =
+                (focusRecId === null
+                  ? undefined
+                  : visibleRecs.find((rec) => rec.rec_id === focusRecId)) ??
+                visibleRecs.find((rec) => rec.detector_id !== "D5");
               const remainingGroups =
                 selectedRec === undefined
                   ? visibleGroups

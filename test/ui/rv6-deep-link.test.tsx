@@ -146,7 +146,7 @@ describe("VerdictBand — RV6 deep link", () => {
 // RecommendationsPage — focus handling
 // ---------------------------------------------------------------------------
 describe("RecommendationsPage — RV6 focus handling", () => {
-  it("lands on the expanded, highlighted card inside a detector group", async () => {
+  it("lands on the expanded, highlighted focused card", async () => {
     const response = mockRecommendations();
     if (response.data === null) throw new Error("expected recommendations fixture data");
     const recA = makeD1Rec({ rec_id: "rec-D1-a", title: "Trim A" });
@@ -171,10 +171,13 @@ describe("RecommendationsPage — RV6 focus handling", () => {
       expect(container.querySelector("[data-detector-id='D1']")).not.toBeNull();
     });
 
-    // Group card is highlighted with a dismissible banner.
-    const groupCard = container.querySelector("[data-detector-id='D1']");
-    expect(groupCard?.className).toContain("rec-focus-highlight");
+    // The focused member is promoted out of the closed remaining queue, so it
+    // can be scrolled to and read immediately.
+    const focusedCard = container.querySelector(".rec-focus-highlight");
+    expect(focusedCard?.closest(".recs-remaining-queue")).toBeNull();
+    expect(container.querySelector<HTMLDetailsElement>(".recs-remaining-queue")?.open).toBe(false);
     expect(container.querySelector(".rec-focus-banner")).not.toBeNull();
+    expect(window.location.hash).toContain("focus=rec-D1-b");
 
     // Exactly the focused member is auto-expanded.
     const expandedButtons = container.querySelectorAll(
