@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { fetchGlobalOverview, isDaemonUnreachableError } from "./api/client";
-import BriefsPage from "./briefs/BriefsPage";
-import GlossaryPage from "./glossary/GlossaryPage";
 import Sidebar from "./nav/Sidebar";
-import OverviewPage from "./overview/OverviewPage";
-import RecommendationsPage from "./recommendations/RecommendationsPage";
-import HotSessionsPage from "./sessions/HotSessionsPage.js";
-import SessionDetailPage from "./sessions/SessionDetailPage";
-import SettingsPage from "./settings/SettingsPage";
-import WorkspaceDetailPage from "./workspaces/WorkspaceDetailPage";
-import WorkspacesPage from "./workspaces/WorkspacesPage";
+import LoadBoundary from "./shell/LoadBoundary";
+
+const BriefsPage = lazy(() => import("./briefs/BriefsPage"));
+const GlossaryPage = lazy(() => import("./glossary/GlossaryPage"));
+const OverviewPage = lazy(() => import("./overview/OverviewPage"));
+const RecommendationsPage = lazy(() => import("./recommendations/RecommendationsPage"));
+const HotSessionsPage = lazy(() => import("./sessions/HotSessionsPage.js"));
+const SessionDetailPage = lazy(() => import("./sessions/SessionDetailPage"));
+const SettingsPage = lazy(() => import("./settings/SettingsPage"));
+const WorkspaceDetailPage = lazy(() => import("./workspaces/WorkspaceDetailPage"));
+const WorkspacesPage = lazy(() => import("./workspaces/WorkspacesPage"));
 
 export type AppRoute =
   | "overview"
@@ -181,19 +183,21 @@ export default function App() {
     <div className="shell">
       <Sidebar active={sidebarActive} onNavigate={navigate} />
       <div className="main-content">
-        {route === "overview" && <OverviewPage onSelectSession={openSession} />}
-        {route === "briefs" && <BriefsPage />}
-        {route === "recommendations" && <RecommendationsPage />}
-        {route === "settings" && <SettingsPage />}
-        {route === "workspaces" && <WorkspacesPage />}
-        {route === "sessions" && <HotSessionsPage onSelectSession={openSession} />}
-        {route === "glossary" && <GlossaryPage />}
-        {route === "session-detail" && sessionId !== null && (
-          <SessionDetailPage sessionId={sessionId} onBack={closeSession} />
-        )}
-        {route === "workspace-detail" && workspaceId !== null && (
-          <WorkspaceDetailPage workspaceId={workspaceId} onBack={closeSession} />
-        )}
+        <LoadBoundary key={route} label="page">
+          {route === "overview" && <OverviewPage onSelectSession={openSession} />}
+          {route === "briefs" && <BriefsPage />}
+          {route === "recommendations" && <RecommendationsPage />}
+          {route === "settings" && <SettingsPage />}
+          {route === "workspaces" && <WorkspacesPage />}
+          {route === "sessions" && <HotSessionsPage onSelectSession={openSession} />}
+          {route === "glossary" && <GlossaryPage />}
+          {route === "session-detail" && sessionId !== null && (
+            <SessionDetailPage sessionId={sessionId} onBack={closeSession} />
+          )}
+          {route === "workspace-detail" && workspaceId !== null && (
+            <WorkspaceDetailPage workspaceId={workspaceId} onBack={closeSession} />
+          )}
+        </LoadBoundary>
       </div>
     </div>
   );

@@ -16,7 +16,7 @@
  *   context/turn  → OBS_PROXY (cyan)    — visually distinct from LIST_EQUIV
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { lazy, useCallback, useEffect, useState } from "react";
 import type { BurnStatus } from "../../query/api/burn-status";
 import type { HookConfigResponse } from "../../query/api/hook-config";
 import type {
@@ -56,15 +56,16 @@ import type { DaemonStatus } from "../api/client";
 import { useForegroundPoll } from "../lib/use-foreground-poll";
 import Chip from "../shell/Chip";
 import ChipLegend from "../shell/ChipLegend";
+import DeferredChart from "../shell/DeferredChart";
 import { SkeletonKpi, SkeletonRow } from "../shell/Skeleton";
 import BurnForecastCard from "./BurnForecastCard";
 import CacheEfficiencyKPI from "./CacheEfficiencyKPI";
-import CacheWriteSpikesChart from "./CacheWriteSpikesChart";
-import FlavorDecomposition from "./FlavorDecomposition";
+const CacheWriteSpikesChart = lazy(() => import("./CacheWriteSpikesChart"));
+const FlavorDecomposition = lazy(() => import("./FlavorDecomposition"));
 import HookTile from "./HookTile";
 import LiveStrip from "./LiveStrip";
 import RateLimitGauges from "./RateLimitGauges";
-import TrendChart from "./TrendChart";
+const TrendChart = lazy(() => import("./TrendChart"));
 import VerdictBand, { DeltaBadge, TrendSparkline, windowDelta } from "./VerdictBand";
 import WorkspaceTable, { type TopRec } from "./WorkspaceTable";
 
@@ -1003,8 +1004,12 @@ export default function OverviewPage({
 
       {/* Spend-Viz-v2 — "Where your tokens go" section (taxonomy §4 Section 1.2) */}
       <CacheEfficiencyKPI state={cacheEffState} forecast={overviewData?.forecast ?? null} />
-      <FlavorDecomposition state={flavorState} />
-      <CacheWriteSpikesChart state={cacheWriteState} />
+      <DeferredChart label="token breakdown" ready={!isOverviewPending && !isLivePending}>
+        <FlavorDecomposition state={flavorState} />
+      </DeferredChart>
+      <DeferredChart label="cache writes chart" ready={!isOverviewPending && !isLivePending}>
+        <CacheWriteSpikesChart state={cacheWriteState} />
+      </DeferredChart>
 
       {/* Workspace table */}
       {isWorkspacesLoading ? (
@@ -1044,7 +1049,9 @@ export default function OverviewPage({
       )}
 
       {/* Spend-over-time trend chart */}
-      <TrendChart state={trendsState} />
+      <DeferredChart label="spend trends chart" ready={!isOverviewPending && !isLivePending}>
+        <TrendChart state={trendsState} />
+      </DeferredChart>
     </div>
   );
 }
