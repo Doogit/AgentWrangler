@@ -38,11 +38,15 @@ import { linkSessions } from "../outcomes/linker.js";
 import { syncAllWorkspaces } from "../outcomes/sync.js";
 import { generateWeeklyReport } from "../query/api/reports.js";
 import { setQueryDb } from "../query/db-context.js";
-import { setHealthInstance, setRuntimeResetHook } from "../query/settings-store.js";
+import {
+  getSettingsData,
+  setHealthInstance,
+  setRuntimeResetHook,
+} from "../query/settings-store.js";
 import { loadConfig } from "./config.js";
 import { createServer } from "./http.js";
 import { type OutcomesPassResult, createOutcomesPassRunner } from "./outcomes-pass.js";
-import { setReady } from "./readiness.js";
+import { setReady, setScanRoots, setScanState } from "./readiness.js";
 
 const VERSION = "0.1.0";
 
@@ -240,7 +244,9 @@ function kickBootScan(): void {
 
 async function runBootScan(): Promise<void> {
   try {
-    const ingestor = new Ingestor(db, config.scanRoots, {
+    const scanRoots = getSettingsData(db).scan_roots;
+    setScanRoots(scanRoots);
+    const ingestor = new Ingestor(db, scanRoots, {
       onNewMappings: (count) => {
         console.log(`Discovery mapped ${count} new repo(s) — scheduling outcomes pass`);
         runOutcomesPass().catch((e) => {
@@ -252,11 +258,13 @@ async function runBootScan(): Promise<void> {
     });
     setHealthInstance(ingestor.health);
     handle = await ingestor.startTailBatched();
+    setScanState("complete");
     setRuntimeResetHook(() => ingestor.clearRuntimeState());
     console.log(
       `Ingestion: initial scan complete — health ${JSON.stringify(ingestor.healthSnapshot())}`,
     );
   } catch (e) {
+    setScanState("failed");
     console.error(
       `Ingestion failed to start — serving dashboard in degraded mode: ${e instanceof Error ? e.message : String(e)}`,
     );

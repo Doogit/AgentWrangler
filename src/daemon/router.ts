@@ -67,7 +67,7 @@ import {
 import { getFlavorDecomposition } from "../query/api/spend-flavor.js";
 import { type BucketSize, getCacheWriteTrend, getTrends } from "../query/api/trends.js";
 import { getSettingsData } from "../query/settings-store.js";
-import { isReady } from "./readiness.js";
+import { getScanStatus, isReady } from "./readiness.js";
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -879,6 +879,8 @@ export function handleApiRequest(
         sessions,
         files_seen: parser_health.files_seen,
         files_parsed: parser_health.files_parsed,
+        lines_quarantined: parser_health.lines_quarantined,
+        ...getScanStatus(),
       });
       return;
     }

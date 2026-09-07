@@ -103,7 +103,7 @@ describe("hot sessions page", () => {
     const observe = screen.getByText("Observe");
     const configure = screen.getByText("Configure");
     const sessions = screen.getByRole("button", { name: "Sessions" });
-    const children = Array.from(navigation.children);
+    const children = Array.from(navigation.querySelectorAll(".navgroup, .nav-btn"));
 
     expect(children.indexOf(sessions)).toBeGreaterThan(children.indexOf(observe));
     expect(children.indexOf(sessions)).toBeLessThan(children.indexOf(configure));

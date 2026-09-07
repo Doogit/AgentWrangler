@@ -29,7 +29,14 @@ import {
   type ReconcileOptions,
   reconcileSessions,
 } from "./reconcile.js";
-import { loadOffset, saveOffset, tailFile } from "./tail.js";
+import {
+  type FileVersion,
+  fileVersion,
+  loadOffset,
+  sameFileVersion,
+  saveOffset,
+  tailFile,
+} from "./tail.js";
 import type { HealthCounters, TurnProjection } from "./types.js";
 import { LONG_GAP_THRESHOLD_S } from "./types.js";
 import {
@@ -77,7 +84,7 @@ export class Ingestor {
   private readonly countedResults = new Set<string>(); // toolUseIds already summed
   private readonly resultBytesByMsg = new Map<string, number>(); // messageId → running byte sum
   private readonly lineCursor = new Map<string, number>(); // filePath → complete lines consumed
-  private readonly lastSize = new Map<string, number>(); // filePath → last-seen size (skip unchanged files)
+  private readonly lastVersion = new Map<string, FileVersion>(); // filePath → last-seen version
   private readonly discoveryCache = createDiscoveryCache();
   private readonly unresolvedRemotes = new Set<string>();
   private readonly userTurnTsBySession = new Map<string, number[]>(); // sessionId → epoch-ms of user turns
@@ -310,7 +317,7 @@ export class Ingestor {
     this.countedResults.clear();
     this.resultBytesByMsg.clear();
     this.lineCursor.clear();
-    this.lastSize.clear();
+    this.lastVersion.clear();
     this.unresolvedRemotes.clear();
     this.userTurnTsBySession.clear();
   }
@@ -359,31 +366,39 @@ export class Ingestor {
 
   /** Tail one file from its stored offset and ingest the complete new lines. */
   ingestFile(filePath: string, projectSlug: string): void {
-    // Cheap size guard: transcripts are append-only, so an unchanged file size
-    // means zero new complete lines. Skip it before touching the DB — this keeps
-    // the 2s tail tick from doing ~4,700 sqlite writes across ~2,352 idle files
+    // Skip only when size, identity, and timestamps all match. This keeps the
+    // 2s tail tick from touching the DB for idle files while still noticing
+    // same-size rewrites and path replacement.
     // every tick, which was starving the daemon's event loop (outcomes pass).
     // Keep the per-file stat: directory mtimes only decide when to refresh paths;
     // they cannot safely replace append/rotation change detection for each file.
-    let curSize: number;
+    let currentVersion: FileVersion;
     try {
-      curSize = fs.statSync(filePath).size;
+      currentVersion = fileVersion(fs.statSync(filePath));
     } catch {
       return; // file vanished between discovery and tail; nothing to ingest
     }
-    if (this.lastSize.get(filePath) === curSize) return; // unchanged since last tick — no new bytes
-    this.lastSize.set(filePath, curSize);
+    const previousVersion = this.lastVersion.get(filePath);
+    if (previousVersion !== undefined && sameFileVersion(previousVersion, currentVersion)) return;
+    this.lastVersion.set(filePath, currentVersion);
 
     this.health.fileSeen();
     registerWorkspace(this.db, projectSlug);
 
     const stored = loadOffset(this.db, filePath);
-    const result = tailFile(filePath, stored);
+    const result = tailFile(filePath, stored, currentVersion);
     if (result.wasReset) this.lineCursor.set(filePath, 0);
 
     if (result.lines.length === 0) {
-      // Still persist head-hash/offset so first-touch rotation detection is armed.
-      saveOffset(this.db, filePath, result.newOffset, result.newHeadHash);
+      if (
+        stored === null ||
+        stored.offset !== result.newOffset ||
+        stored.headHash !== result.newHeadHash ||
+        stored.fileVersion === null ||
+        !sameFileVersion(stored.fileVersion, currentVersion)
+      ) {
+        saveOffset(this.db, filePath, result.newOffset, result.newHeadHash, currentVersion);
+      }
       return;
     }
 
@@ -400,7 +415,7 @@ export class Ingestor {
     tx();
 
     this.lineCursor.set(filePath, base + result.lines.length);
-    saveOffset(this.db, filePath, result.newOffset, result.newHeadHash);
+    saveOffset(this.db, filePath, result.newOffset, result.newHeadHash, currentVersion);
     this.health.fileParsed();
   }
 

@@ -14,12 +14,18 @@
  *   3. Verified: no permissive CORS headers emitted.
  */
 
+import * as fs from "node:fs";
 import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
 import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "../../src/daemon/http.js";
+import { setScanRoots, setScanState } from "../../src/daemon/readiness.js";
 import { runMigrations } from "../../src/db/migrate.js";
+import { Health } from "../../src/ingest/health.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { clearHealthInstance, setHealthInstance } from "../../src/query/settings-store.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -377,5 +383,51 @@ describe("No permissive CORS headers", () => {
       body: WRITE_BODY,
     });
     expect(r.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+});
+
+describe("GET /api/status scan diagnostics", () => {
+  let root: string;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "aw-scan-status-"));
+  });
+  afterEach(() => {
+    setScanRoots([]);
+    setScanState("scanning");
+    clearHealthInstance();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  it.each(["scanning", "complete", "failed"] as const)(
+    "reports %s without conflating empty scans",
+    async (scan) => {
+      setScanState(scan);
+      setScanRoots([root]);
+      const response = await makeRequest(port, { path: "/api/status" });
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body)).toMatchObject({
+        scan_state: scan,
+        sessions: 0,
+        invalid_scan_root_count: 0,
+      });
+    },
+  );
+  it("exposes invalid-root and parse counts without local paths or errors", async () => {
+    const file = path.join(root, "not-a-directory");
+    fs.writeFileSync(file, "synthetic");
+    const roots = [root, file, path.join(root, "missing")];
+    setScanRoots(roots);
+    roots.length = 0;
+    const health = new Health();
+    health.quarantined();
+    health.fileSeen();
+    setHealthInstance(health);
+    const response = await makeRequest(port, { path: "/api/status" });
+    expect(JSON.parse(response.body)).toMatchObject({
+      invalid_scan_root_count: 2,
+      lines_quarantined: 1,
+      files_seen: 1,
+    });
+    expect(response.body).not.toContain(root);
+    expect(response.body).not.toContain("ENOENT");
   });
 });

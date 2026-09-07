@@ -53,6 +53,7 @@ import {
   getLastFetchTimestamp,
 } from "../api/client";
 import type { DaemonStatus } from "../api/client";
+import { useForegroundPoll } from "../lib/use-foreground-poll";
 import Chip from "../shell/Chip";
 import ChipLegend from "../shell/ChipLegend";
 import { SkeletonKpi, SkeletonRow } from "../shell/Skeleton";
@@ -99,15 +100,64 @@ function retainDataWhileRefreshing<T>(
   setState((current) => (current.status === "ok" ? current : { status: "loading" }));
 }
 
+function ScanStatus({ status }: { status: DaemonStatus }) {
+  if (status.scan_state === "failed") {
+    return (
+      <p role="alert">
+        Initial scan failed. Review <a href="#/settings?section=parser-health">parser health</a> and
+        restart the daemon.
+      </p>
+    );
+  }
+  if ((status.invalid_scan_root_count ?? 0) > 0) {
+    return (
+      <p role="alert">
+        {status.invalid_scan_root_count} scan root(s) are missing or unreadable. Review{" "}
+        <a href="#/settings?section=scan-roots">scan roots</a>, save corrections, and restart the
+        daemon.
+      </p>
+    );
+  }
+  if (status.scan_state === "scanning") {
+    return (
+      <p>
+        Scanning… {status.files_parsed} of {status.files_seen} files
+      </p>
+    );
+  }
+  if ((status.lines_quarantined ?? 0) > 0) {
+    return (
+      <p role="alert">
+        {status.lines_quarantined} transcript line(s) could not be parsed. Review{" "}
+        <a href="#/settings?section=parser-health">parser health</a>.
+      </p>
+    );
+  }
+  if (status.scan_state === "complete" && status.sessions === 0) {
+    return (
+      <p>
+        Scan complete — no readable sessions found. Run a Claude Code session or review{" "}
+        <a href="#/settings?section=scan-roots">scan roots</a>.
+      </p>
+    );
+  }
+  if (status.scan_state === undefined) {
+    return (
+      <p>
+        Scan completion status is unavailable. Restart with the updated daemon to see scan progress.
+      </p>
+    );
+  }
+  return null;
+}
+
 function FirstRunWelcome({
   status,
-  hasRecommendation,
   limitCalibrated,
   tokenConfigured,
   hookInstalled,
 }: {
   status: DaemonStatus;
-  hasRecommendation: boolean;
   limitCalibrated: boolean;
   tokenConfigured: boolean;
   hookInstalled: boolean;
@@ -116,7 +166,6 @@ function FirstRunWelcome({
   const steps = [
     { label: "Daemon running", complete: true },
     { label: "First session ingested", complete: sessionIngested },
-    { label: "First recommendation generated", complete: hasRecommendation },
   ];
   const completeCount = steps.filter((step) => step.complete).length;
 
@@ -127,15 +176,15 @@ function FirstRunWelcome({
       key: "calibrate",
       show: !limitCalibrated,
       text: "Calibrate your weekly limit from usage so burn forecasts have a real ceiling to project against.",
-      href: "#/settings",
+      href: "#/settings?section=calibration",
       cta: "Calibrate in Settings →",
       testid: "first-run-calibrate",
     },
     {
       key: "token",
       show: !tokenConfigured,
-      text: "Set AW_GITHUB_TOKEN so outcomes sync can tell finished work from abandoned and feed the Success metric.",
-      href: "#/settings",
+      text: "Optionally install the gh CLI and set a read-only AW_GITHUB_TOKEN to cross-check local work with GitHub outcomes.",
+      href: "#/settings?section=outcomes-sync",
       cta: "Configure token in Settings →",
       testid: "first-run-token",
     },
@@ -143,7 +192,7 @@ function FirstRunWelcome({
       key: "hook",
       show: !hookInstalled,
       text: "Install the context-budget hook to get warned in-session before a costly auto-compact.",
-      href: "#/settings",
+      href: "#/settings?section=in-session-guards",
       cta: "Install in Settings →",
       testid: "first-run-hook",
     },
@@ -153,7 +202,7 @@ function FirstRunWelcome({
     <section className="settings-onboarding-card" aria-labelledby="first-run-welcome-title">
       <h2 id="first-run-welcome-title">Welcome to AgentWrangler</h2>
       <p>Turn local Claude Code activity into clear, actionable guidance.</p>
-      <p aria-label={`${completeCount} of 3 onboarding steps complete`}>{completeCount} of 3</p>
+      <p aria-label={`${completeCount} of 2 onboarding steps complete`}>{completeCount} of 2</p>
       <ol>
         {steps.map((step) => (
           <li key={step.label}>
@@ -168,9 +217,7 @@ function FirstRunWelcome({
           </li>
         ))}
       </ol>
-      <p>
-        ingesting… {status.files_parsed} of {status.files_seen} files
-      </p>
+      <ScanStatus status={status} />
       {activationItems.length > 0 && (
         <div className="first-run-activation" data-testid="first-run-activation">
           <h3 className="first-run-activation-title">Activate the rest</h3>
@@ -441,6 +488,8 @@ export default function OverviewPage({
     getLastFetchTimestamp("/api/live"),
   );
   // Burn status — live 5h/7d utilization (non-fatal on failure, non-blocking)
+  const [liveRefreshError, setLiveRefreshError] = useState<string | null>(null);
+  const [burnRefreshError, setBurnRefreshError] = useState(false);
   const [burnStatus, setBurnStatus] = useState<BurnStatus | null>(null);
   const [burnStatusLoading, setBurnStatusLoading] = useState(true);
   // Hook config — installed state (non-fatal on failure)
@@ -466,7 +515,7 @@ export default function OverviewPage({
     | { status: "ok"; value: ApiResponse<TrendData> }
   >({ status: "loading" });
   const [topRecommendation, setTopRecommendation] = useState<RecommendationCard | null>(null);
-  const [hasRecommendation, setHasRecommendation] = useState(false);
+  const [hasRecommendation, setHasRecommendation] = useState<boolean | null>(null);
   // Spend-Viz-v2 — separate LoadState per surface, all non-fatal
   const [flavorState, setFlavorState] = useState<LoadState<ApiResponse<FlavorDecompositionData>>>({
     status: "loading",
@@ -573,8 +622,9 @@ export default function OverviewPage({
         const active = v.data?.active ?? [];
         const d = v.data;
         setHasRecommendation(
-          d != null &&
-            d.active.length + d.limit_warnings.length + d.adopted.length + d.dismissed.length > 0,
+          d == null
+            ? null
+            : d.active.length + d.limit_warnings.length + d.adopted.length + d.dismissed.length > 0,
         );
         setTopRecommendation(
           active.reduce<RecommendationCard | null>(
@@ -604,7 +654,7 @@ export default function OverviewPage({
       .catch(() => {
         setTopRecByWorkspace(new Map());
         setTopRecommendation(null);
-        setHasRecommendation(false);
+        setHasRecommendation(null);
       });
   }, []);
 
@@ -612,51 +662,56 @@ export default function OverviewPage({
     loadMain(preset);
   }, [preset, loadMain]);
 
-  // Onboarding is resolved once per page mount. It must settle before the
-  // normal KPI branch can render, so first-run users never see it flash.
-  useEffect(() => {
-    let cancelled = false;
-
-    void Promise.resolve(fetchStatus())
-      .then((value) => {
-        if (cancelled) return;
-        if (value === undefined) {
-          setStatusState({ status: "error", message: "Status response was empty" });
-          return;
-        }
+  // Shares the foreground status request with Sidebar, including cancellation.
+  useForegroundPoll(
+    fetchStatus,
+    30_000,
+    (value) => {
+      if (value === undefined) {
+        setStatusState({ status: "error", message: "Status response was empty" });
+      } else {
         setStatusState({ status: "ok", value });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setStatusState({ status: "error", message: String(error) });
-      });
+      }
+    },
+    (error) => {
+      setStatusState((previous) =>
+        previous.status === "ok" ? previous : { status: "error", message: String(error) },
+      );
+    },
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  useForegroundPoll(
+    fetchLiveSessions,
+    30_000,
+    (value) => {
+      setLiveState({ status: "ok", value });
+      setLiveLastFetchedAt(getLastFetchTimestamp("/api/live"));
+      setLiveRefreshError(null);
+    },
+    (error) => {
+      setLiveRefreshError(String(error));
+      setLiveState((previous) =>
+        previous.status === "ok" ? previous : { status: "error", message: String(error) },
+      );
+    },
+  );
 
-  // Live strip — independent 30 s refresh cadence
+  useForegroundPoll(
+    fetchBurnStatus,
+    60_000,
+    (value) => {
+      setBurnStatus(value.data);
+      setBurnStatusLoading(false);
+      setBurnRefreshError(false);
+    },
+    () => {
+      setBurnStatusLoading(false);
+      setBurnRefreshError(true);
+    },
+  );
+
+  // Non-fatal configuration and hot-session reads on mount.
   useEffect(() => {
-    const doFetch = () => {
-      fetchLiveSessions()
-        .then((v) => {
-          setLiveState({ status: "ok", value: v });
-          setLiveLastFetchedAt(getLastFetchTimestamp("/api/live"));
-        })
-        .catch((e: unknown) => setLiveState({ status: "error", message: String(e) }));
-    };
-    doFetch();
-    const id = setInterval(doFetch, 30_000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Burn status, hook config, hot sessions — fetch once on mount (non-fatal each)
-  useEffect(() => {
-    fetchBurnStatus()
-      .then((v) => setBurnStatus(v.data))
-      .catch(() => setBurnStatus(null))
-      .finally(() => setBurnStatusLoading(false));
-
     fetchHookConfig()
       .then((v) => setHookConfig(v.data))
       .catch(() => setHookConfig(null))
@@ -792,7 +847,12 @@ export default function OverviewPage({
           marginBottom: 13,
         }}
       >
-        <RateLimitGauges burnStatus={burnStatus} isLoading={burnStatusLoading} />
+        <div>
+          <RateLimitGauges burnStatus={burnStatus} isLoading={burnStatusLoading} />
+          {burnRefreshError && (
+            <output>Burn status refresh failed; displayed data may be stale. Will retry.</output>
+          )}
+        </div>
         <HookTile hookConfig={hookConfig} isLoading={hookConfigLoading} />
         <div className="card" data-testid="hot-sessions-tile" style={{ padding: "14px 16px" }}>
           <div style={{ marginBottom: 10, fontWeight: 700, fontSize: 13, color: "var(--soft)" }}>
@@ -850,10 +910,22 @@ export default function OverviewPage({
       </div>
 
       {/* KPI grid — loading skeleton / error / data */}
+      {!isFirstRun && onboardingStatus !== null && <ScanStatus status={onboardingStatus} />}
+      {!isFirstRun &&
+        onboardingStatus?.scan_state === "complete" &&
+        (onboardingStatus?.sessions ?? 0) > 0 &&
+        (onboardingStatus?.lines_quarantined ?? 0) === 0 &&
+        (onboardingStatus?.invalid_scan_root_count ?? 0) === 0 &&
+        hasRecommendation === false && (
+          <p>
+            Setup complete — your history is ready and no recommendations were found.{" "}
+            <a href="#/sessions">Read an ingested session</a>; optional integrations are not
+            required.
+          </p>
+        )}
       {isFirstRun && onboardingStatus !== null && (
         <FirstRunWelcome
           status={onboardingStatus}
-          hasRecommendation={hasRecommendation}
           limitCalibrated={
             ((overviewData?.forecast as unknown as ForecastFromDbResult | undefined)?.state ??
               "OFF") !== "OFF"
@@ -917,7 +989,7 @@ export default function OverviewPage({
         sessions={liveSessions}
         isLoading={isLiveLoading}
         isPending={isLivePending}
-        error={liveError}
+        error={liveRefreshError ?? liveError}
         lastFetchedAt={liveLastFetchedAt}
         onSelectSession={onSelectSession}
       />

@@ -5,7 +5,7 @@
  * and the trigger-to-tooltip accessible description relationship.
  */
 
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import InfoTip from "../../src/ui/shell/InfoTip";
 
@@ -19,6 +19,24 @@ function renderInfoTip() {
 afterEach(cleanup);
 
 describe("InfoTip", () => {
+  it("stays open through the focus then click sequence of a tap", () => {
+    const { getByRole } = renderInfoTip();
+    const trigger = getByRole("button", { name: label });
+    fireEvent.focus(trigger);
+    fireEvent.click(trigger);
+    expect(getByRole("tooltip").textContent).toBe(content);
+  });
+  it("dismisses on a second tap while the trigger retains focus", () => {
+    const { getByRole, queryByRole } = renderInfoTip();
+    const trigger = getByRole("button", { name: label });
+    fireEvent.pointerDown(trigger);
+    act(() => trigger.focus());
+    fireEvent.click(trigger);
+    expect(getByRole("tooltip")).toBeTruthy();
+    fireEvent.pointerDown(trigger);
+    fireEvent.click(trigger);
+    expect(queryByRole("tooltip")).toBeNull();
+  });
   it("does not mount the tooltip content at rest", () => {
     const { container } = renderInfoTip();
 

@@ -104,6 +104,10 @@ export interface DaemonStatus {
   sessions: number;
   files_seen: number;
   files_parsed: number;
+  /** Optional when connected to an older daemon; missing does not mean scanning. */
+  scan_state?: "scanning" | "complete" | "failed";
+  lines_quarantined?: number;
+  invalid_scan_root_count?: number;
 }
 
 /**
@@ -145,6 +149,9 @@ export function isDaemonUnreachableError(error: unknown): error is DaemonUnreach
 async function daemonFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = globalThis.setTimeout(() => controller.abort(), DAEMON_REQUEST_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  init?.signal?.addEventListener("abort", abort, { once: true });
+  if (init?.signal?.aborted) controller.abort();
 
   try {
     return await fetch(input, { ...init, signal: controller.signal });
@@ -152,6 +159,7 @@ async function daemonFetch(input: RequestInfo | URL, init?: RequestInit): Promis
     throw new DaemonUnreachableError();
   } finally {
     globalThis.clearTimeout(timeoutId);
+    init?.signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -166,13 +174,19 @@ export async function fetchCachedJson<T>(
   endpoint: string,
   params?: unknown,
   requestEndpoint = endpoint,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const cached = getCachedResponse<T>(endpoint, params);
+  const networkOnly = ["/api/live", "/api/status", "/api/burn-status"].includes(endpoint);
+  const cached = networkOnly ? undefined : getCachedResponse<T>(endpoint, params);
   if (cached !== undefined) return cached;
 
-  const res = await daemonFetch(requestEndpoint);
+  const res = await daemonFetch(requestEndpoint, {
+    signal: signal ?? null,
+    ...(networkOnly ? { cache: "no-store" as const } : {}),
+  });
   if (!res.ok) throw new Error(`${requestEndpoint} returned ${res.status}`);
   const data = (await res.json()) as T;
+  signal?.throwIfAborted();
   responseCache.set(getResponseCacheKey(endpoint, params), { data, fetchedAt: Date.now() });
   return data;
 }
@@ -227,11 +241,18 @@ export async function fetchWorkspaces(
  * Fetch live sessions for the live strip (poll every 30 s).
  * Endpoint: GET /api/live
  */
-export async function fetchLiveSessions(): Promise<ApiResponse<PagedList<LiveSessionRow>>> {
+export async function fetchLiveSessions(
+  signal?: AbortSignal,
+): Promise<ApiResponse<PagedList<LiveSessionRow>>> {
   if (USE_MOCK) {
     return Promise.resolve(mockLiveSessions());
   }
-  return fetchCachedJson<ApiResponse<PagedList<LiveSessionRow>>>("/api/live");
+  return fetchCachedJson<ApiResponse<PagedList<LiveSessionRow>>>(
+    "/api/live",
+    undefined,
+    undefined,
+    signal,
+  );
 }
 
 export async function fetchWorkspaceSessions(
@@ -347,10 +368,10 @@ export async function fetchSettings(): Promise<ApiResponse<Settings>> {
   return res.json() as Promise<ApiResponse<Settings>>;
 }
 
-/** Fetch aggregate first-run onboarding status. Endpoint: GET /api/status. */
-export async function fetchStatus(): Promise<DaemonStatus> {
+/** Fetch aggregate first-run status; foreground polling shares requests across views. */
+export async function fetchStatus(signal?: AbortSignal): Promise<DaemonStatus> {
   if (USE_MOCK) return Promise.resolve(mockStatus());
-  return fetchCachedJson<DaemonStatus>("/api/status");
+  return fetchCachedJson<DaemonStatus>("/api/status", undefined, undefined, signal);
 }
 
 /**
@@ -455,7 +476,9 @@ async function hookMutation(
     const text = await res.text();
     throw new Error(text || `${endpoint} returned ${res.status}`);
   }
-  return res.json() as Promise<HookInstallResult>;
+  const result = (await res.json()) as HookInstallResult;
+  window.dispatchEvent(new Event("agentwrangler:hooks-changed"));
+  return result;
 }
 
 /** Install the context-budget Claude Code hook into the user's settings. */
@@ -571,11 +594,9 @@ export async function fetchOAuthStatus(): Promise<OAuthStatus> {
  * Signed-out or unavailable → available:false + reason.
  * Endpoint: GET /api/burn-status
  */
-export async function fetchBurnStatus(): Promise<ApiResponse<BurnStatus>> {
+export async function fetchBurnStatus(signal?: AbortSignal): Promise<ApiResponse<BurnStatus>> {
   if (USE_MOCK) return Promise.resolve(mockBurnStatus());
-  const res = await daemonFetch("/api/burn-status");
-  if (!res.ok) throw new Error(`/api/burn-status returned ${res.status}`);
-  return res.json() as Promise<ApiResponse<BurnStatus>>;
+  return fetchCachedJson<ApiResponse<BurnStatus>>("/api/burn-status", undefined, undefined, signal);
 }
 
 /**

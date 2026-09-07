@@ -46,6 +46,10 @@ afterEach(() => {
 // BM1/BM2: PracticesSection and HeadroomSummary also need resolved defaults.
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
   vi.mocked(client.fetchLedger).mockResolvedValue(mockLedger());
   vi.mocked(client.fetchPractices).mockResolvedValue(mockPractices());
   vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
@@ -116,11 +120,19 @@ describe("RecCard — action buttons", () => {
     expect(onDismiss).toHaveBeenCalledWith("rec-test-1");
   });
 
-  it("Adopt button calls onAdopt with rec_id", () => {
+  it("requires manual completion attestation before tracking a copied action", async () => {
     vi.useFakeTimers();
     const onAdopt = vi.fn();
     const { getByRole } = render(<RecCard rec={makeRec()} onAdopt={onAdopt} />);
-    fireEvent.click(getByRole("button", { name: "Adopt" }));
+    expect(() => getByRole("button", { name: "Track this change" })).toThrow();
+    fireEvent.click(getByRole("button", { name: "Show guided prompt" }));
+    fireEvent.click(getByRole("button", { name: "Copy prompt" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getByRole("button", { name: "I completed the change" })).toBeTruthy();
+    fireEvent.click(getByRole("button", { name: "I completed the change" }));
+    fireEvent.click(getByRole("button", { name: "Track this change" }));
     expect(onAdopt).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(5_000));
     expect(onAdopt).toHaveBeenCalledWith("rec-test-1");
@@ -131,9 +143,9 @@ describe("RecCard — action buttons", () => {
     expect((getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("Adopt is disabled when no onAdopt prop is given", () => {
-    const { getByRole } = render(<RecCard rec={makeRec()} />);
-    expect((getByRole("button", { name: "Adopt" }) as HTMLButtonElement).disabled).toBe(true);
+  it("does not offer tracking until there is action evidence", () => {
+    const { queryByRole } = render(<RecCard rec={makeRec()} />);
+    expect(queryByRole("button", { name: "Track this change" })).toBeNull();
   });
 
   // O11 Option B (2026-09-04): the experimental action is now "Open in Claude
@@ -495,7 +507,9 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
   it("calls /api/recommendations/dismiss and re-fetches on success", async () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
 
-    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ token: "synthetic-token" }) });
     vi.stubGlobal("fetch", mockFetch);
 
     const { container } = render(<RecommendationsPage />);
@@ -529,7 +543,9 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
   it("calls /api/recommendations/adopt and re-fetches on success", async () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
 
-    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ token: "synthetic-token" }) });
     vi.stubGlobal("fetch", mockFetch);
 
     const { container } = render(<RecommendationsPage />);
@@ -540,7 +556,24 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     // Switch to fake timers for the deferred-commit window
     vi.useFakeTimers();
 
-    const adoptBtn = container.querySelector<HTMLButtonElement>(".rec-actions button:nth-child(2)");
+    const guidedToggle = container.querySelector<HTMLButtonElement>(".rec-guided-toggle");
+    if (!guidedToggle) throw new Error("guided prompt toggle not found");
+    fireEvent.click(guidedToggle);
+    const copyPrompt = container.querySelector<HTMLButtonElement>(".rec-prompt-artifact button");
+    if (!copyPrompt) throw new Error("copy prompt button not found");
+    fireEvent.click(copyPrompt);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("I completed the change");
+    const completionButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "I completed the change");
+    if (!completionButton) throw new Error("completion attestation not found");
+    fireEvent.click(completionButton);
+    const adoptBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "Track this change",
+    );
     if (!adoptBtn) throw new Error("adopt button not found");
     fireEvent.click(adoptBtn);
 
@@ -691,6 +724,83 @@ describe("RecCard — RV4 primary-action routing", () => {
     expect(btn.disabled).toBe(true);
   });
 
+  it("rechecks hook state on return, focus and settings changes", async () => {
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(true));
+    const first = render(<RecCard rec={makeRec()} />);
+    await first.findByRole("button", { name: "Installed ✓" });
+    first.unmount();
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
+    const next = render(<RecCard rec={makeRec()} />);
+    await next.findByRole("button", { name: "Install hook" });
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(true));
+    fireEvent(window, new Event("focus"));
+    await next.findByRole("button", { name: "Installed ✓" });
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
+    fireEvent(window, new Event("agentwrangler:hooks-changed"));
+    await next.findByRole("button", { name: "Install hook" });
+  });
+
+  it("does not treat failed status reads as not installed and permits retry", async () => {
+    vi.mocked(client.fetchHookConfig).mockRejectedValueOnce(new Error("status offline"));
+    const result = render(<RecCard rec={makeRec()} />);
+    expect((await result.findByRole("alert")).textContent).toContain("status offline");
+    expect(result.queryByRole("button", { name: "Install hook" })).toBeNull();
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
+    fireEvent.click(result.getByRole("button", { name: "Retry status check" }));
+    await result.findByRole("button", { name: "Install hook" });
+  });
+
+  it("shares an in-flight hook check and rechecks when the document becomes visible", async () => {
+    let resolveCheck: (value: ReturnType<typeof hookConfigResponse>) => void = () => {};
+    vi.mocked(client.fetchHookConfig).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCheck = resolve;
+      }),
+    );
+    const result = render(
+      <>
+        <RecCard rec={makeRec()} />
+        <RecCard rec={makeRec({ rec_id: "second-hook-card" })} />
+      </>,
+    );
+    await waitFor(() => expect(client.fetchHookConfig).toHaveBeenCalledTimes(1));
+    await act(async () => resolveCheck(hookConfigResponse(true)));
+    expect(result.getAllByRole("button", { name: "Installed ✓" })).toHaveLength(2);
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    fireEvent(document, new Event("visibilitychange"));
+    expect(client.fetchHookConfig).toHaveBeenCalledTimes(1);
+    hidden.mockReturnValue(false);
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() =>
+      expect(result.getAllByRole("button", { name: "Install hook" })).toHaveLength(2),
+    );
+    expect(client.fetchHookConfig).toHaveBeenCalledTimes(2);
+    hidden.mockRestore();
+  });
+
+  it("claims installation only after persistence succeeds and permits retry on failure", async () => {
+    vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
+    let rejectInstall: (reason: Error) => void = () => {};
+    vi.mocked(client.installHook).mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectInstall = reject;
+      }),
+    );
+    const result = render(<RecCard rec={makeRec()} />);
+    fireEvent.click(await result.findByRole("button", { name: "Install hook" }));
+    expect(result.getByRole("button", { name: "Installing…" }).hasAttribute("disabled")).toBe(true);
+    expect(result.queryByRole("button", { name: "Installed ✓" })).toBeNull();
+    await act(async () => rejectInstall(new Error("install failed")));
+    expect(result.getByRole("alert").textContent).toContain("install failed");
+    vi.mocked(client.installHook).mockResolvedValue({
+      changed: true,
+      settingsPath: "/synthetic/settings.json",
+    });
+    fireEvent.click(result.getByRole("button", { name: "Install hook" }));
+    await result.findByRole("button", { name: "Installed ✓" });
+  });
+
   it("behavioral group (D2) leads with Install hook", async () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
     const group = makeGroup({
@@ -708,7 +818,7 @@ describe("RecCard — RV4 primary-action routing", () => {
       <RecCard rec={makeRec({ detector_id: "D9", category: "SESSION_HYGIENE" })} />,
     );
     const link = getByRole("link", { name: "Review idle sessions" });
-    expect(link.getAttribute("href")).toBe("#/settings");
+    expect(link.getAttribute("href")).toBe("#/settings?section=idle-sessions");
     expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
   });
 
@@ -717,7 +827,7 @@ describe("RecCard — RV4 primary-action routing", () => {
       <RecCard rec={makeRec({ detector_id: "D5", category: "LIMIT" })} />,
     );
     const link = getByRole("link", { name: "Calibrate budget hook" });
-    expect(link.getAttribute("href")).toBe("#/settings");
+    expect(link.getAttribute("href")).toBe("#/settings?section=calibration");
     expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
   });
 });

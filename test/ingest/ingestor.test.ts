@@ -750,6 +750,39 @@ describe("tail size guard — unchanged files are skipped (event-loop de-jam)", 
     }
   });
 
+  it("does not rewrite an existing offset when a restarted ingestor finds an idle file", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-guard-restart-idle-"));
+    try {
+      const dir = path.join(tmp, "proj-restart-idle");
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, "s.jsonl");
+      fs.writeFileSync(
+        fp,
+        toJsonl([
+          assistant({
+            id: "idle-1",
+            session: "idle-s",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+
+      new Ingestor(db, [tmp], OPTS).ingestFile(fp, "proj-restart-idle");
+      const marker = "1999-12-31T23:59:59.000Z";
+      db.prepare("UPDATE ingest_offsets SET updated_at = ? WHERE file_path = ?").run(marker, fp);
+
+      new Ingestor(db, [tmp], OPTS).ingestFile(fp, "proj-restart-idle");
+      const offset = db
+        .prepare("SELECT updated_at FROM ingest_offsets WHERE file_path = ?")
+        .get(fp) as { updated_at: string };
+      expect(offset.updated_at).toBe(marker);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("re-processes an unchanged-on-disk file after clearRuntimeState (post-reset rescan)", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-guard-reset-"));
     try {
@@ -786,6 +819,112 @@ describe("tail size guard — unchanged files are skipped (event-loop de-jam)", 
         n: number;
       };
       expect(n.n).toBe(1);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("file-version tail reset", () => {
+  it("resets after a larger staged file is renamed over the tailed path", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-version-rename-"));
+    try {
+      const dir = path.join(tmp, "proj-rename");
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, "s.jsonl");
+      fs.writeFileSync(
+        fp,
+        toJsonl([
+          assistant({
+            id: "rename-old",
+            session: "rename-s",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+      const ing = new Ingestor(db, [tmp], OPTS);
+      ing.ingestFile(fp, "proj-rename");
+
+      const staged = path.join(dir, "replacement.jsonl");
+      fs.writeFileSync(
+        staged,
+        toJsonl([
+          assistant({
+            id: "rename-new-1",
+            session: "rename-s",
+            ts: "2026-01-03T00:01:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+          assistant({
+            id: "rename-new-2",
+            session: "rename-s",
+            ts: "2026-01-03T00:02:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+      fs.renameSync(staged, fp);
+      ing.ingestFile(fp, "proj-rename");
+
+      const ids = db
+        .prepare("SELECT message_id FROM turns WHERE session_id = ? ORDER BY message_id")
+        .all("rename-s") as Array<{ message_id: string }>;
+      expect(ids.map((row) => row.message_id)).toEqual([
+        "rename-new-1",
+        "rename-new-2",
+        "rename-old",
+      ]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("ingests equal-size same-prefix rewrites immediately and after restart", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-version-reset-"));
+    try {
+      const dir = path.join(tmp, "proj-version");
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, "s.jsonl");
+      const idPrefix = `version-${"x".repeat(300)}-`;
+      const write = (suffix: string) =>
+        fs.writeFileSync(
+          fp,
+          toJsonl([
+            assistant({
+              id: `${idPrefix}${suffix}`,
+              session: "version-s",
+              ts: "2026-01-03T00:00:00.000Z",
+              input: 100,
+              output: 10,
+            }),
+          ]),
+        );
+
+      write("old");
+      const first = new Ingestor(db, [tmp], OPTS);
+      first.ingestFile(fp, "proj-version");
+
+      write("new");
+      const immediateMtime = new Date(Date.now() + 2_000);
+      fs.utimesSync(fp, immediateMtime, immediateMtime);
+      first.ingestFile(fp, "proj-version");
+
+      write("two");
+      const restartMtime = new Date(Date.now() + 4_000);
+      fs.utimesSync(fp, restartMtime, restartMtime);
+      const restarted = new Ingestor(db, [tmp], OPTS);
+      restarted.ingestFile(fp, "proj-version");
+
+      const ids = db
+        .prepare("SELECT message_id FROM turns WHERE session_id = ? ORDER BY message_id")
+        .all("version-s") as Array<{ message_id: string }>;
+      expect(ids.map((row) => row.message_id)).toEqual(
+        [`${idPrefix}new`, `${idPrefix}old`, `${idPrefix}two`].sort(),
+      );
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

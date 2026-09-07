@@ -1,55 +1,42 @@
 # Privacy model
 
-AgentWrangler is built around one invariant, enforced in code and CI and referred to
-throughout the codebase as **SEC-101**:
+AgentWrangler keeps its dashboard data local. Most stored data is aggregates and structural metadata, but the database is not a sanitized export: it can also contain local command text and filesystem paths. The direct-install PreCompact hook can additionally copy full raw transcripts as described below.
 
-> No raw transcript or PR content is ever persisted — not in the database, not in any
-> committed file, not in the UI. Only aggregates, ids, counts, and structural anchors.
+## Local-only service boundary
 
-## Local-only by design
+- The daemon binds to **`127.0.0.1`** only. The dashboard talks exclusively to that loopback address. There is no cloud backend, telemetry, or account.
+- Dashboard data lives in local SQLite at `~/.agentwrangler/db.sqlite`. Removing that file (or the `~/.agentwrangler/` directory) removes the database and its local settings.
+- The daemon reads the transcripts Claude Code already writes to `~/.claude/projects`; it adds no network instrumentation to sessions.
 
-- The daemon binds to **`127.0.0.1`** only. The dashboard talks exclusively to that loopback
-  address. There is no cloud backend, no telemetry, no account, and nothing phones home.
-- All data lives in a local SQLite file: `~/.agentwrangler/db.sqlite`. Deleting that directory
-  removes everything AgentWrangler knows.
-- The daemon reads the transcripts Claude Code already writes to `~/.claude/projects` — it
-  adds no instrumentation to your sessions.
+## What SQLite and the dashboard store
 
-## What is stored
+SQLite stores aggregate token counts by flavor and model, timestamps, session and workspace ids, turn counts, detector measurements (byte counts, event counts, shares), PR and commit identifiers and states, and file-position anchors used to resume ingestion. The dashboard renders that local aggregate data.
 
-Aggregates and structure only: token counts by flavor and model, timestamps, session and
-workspace ids, turn counts, detector measurements (byte counts, event counts, shares), PR/commit
-**identifiers** and their states, and file-position anchors used to resume ingestion.
+Ingestion also retains filesystem paths and local command markers/text. In particular, a transcript's `local_command` record can be stored verbatim in `tool_events.input_hash`; the column name does not mean every value is hashed. Treat the database and backups as sensitive local data, and do not share raw dumps. Calibration samples are separately held in memory and discarded after the request. The optional GitHub token is read at use time from the environment or Windows Credential Manager; it is not logged or written to SQLite. Screenshots and the demo GIF in this repository use sanitized fixtures, never live data.
 
-## What is never stored
+## Raw transcript checkpoint copies
 
-- Raw transcript text — no prompts, no responses, no tool outputs.
-- PR titles, bodies, diffs, or review comments — only ids, numbers, and states.
-- Credentials of any kind. The optional GitHub token is read from the environment (or the OS
-  credential store) at use time, is never logged, and is never written to the database; the
-  Settings panel shows only *whether* a token is present.
+The **PreCompact checkpoint hook** is an optional exception. It is installed only by Settings' **Install directly** action (the copied install prompt does not add it). On Claude Code's `PreCompact` event, it copies the referenced local JSONL transcript to `~/.agentwrangler/checkpoints/`. Set `AW_CHECKPOINT_DIR` to choose another local directory.
 
-Even the screenshots and demo GIF committed to this repository follow the invariant — they are
-captured from a sanitized fixture instance with anonymized names, never from live data.
+Each checkpoint filename contains an encoded session id and timestamp. The hook attempts local owner-only permissions (`0600`; Windows access is governed by the user's ACL), does not display the copied content, and does not send it over the network. It retains at most 20 checkpoint files and 500 MiB in that directory, pruning files after a new copy when either cap is exceeded. Delete the checkpoint files or `~/.agentwrangler/` to remove them. A manual `/compact` may not emit this hook event, so it is not a guarantee that every compaction has a checkpoint.
 
-## The two opt-in exceptions
+## Network integrations and their triggers
 
-Both are **off by default**, clearly labeled in the UI, and refuse to run unless you enable
-them:
+The product has no cloud service, but these optional or credential-backed features can make outbound requests:
 
-1. **Bytes→token calibration** (Settings → Bytes→token calibration). Sends ~150 sampled
-   tool-output snippets to Anthropic's free token-counter API to calibrate estimate accuracy.
-   This is text your Claude Code session already sent to Anthropic when it ran. Nothing is
-   stored from the exchange except the resulting bytes-per-token ratio.
-2. **G2 deferral judge** (`npm run evidence:judge-g2 -- --execute`, gated by the
-   `g2_claude_judge_opt_in` setting). An evidence-validation CLI that calls the Claude API with
-   your local Claude Code OAuth credential to adjudicate deferral findings. Without the opt-in
-   it refuses to run; no rationale text is persisted.
+| Integration | When it can make a request | Boundary and control |
+|---|---|---|
+| Claude usage reader | Dashboard rate-limit refreshes, installed burn-alert hook checks, and **Calibrate from usage** | Calls Anthropic's OAuth usage endpoint with the existing local Claude Code sign-in. It reads usage; it does not upload transcript text. |
+| GitHub outcomes sync | At daemon startup and then on its scheduled outcomes pass | It is disabled with no GitHub token, making zero GitHub requests. With `AW_GITHUB_TOKEN` or the Windows credential present, it reads GitHub PR, commit, check, and diff metadata. |
+| Bytes-to-token calibration | When `bytes_per_token_calibration_enabled` is enabled and the ratio is absent or at least 30 days old | The daemon attempts it after boot and weekly; a manual calibration can also start it. It sends sampled tool-output text to Anthropic's token-count endpoint. Samples are held in memory; only the numeric ratio and provenance are stored locally. |
+| G2 deferral judge | Only when running `npm run evidence:judge-g2 -- --execute` with `g2_claude_judge_opt_in` enabled and a valid seed | Sends the blinded evidence packet to Claude using an API key when configured, otherwise Claude Code OAuth. An invalid seed sends nothing; judge rationale text is not persisted. |
 
-Everything else works with zero network calls to anyone.
+## In-session guardrails
+
+Direct install writes all five hooks to `~/.claude/settings.json`: context-budget, loop guard, burn alert, dangerous-command guard, and PreCompact checkpoint. It backs up an existing settings file alongside it and retains up to five backups; a first install without a settings file has nothing to back up. The copied install prompt writes only the three `PreToolUse` hooks: context-budget, loop guard, and burn alert.
+
+Context-budget and burn alerts use `allow` while warning. The loop guard warns first and can return `deny` for repeated identical failures. The dangerous-command guard, scoped to Bash, can return `ask` for risky commands and `deny` for a small catastrophe list. The direct uninstall removes every AgentWrangler hook; the copied uninstall prompt removes only its three hooks.
 
 ## Threat model and reporting
 
-The daemon is reachable from other machines only if you deliberately expose the port (tunnel,
-reverse proxy) — don't. For the full threat model and how to report a vulnerability privately,
-see [SECURITY.md](../.github/SECURITY.md).
+The daemon is reachable from other machines only if you deliberately expose the port (tunnel or reverse proxy). Do not expose it. For the full threat model and private reporting instructions, see [SECURITY.md](../.github/SECURITY.md).

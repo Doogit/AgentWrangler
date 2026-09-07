@@ -8,7 +8,7 @@ export function buildHookInstallPrompt(config: HookConfig): string {
 - { "matcher": "*", "hooks": [{ "type": "command", "command": "<AgentWrangler hook path>/loop-guard-hook.mjs" }] }
 - { "matcher": "*", "hooks": [{ "type": "command", "command": "<AgentWrangler hook path>/limit-burn-hook.mjs" }] }
 
-Make this idempotent and safe to re-run: do not duplicate an already-present AgentWrangler hook entry. Preserve all unrelated settings and any other hooks.
+Make this idempotent and safe to re-run: do not duplicate an already-present AgentWrangler hook entry. Preserve all unrelated settings and any other hooks. This copied prompt intentionally installs only these three hooks; Settings' Install directly action also installs the dangerous-command Bash hook and the PreCompact checkpoint hook.
 
 Current thresholds (managed in the AgentWrangler dashboard)
 - context_window: ${config.context_window}
@@ -29,5 +29,5 @@ export function buildHookUninstallPrompt(): string {
 - loop-guard-hook.mjs
 - limit-burn-hook.mjs
 
-Make this idempotent and safe to re-run: do not duplicate or remove any unrelated settings or hooks. Preserve every non-AgentWrangler PreToolUse entry. This change takes effect immediately because Claude Code watches settings.json.`;
+Make this idempotent and safe to re-run: do not duplicate or remove any unrelated settings or hooks. Preserve every non-AgentWrangler PreToolUse entry. This copied uninstall prompt removes only these three hooks; Settings' Uninstall directly action also removes the dangerous-command and PreCompact hooks. This change takes effect immediately because Claude Code watches settings.json.`;
 }

@@ -541,74 +541,109 @@ function recRoute(detectorId: string): RecRoute {
   return "copy";
 }
 
-// Module-level cache of the context-budget hook's install state, mirroring
-// fetchSessionToken: one GET /api/hook-config per page load, shared across cards.
-let cachedHookInstalled: boolean | null = null;
+// Share only an in-flight check across cards. Completed values are revalidated
+// on remount, browser focus/visibility, and a successful settings mutation.
+let hookCheck: Promise<boolean> | null = null;
 
-async function fetchHookInstalled(): Promise<boolean> {
-  if (cachedHookInstalled !== null) return cachedHookInstalled;
-  try {
-    const res = await fetchHookConfig();
-    cachedHookInstalled = res.data?.installed ?? false;
-  } catch {
-    cachedHookInstalled = false;
-  }
-  return cachedHookInstalled;
+function fetchHookInstalled(): Promise<boolean> {
+  if (hookCheck !== null) return hookCheck;
+  const pending = Promise.resolve()
+    .then(() => fetchHookConfig())
+    .then((res) => {
+      if (res?.data === null || res?.data === undefined)
+        throw new Error("Hook status unavailable.");
+      return res.data.installed;
+    });
+  hookCheck = pending;
+  const clear = () => {
+    if (hookCheck === pending) hookCheck = null;
+  };
+  void pending.then(clear, clear);
+  return pending;
 }
 
-/** Test-only: reset the module-level install-state cache between renders. */
+/** Test-only: clear shared in-flight state between renders. */
 export function __resetHookInstallCache(): void {
-  cachedHookInstalled = null;
+  hookCheck = null;
 }
 
 /** Primary action for behavioral (D2/D8/D7) cards: install the shipped hook. */
-function HookInstallButton() {
+function HookInstallButton({ onInstalled }: { onInstalled?: () => void }) {
   const [installed, setInstalled] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    let active = true;
-    void fetchHookInstalled().then((value) => {
-      if (active) setInstalled(value);
-    });
+    const revalidate = () => {
+      hookCheck = null;
+      setRefreshKey((key) => key + 1);
+    };
+    const visible = () => {
+      if (!document.hidden) revalidate();
+    };
+    window.addEventListener("focus", revalidate);
+    window.addEventListener("agentwrangler:hooks-changed", revalidate);
+    document.addEventListener("visibilitychange", visible);
     return () => {
-      active = false;
+      window.removeEventListener("focus", revalidate);
+      window.removeEventListener("agentwrangler:hooks-changed", revalidate);
+      document.removeEventListener("visibilitychange", visible);
     };
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey triggers status revalidation
+  useEffect(() => {
+    let active = true;
+    setError(null);
+    void fetchHookInstalled()
+      .then((value) => {
+        if (active) setInstalled(value);
+      })
+      .catch((e: unknown) => {
+        if (active) {
+          setInstalled(null);
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [refreshKey]);
+
   async function onInstall() {
+    if (busy) return;
     setBusy(true);
     setError(null);
-    setInstalled(true);
     try {
       await installHook();
-      cachedHookInstalled = true;
+      setInstalled(true);
+      onInstalled?.();
     } catch (e: unknown) {
       setInstalled(false);
-      cachedHookInstalled = false;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }
 
-  if (installed === true) {
-    return (
-      <button type="button" className="rec-action-btn rec-action-btn--primary" disabled>
-        Installed ✓
-      </button>
-    );
-  }
   return (
     <>
       <button
         type="button"
         className="rec-action-btn rec-action-btn--primary"
-        onClick={() => void onInstall()}
-        disabled={busy}
+        onClick={() => (installed === null ? setRefreshKey((key) => key + 1) : void onInstall())}
+        disabled={busy || installed === true || (installed === null && error === null)}
       >
-        {busy ? "Installing…" : "Install hook"}
+        {busy
+          ? "Installing…"
+          : installed === true
+            ? "Installed ✓"
+            : installed === null
+              ? error === null
+                ? "Checking hook…"
+                : "Retry status check"
+              : "Install hook"}
       </button>
       {error !== null && (
         <span className="rec-apply-status rec-apply-status--error" role="alert">
@@ -643,23 +678,13 @@ function canAssistedApplyForRec(rec: RecommendationCard): boolean {
   );
 }
 
-let cachedSessionToken: string | null = null;
-
 async function fetchSessionToken(): Promise<string> {
-  if (cachedSessionToken !== null) return cachedSessionToken;
-  try {
-    const res = await fetch("/api/token");
-    if (!res.ok) {
-      cachedSessionToken = "";
-      return cachedSessionToken;
-    }
-    const data = (await res.json()) as { token?: string };
-    cachedSessionToken = typeof data.token === "string" ? data.token : "";
-    return cachedSessionToken;
-  } catch {
-    cachedSessionToken = "";
-    return cachedSessionToken;
+  const res = await fetch("/api/token", { signal: AbortSignal.timeout(8_000) });
+  if (res.ok) {
+    const data = (await res.json()) as { token?: unknown };
+    if (typeof data.token === "string" && data.token.length > 0) return data.token;
   }
+  throw new Error("Unable to authorize this action. Check the daemon and retry.");
 }
 
 async function responseText(res: Response): Promise<string> {
@@ -730,8 +755,8 @@ interface SingleRecCardProps {
   focusRecId?: string | null;
   /** Clear the focus deep-link when the user dismisses the highlight. */
   onDismissFocus?: () => void;
-  onDismiss?: (recId: string) => void;
-  onAdopt?: (recId: string) => void;
+  onDismiss?: (recId: string) => void | Promise<void>;
+  onAdopt?: (recId: string) => void | Promise<void>;
 }
 
 function SingleRecCard({
@@ -762,6 +787,9 @@ function SingleRecCard({
   const [guidedShown, setGuidedShown] = useState(false);
   const [snippetCopied, setSnippetCopied] = useState(false);
   const [applyState, setApplyState] = useState<ApplyUiState>({ status: "idle" });
+  // Local evidence deliberately does not persist until the existing adopt endpoint is used.
+  const [actionEvidence, setActionEvidence] = useState<"none" | "supported" | "manual">("none");
+  const [manualAttested, setManualAttested] = useState(false);
   const [openTerminalMsg, setOpenTerminalMsg] = useState<{ ok: boolean; text: string } | null>(
     null,
   );
@@ -770,6 +798,12 @@ function SingleRecCard({
     null,
   );
   const pendingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savingRef = useRef(false);
+  const [writeState, setWriteState] = useState<
+    | { status: "idle" | "saving" }
+    | { status: "saved"; action: "adopt" | "dismiss" }
+    | { status: "failed"; action: "adopt" | "dismiss"; message: string }
+  >({ status: "idle" });
   const detailsId = useId();
   const chipOverflowId = useId();
   const promptArtifactId = useId();
@@ -837,6 +871,7 @@ function SingleRecCard({
     if (promptArtifact === null) return;
     void navigator.clipboard.writeText(promptArtifact.text).then(() => {
       setArtifactCopied(true);
+      setActionEvidence("manual");
       setTimeout(() => setArtifactCopied(false), 2000);
     });
   }
@@ -845,6 +880,7 @@ function SingleRecCard({
     if (generatedSnippet === null) return;
     void navigator.clipboard.writeText(generatedSnippet.text).then(() => {
       setSnippetCopied(true);
+      setActionEvidence("manual");
       setTimeout(() => setSnippetCopied(false), 2000);
     });
   }
@@ -858,16 +894,36 @@ function SingleRecCard({
     setPendingAction(null);
   }
 
+  async function commitAction(action: "adopt" | "dismiss") {
+    const commit = action === "adopt" ? onAdopt : onDismiss;
+    if (commit === undefined || savingRef.current) return;
+    savingRef.current = true;
+    setWriteState({ status: "saving" });
+    try {
+      await commit(rec.rec_id);
+      setWriteState({ status: "saved", action });
+    } catch (error: unknown) {
+      setWriteState({
+        status: "failed",
+        action,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      savingRef.current = false;
+    }
+  }
+
   function scheduleAction(action: Exclude<PendingRecommendationAction, null>) {
     const commit = action === "adopt" ? onAdopt : onDismiss;
-    if (commit === undefined || pendingAction !== null) return;
+    if (commit === undefined || pendingTimeoutRef.current !== null || savingRef.current) return;
 
+    setWriteState({ status: "idle" });
     setPendingAction(action);
     const timeoutId = setTimeout(() => {
       pendingTimeoutRef.current = null;
       setPendingTimeoutId(null);
       setPendingAction(null);
-      commit(rec.rec_id);
+      void commitAction(action);
     }, ACTION_UNDO_WINDOW_MS);
     pendingTimeoutRef.current = timeoutId;
     setPendingTimeoutId(timeoutId);
@@ -897,10 +953,13 @@ function SingleRecCard({
       }
       if (job.status === "APPLIED") {
         setApplyState({ status: "applied", jobId, diffApplied: job.diff_applied });
+        setActionEvidence("supported");
         return;
       }
       if (job.status === "ROLLED_BACK") {
         setApplyState({ status: "rolled_back" });
+        setActionEvidence("none");
+        setManualAttested(false);
         return;
       }
       if (job.status === "FAILED") {
@@ -963,6 +1022,7 @@ function SingleRecCard({
             ok: true,
             text: `Opened a terminal in ${workspaceLabel({ workspace_id: workspaceId })}.`,
           });
+          setActionEvidence("manual");
         } else {
           setOpenTerminalMsg({
             ok: false,
@@ -1016,6 +1076,8 @@ function SingleRecCard({
       .then(async (res) => {
         if (!res.ok) throw new Error(await responseText(res));
         setApplyState({ status: "rolled_back" });
+        setActionEvidence("none");
+        setManualAttested(false);
       })
       .catch((e: unknown) => {
         setApplyState({ status: "failed", message: e instanceof Error ? e.message : String(e) });
@@ -1052,11 +1114,11 @@ function SingleRecCard({
             <ScopeBadge rec={rec} />
             {isAdopted && (
               <span className="rec-adopted-pill">
-                {pendingAction === "adopt" ? "Adopted — Undo" : "Adopted"}
+                {pendingAction === "adopt" ? "Adopt pending — Undo" : "Adopted"}
               </span>
             )}
             {pendingAction === "dismiss" && (
-              <span className="rec-pending-action-pill">Dismissed — Undo</span>
+              <span className="rec-pending-action-pill">Dismiss pending — Undo</span>
             )}
           </div>
           <div className="rec-headline">
@@ -1118,19 +1180,26 @@ function SingleRecCard({
             type="button"
             className="rec-action-btn rec-action-btn--ghost"
             onClick={() => scheduleAction("dismiss")}
-            disabled={!onDismiss || pendingAction !== null}
+            disabled={!onDismiss || pendingAction !== null || writeState.status === "saving"}
           >
             Dismiss
           </button>
-          <button
-            type="button"
-            className="rec-action-btn"
-            title="Marks this adopted and starts impact tracking — changes no files."
-            onClick={() => scheduleAction("adopt")}
-            disabled={!onAdopt || pendingAction !== null}
-          >
-            Adopt
-          </button>
+          {(rec.detector_id === "D5" ||
+            (actionEvidence !== "none" && (actionEvidence === "supported" || manualAttested))) && (
+            <button
+              type="button"
+              className="rec-action-btn"
+              title={
+                rec.detector_id === "D5"
+                  ? "Records the calibration warning as acknowledged without impact tracking."
+                  : "Records a baseline for this completed change; it changes no files."
+              }
+              onClick={() => scheduleAction("adopt")}
+              disabled={!onAdopt || pendingAction !== null || writeState.status === "saving"}
+            >
+              {rec.detector_id === "D5" ? "Acknowledge" : "Track this change"}
+            </button>
+          )}
           {experimental && canOpenTerminal && (
             <button
               type="button"
@@ -1153,7 +1222,7 @@ function SingleRecCard({
         </div>
         {!grouped && route === "hook" && (
           <div className="rec-primary-action">
-            <HookInstallButton />
+            <HookInstallButton onInstalled={() => setActionEvidence("supported")} />
             {promptArtifact !== null && (
               <div className="rec-guided-prompt">
                 <button
@@ -1186,14 +1255,20 @@ function SingleRecCard({
         )}
         {!grouped && route === "settings-idle" && (
           <div className="rec-primary-action">
-            <a className="rec-action-btn rec-action-btn--primary" href="#/settings">
+            <a
+              className="rec-action-btn rec-action-btn--primary"
+              href="#/settings?section=idle-sessions"
+            >
               Review idle sessions
             </a>
           </div>
         )}
         {!grouped && route === "settings-calibrate" && (
           <div className="rec-primary-action">
-            <a className="rec-action-btn rec-action-btn--primary" href="#/settings">
+            <a
+              className="rec-action-btn rec-action-btn--primary"
+              href="#/settings?section=calibration"
+            >
               Calibrate budget hook
             </a>
           </div>
@@ -1229,6 +1304,31 @@ function SingleRecCard({
           </div>
         )}
         {!grouped && generatedSnippet2 && <SnippetBlock snippet={generatedSnippet2} />}
+        {!grouped && rec.detector_id !== "D5" && actionEvidence === "manual" && !manualAttested && (
+          <div className="rec-tracking-gate">
+            <p>
+              A copied prompt or launched terminal is not proof of a change. Confirm only after you
+              completed it and it remains applied for the measurement window.
+            </p>
+            <button
+              type="button"
+              className="rec-action-btn"
+              onClick={() => setManualAttested(true)}
+            >
+              I completed the change
+            </button>
+          </div>
+        )}
+        {!grouped &&
+          rec.detector_id !== "D5" &&
+          actionEvidence !== "none" &&
+          (actionEvidence === "supported" || manualAttested) &&
+          !isAdopted && (
+            <p className="rec-tracking-gate">
+              Tracking records a baseline; it does not prove effectiveness. There is no untrack or
+              post-track rollback in this version.
+            </p>
+          )}
         {!grouped && route === "copy" && (
           <p className="rec-actions-hint">
             {experimental && canOpenTerminal
@@ -1238,11 +1338,35 @@ function SingleRecCard({
         )}
         {pendingAction !== null && pendingTimeoutId !== null && (
           <output className="rec-action-toast">
-            <span>{pendingAction === "adopt" ? "Adopted — Undo" : "Dismissed — Undo"}</span>
+            <span>
+              {pendingAction === "adopt" ? "Adopt pending — Undo" : "Dismiss pending — Undo"}
+            </span>
             <button type="button" className="rec-action-toast-undo" onClick={clearPendingAction}>
               Undo
             </button>
           </output>
+        )}
+        {writeState.status === "saving" && <output>Saving change…</output>}
+        {writeState.status === "saved" && (
+          <output>
+            {writeState.action === "adopt"
+              ? rec.detector_id === "D5"
+                ? "Acknowledgment saved"
+                : "Tracking saved"
+              : "Dismissal saved"}
+          </output>
+        )}
+        {writeState.status === "failed" && (
+          <div className="rec-apply-status rec-apply-status--error" role="alert">
+            Could not save: {writeState.message}{" "}
+            <button
+              type="button"
+              className="rec-action-btn"
+              onClick={() => void commitAction(writeState.action)}
+            >
+              Retry
+            </button>
+          </div>
         )}
         {openTerminalMsg !== null && (
           <output
@@ -1508,8 +1632,8 @@ function GroupedRecCard({
   isFlagship?: boolean;
   focusRecId?: string | null;
   onDismissFocus?: () => void;
-  onDismiss?: (recId: string) => void;
-  onAdopt?: (recId: string) => void;
+  onDismiss?: (recId: string) => void | Promise<void>;
+  onAdopt?: (recId: string) => void | Promise<void>;
 }) {
   const [artifactCopied, setArtifactCopied] = useState(false);
   const [guidedShown, setGuidedShown] = useState(false);
@@ -1661,14 +1785,20 @@ function GroupedRecCard({
         )}
         {!isMinorItems && route === "settings-idle" && (
           <div className="rec-primary-action">
-            <a className="rec-action-btn rec-action-btn--primary" href="#/settings">
+            <a
+              className="rec-action-btn rec-action-btn--primary"
+              href="#/settings?section=idle-sessions"
+            >
               Review idle sessions
             </a>
           </div>
         )}
         {!isMinorItems && route === "settings-calibrate" && (
           <div className="rec-primary-action">
-            <a className="rec-action-btn rec-action-btn--primary" href="#/settings">
+            <a
+              className="rec-action-btn rec-action-btn--primary"
+              href="#/settings?section=calibration"
+            >
               Calibrate budget hook
             </a>
           </div>
@@ -1736,8 +1866,8 @@ interface RecCardProps {
   focusRecId?: string | null;
   /** Called to clear the focus deep-link when the user dismisses the highlight. */
   onDismissFocus?: () => void;
-  onDismiss?: (recId: string) => void;
-  onAdopt?: (recId: string) => void;
+  onDismiss?: (recId: string) => void | Promise<void>;
+  onAdopt?: (recId: string) => void | Promise<void>;
 }
 
 export default function RecCard({
@@ -1768,6 +1898,7 @@ export default function RecCard({
     <SingleRecCard
       rec={rec}
       rank={rank}
+      showSessionRows
       focusRecId={focusRecId}
       {...(isFlagship === undefined ? {} : { isFlagship })}
       {...(onDismissFocus === undefined ? {} : { onDismissFocus })}

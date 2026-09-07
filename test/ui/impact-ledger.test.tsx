@@ -99,6 +99,16 @@ describe("ImpactLedger — honesty rails", () => {
     expect(container.textContent ?? "").toContain("Measuring");
   });
 
+  it("labels D5 acknowledgments as not measured and suppresses measurement rows", async () => {
+    mockOk([entryWith({ detector_id: "D5", state: "ADOPTED", effects: [] })]);
+    const { container } = render(<ImpactLedger />);
+    await waitFor(() =>
+      expect(container.textContent ?? "").toContain("Acknowledged \u2014 not measured"),
+    );
+    expect(container.textContent ?? "").not.toContain("Measuring");
+    expect(container.textContent ?? "").not.toContain("Baseline:");
+  });
+
   it("MEASURED_NO_EFFECT carries the conservative-measurement note", async () => {
     const noEffect = entryWith({ state: "MEASURED_NO_EFFECT" });
     const baseEffect = noEffect.effects[0];

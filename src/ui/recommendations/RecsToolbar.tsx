@@ -104,20 +104,31 @@ export function collectWorkspaces(
   return workspaces;
 }
 
-/** Count visible cards per lifecycle given the current tier + ws filters. */
+/** Shared scope predicate for cards, warnings, lifecycle counts, and summaries.
+ * Explicit scope overrides the legacy ws URL parameter.
+ */
+export function filterRecommendations(
+  recs: RecommendationCard[],
+  params: ToolbarParams,
+): RecommendationCard[] {
+  return recs.filter((rec) => {
+    if (params.tier !== null && confidenceTierLabel(rec) !== params.tier) return false;
+    if (params.scope !== null) {
+      return rec.scope_workspace_id === (params.scope === "global" ? null : params.scope);
+    }
+    return params.ws === null || rec.scope_workspace_id === params.ws;
+  });
+}
+
+/** Count visible cards per lifecycle using the same predicate as the page. */
 function countVisible(
   view: RecommendationsView,
   params: ToolbarParams,
 ): { proposed: number; adopted: number; dismissed: number } {
-  const matchesTierWs = (rec: RecommendationCard) => {
-    if (params.tier !== null && confidenceTierLabel(rec) !== params.tier) return false;
-    if (params.ws !== null && rec.scope_workspace_id !== params.ws) return false;
-    return true;
-  };
   return {
-    proposed: [...view.active, ...view.limit_warnings].filter(matchesTierWs).length,
-    adopted: view.adopted.filter(matchesTierWs).length,
-    dismissed: view.dismissed.filter(matchesTierWs).length,
+    proposed: filterRecommendations([...view.active, ...view.limit_warnings], params).length,
+    adopted: filterRecommendations(view.adopted, params).length,
+    dismissed: filterRecommendations(view.dismissed, params).length,
   };
 }
 
@@ -219,8 +230,8 @@ export default function RecsToolbar({ view, params }: RecsToolbarProps) {
               setToolbarParam("sort", v === "confidence" ? null : v);
             }}
           >
-            <option value="confidence">Confidence tier</option>
-            <option value="savings">Modeled $/wk</option>
+            <option value="confidence">Recommended order</option>
+            <option value="savings">Modeled $/wk (within family)</option>
             <option value="newest">Newest</option>
           </select>
         </label>

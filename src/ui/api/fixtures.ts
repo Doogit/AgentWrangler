@@ -260,6 +260,9 @@ const MOCK_PARSER_HEALTH: ParserHealth = {
 export function mockStatus(overrides: Partial<DaemonStatus> = {}): DaemonStatus {
   return {
     sessions: 5,
+    scan_state: "complete",
+    lines_quarantined: 0,
+    invalid_scan_root_count: 0,
     files_seen: MOCK_PARSER_HEALTH.files_seen,
     files_parsed: MOCK_PARSER_HEALTH.files_parsed,
     ...overrides,

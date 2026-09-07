@@ -35,6 +35,10 @@ function makeRec(): RecommendationCard {
 beforeEach(() => {
   window.localStorage.clear();
   vi.clearAllMocks();
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
 });
 
 afterEach(() => {
@@ -62,7 +66,7 @@ describe("RecCard INT-3 safety controls", () => {
     expect(getByRole("button", { name: /Open in Claude Code/ })).toBeDefined();
   });
 
-  it("defers adopt and cancels its committed POST when undone", () => {
+  it("defers tracking and cancels its committed POST when undone", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -73,13 +77,20 @@ describe("RecCard INT-3 safety controls", () => {
       });
     };
     const { container, getByRole } = render(<RecCard rec={makeRec()} onAdopt={onAdopt} />);
-
-    expect(getByRole("button", { name: "Adopt" }).getAttribute("title")).toBe(
-      "Marks this adopted and starts impact tracking — changes no files.",
+    expect(() => getByRole("button", { name: "Track this change" })).toThrow();
+    fireEvent.click(getByRole("button", { name: "Copy prompt" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(getByRole("button", { name: "I completed the change" }));
+    expect(getByRole("button", { name: "Track this change" }).getAttribute("title")).toBe(
+      "Records a baseline for this completed change; it changes no files.",
     );
-    fireEvent.click(getByRole("button", { name: "Adopt" }));
+    fireEvent.click(getByRole("button", { name: "Track this change" }));
 
-    expect(container.querySelector(".rec-action-toast")?.textContent).toContain("Adopted — Undo");
+    expect(container.querySelector(".rec-action-toast")?.textContent).toContain(
+      "Adopt pending — Undo",
+    );
     expect(fetchMock).not.toHaveBeenCalledWith("/api/recommendations/adopt", expect.anything());
 
     fireEvent.click(getByRole("button", { name: "Undo" }));
@@ -102,7 +113,9 @@ describe("RecCard INT-3 safety controls", () => {
 
     fireEvent.click(getByRole("button", { name: "Dismiss" }));
 
-    expect(container.querySelector(".rec-action-toast")?.textContent).toContain("Dismissed — Undo");
+    expect(container.querySelector(".rec-action-toast")?.textContent).toContain(
+      "Dismiss pending — Undo",
+    );
     expect(fetchMock).not.toHaveBeenCalledWith("/api/recommendations/dismiss", expect.anything());
 
     fireEvent.click(getByRole("button", { name: "Undo" }));
