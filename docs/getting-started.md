@@ -3,7 +3,7 @@
 AgentWrangler is a local daemon plus a browser dashboard. This page covers every install path,
 the optional integrations, configuration, and troubleshooting.
 
-**Requirements:** Node **`>=22 <25`** and npm. That's all — the database is embedded SQLite.
+**Requirements:** Node **`>=22 <25`** and npm. That's all for local analysis — the database is embedded SQLite. Optional GitHub outcomes sync also requires the `gh` executable on your `PATH`.
 
 ## Install
 
@@ -29,7 +29,9 @@ npm ci                 # installs deps and builds daemon + UI (prepare script)
 npm run daemon         # starts the daemon and opens your browser
 ```
 
-`npx agentwrangler` from inside the clone also works after `npm ci`.
+The npm CLI is distributed with compiled daemon/UI assets. From a source checkout, use the
+commands above; `npx agentwrangler@latest` installs and runs the packaged release, while
+`npm run daemon` runs the source checkout after its build.
 
 ## First launch
 
@@ -39,9 +41,9 @@ right away and fills in as the scan completes — a large history won't block th
 
 The browser opens automatically; set `AW_NO_OPEN=1` to suppress that.
 
-An onboarding checklist on the Overview tab walks you through the three activation steps:
-calibrate your weekly limit, add a GitHub token for outcomes, and install the context-budget
-guard.
+An onboarding checklist on the Overview tab starts with reading an ingested session. A healthy
+history with no recommendations can still complete onboarding. Calibration, GitHub outcomes,
+and guard installation are optional follow-up steps.
 
 ## Optional setup
 
@@ -51,8 +53,22 @@ Links sessions to the pull requests and commits they produced, powering the Work
 outcome columns (success rate, cost-per-merged-PR).
 
 - Create a **read-only** GitHub personal access token.
-- Provide it via the `AW_GITHUB_TOKEN` environment variable (all platforms), or on Windows
+- Ensure the GitHub CLI (`gh`) is installed and available on `PATH`; AgentWrangler uses it for
+  read-only `gh api` requests. You do not need to run `gh auth login`.
+- Provide the token via the `AW_GITHUB_TOKEN` environment variable (all platforms), or on Windows
   store it in Credential Manager as a *Generic* credential named `AgentWrangler-GithubToken`.
+
+PowerShell:
+
+```powershell
+$env:AW_GITHUB_TOKEN = "github_pat_REPLACE_WITH_READ_ONLY_TOKEN"
+```
+
+POSIX shells (macOS/Linux):
+
+```sh
+export AW_GITHUB_TOKEN='github_pat_REPLACE_WITH_READ_ONLY_TOKEN'
+```
 
 Without a token the feature stays inert and Settings tells you so — nothing fails silently.
 The token is read locally, never logged, never written to the database; Settings shows only
@@ -63,16 +79,19 @@ whether one is present.
 Settings → **Calibrate from usage** derives your weekly token limit from your live Claude Code
 utilization and auto-saves it — this turns on the burn forecast on the Overview tab. A manual
 override field exists if calibration is unavailable. The usage reader uses your existing
-Claude Code sign-in locally; Settings shows its status.
+Claude Code sign-in to call Anthropic's OAuth usage endpoint; Settings shows its status. It reads
+usage and does not upload transcript text.
 
 ### In-session guardrails
 
-Five hooks that surface warnings inside Claude Code itself (see the
-[README guardrails table](../README.md#installable-guardrails--warnings-inside-claude-code-before-the-waste)).
-Install them from Settings → **In-session guards** — either "Install directly" (writes
-`~/.claude/settings.json` for you) or "Copy install prompt" (a prompt Claude Code applies
-itself). Thresholds (warn %, loop window, idle cutoff) are tunable in the same panel, and
-every hook has a matching uninstall.
+Settings offers five local hooks (see the [README guardrails table](../README.md#installable-guardrails--local-checks-inside-claude-code-before-the-waste)).
+**Install directly** writes all five to `~/.claude/settings.json`: context-budget, loop, burn,
+dangerous-command, and PreCompact checkpoint. It backs up an existing settings file and keeps up to five backups. **Copy install prompt** installs only context-budget, loop, and burn. Context-budget
+and burn warn; loop can deny repeated identical failures; the direct-only dangerous-command guard
+can ask or deny. Direct uninstall removes all AgentWrangler hooks; the copied uninstall prompt
+removes only its three hooks. The direct-only PreCompact hook can copy raw transcript JSONL to
+`~/.agentwrangler/checkpoints/`; see [Privacy](privacy.md#raw-transcript-checkpoint-copies) for
+its retention and cleanup.
 
 ## Configuration
 
@@ -88,7 +107,31 @@ All environment variables are optional; sensible defaults apply. See
 | `AW_GITHUB_TOKEN` | Read-only GitHub PAT for outcomes sync | *(unset)* |
 | `AW_NO_OPEN` | Set to `1` to not auto-open the browser | *(unset)* |
 
-Scan roots and the activity window are also editable from the Settings tab at runtime.
+Scan roots and the activity window are editable in Settings. Saved scan roots take effect after restarting the daemon.
+
+## Update and restart
+
+Stop the running daemon before updating or starting it again; do not launch a second daemon on the same port.
+
+For an npm install, update the package and restart the daemon:
+
+```sh
+npm install -g agentwrangler@latest
+agentwrangler
+```
+
+For a source checkout, pull the desired revision, reinstall/build, then restart:
+
+```sh
+git pull
+npm ci
+npm run build
+npm run daemon
+```
+
+The daemon loads source and built UI once at boot, so editing or updating files requires a
+restart. `npm run build:ui` is sufficient after UI-only edits; `npm run build` covers daemon and
+UI changes.
 
 ## Troubleshooting
 
@@ -105,8 +148,11 @@ Scan roots and the activity window are also editable from the Settings tab at ru
 
 ## Uninstall
 
+- While the dashboard is running, open [Settings → In-session guards](http://127.0.0.1:47821/#/settings?section=in-session-guards) and remove installed AgentWrangler hooks (or use the copied uninstall prompt).
 - Stop the daemon (`Ctrl+C`).
-- Remove the data: delete `~/.agentwrangler/`.
-- If you installed guardrail hooks, remove them first from Settings → In-session guards
-  ("Uninstall directly"), or via `npm run uninstall-hook` from a source checkout.
-- `npm uninstall -g agentwrangler` if globally installed.
+- Remove the package: `npm uninstall -g agentwrangler` if globally installed. For a source
+  checkout, remove the checkout when it is no longer needed.
+- Optionally remove local data by deleting `~/.agentwrangler/`. This includes the SQLite database
+  and settings. Raw PreCompact checkpoint copies under
+  `~/.agentwrangler/checkpoints/` are not removed by uninstalling. Checkpoint files remain subject to the
+  [checkpoint retention policy](privacy.md#raw-transcript-checkpoint-copies).

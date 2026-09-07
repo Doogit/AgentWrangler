@@ -10,5 +10,6 @@ export default defineConfig({
   test: {
     include: ["test/ui/**/*.test.{ts,tsx}"],
     environment: "jsdom",
+    setupFiles: ["test/ui/setup-dialog.ts"],
   },
 });

@@ -53,6 +53,32 @@ export function writeCheckpoint(transcriptPath, sessionId, dir, now = new Date()
   return dest;
 }
 
+/**
+ * Return the timestamp encoded by a snapshot filename, or null for files this hook did
+ * not create. Malformed .jsonl files are deliberately left alone by retention.
+ */
+function snapshotTimestamp(name) {
+  const match = /-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-\d{6}\.jsonl$/.exec(
+    name,
+  );
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second, millisecond] = match;
+  const timestamp = Date.parse(
+    `${year}-${month}-${day}T${hour}:${minute}:${second}.${millisecond}Z`,
+  );
+  if (Number.isNaN(timestamp)) return null;
+  const parsed = new Date(timestamp);
+  return parsed.getUTCFullYear() === Number(year) &&
+    parsed.getUTCMonth() + 1 === Number(month) &&
+    parsed.getUTCDate() === Number(day) &&
+    parsed.getUTCHours() === Number(hour) &&
+    parsed.getUTCMinutes() === Number(minute) &&
+    parsed.getUTCSeconds() === Number(second) &&
+    parsed.getUTCMilliseconds() === Number(millisecond)
+    ? timestamp
+    : null;
+}
+
 /** Prune oldest snapshots beyond the count cap, then beyond the total-byte cap. */
 export function enforceRetention(dir, maxCount = MAX_COUNT, maxBytes = MAX_BYTES) {
   let entries;
@@ -60,30 +86,40 @@ export function enforceRetention(dir, maxCount = MAX_COUNT, maxBytes = MAX_BYTES
     entries = fs
       .readdirSync(dir)
       .filter((name) => name.endsWith(".jsonl"))
-      .sort() // timestamp-derived names sort chronologically
       .map((name) => {
         const full = path.join(dir, name);
-        return { full, size: fs.statSync(full).size };
-      });
+        const timestamp = snapshotTimestamp(name);
+        if (timestamp === null) return null;
+        try {
+          const stat = fs.statSync(full);
+          if (!stat.isFile()) return null;
+          return { full, name, size: stat.size, timestamp, mtimeMs: stat.mtimeMs };
+        } catch {
+          // A vanished or unreadable entry must not prevent pruning known snapshots.
+          return null;
+        }
+      })
+      .filter((entry) => entry !== null)
+      .sort(
+        (a, b) =>
+          a.timestamp - b.timestamp || a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name),
+      );
   } catch {
     return; // dir missing or unreadable — nothing to prune
   }
 
-  const removeOldest = () => {
-    const victim = entries.shift();
-    if (!victim) return;
+  let count = entries.length;
+  let total = entries.reduce((sum, entry) => sum + entry.size, 0);
+  for (const victim of entries) {
+    if (count <= maxCount && total <= maxBytes) break;
     try {
       fs.rmSync(victim.full);
-    } catch {
-      // A locked or already-removed snapshot is not worth failing for.
+    } catch (error) {
+      // A locked snapshot still counts. Try each later candidate at most once.
+      if (error?.code !== "ENOENT") continue;
     }
-  };
-
-  while (entries.length > maxCount) removeOldest();
-  let total = entries.reduce((sum, entry) => sum + entry.size, 0);
-  while (entries.length > 0 && total > maxBytes) {
-    total -= entries[0].size;
-    removeOldest();
+    count -= 1;
+    total -= victim.size;
   }
 }
 

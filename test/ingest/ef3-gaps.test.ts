@@ -213,8 +213,8 @@ describe("EF3 — idempotent re-scan", () => {
 //    clobber a richer persisted gap_n with a partial recompute.
 // ---------------------------------------------------------------------------
 
-describe("EF3 — warm-restart gap-aggregate write-guard", () => {
-  it("a post-restart user turn does not null out a richer cold-scan gap_n", () => {
+describe("EF3 — persisted warm-restart gap aggregates", () => {
+  it("a post-restart user turn extends the complete persisted gap history", () => {
     const filePath = path.join(tmpDir, "proj-warm", "sess-warm.jsonl");
     const lines = [
       userPrompt({ session: "sess-warm", ts: "2026-01-01T10:00:00.000Z" }),
@@ -247,9 +247,8 @@ describe("EF3 — warm-restart gap-aggregate write-guard", () => {
     expect(cold?.gap_median_s).toBe(90);
     expect(cold?.gap_p90_s).toBe(480);
 
-    // Simulate a warm daemon restart: append one more user turn past the persisted
-    // offset, then process it with a FRESH Ingestor whose in-memory turn map starts
-    // empty (unlike ing1, which still held all 4 timestamps in-process).
+    // Simulate a warm daemon restart and append one more user turn. Its 600s gap
+    // is combined with the four timestamps already persisted by ing1.
     fs.appendFileSync(
       filePath,
       `${JSON.stringify(userPrompt({ session: "sess-warm", ts: "2026-01-01T10:20:00.000Z" }))}\n`,
@@ -260,10 +259,10 @@ describe("EF3 — warm-restart gap-aggregate write-guard", () => {
     ing2.runBackscan();
 
     const warm = snap("sess-warm");
-    expect(warm?.gap_n).toBe(3);
-    expect(warm?.gap_median_s).toBe(90);
-    expect(warm?.gap_p90_s).toBe(480);
-    expect(warm?.long_gap_count).toBe(cold?.long_gap_count);
+    expect(warm?.gap_n).toBe(4);
+    expect(warm?.gap_median_s).toBe(285);
+    expect(warm?.gap_p90_s).toBe(600);
+    expect(warm?.long_gap_count).toBe((cold?.long_gap_count ?? 0) + 1);
   });
 
   it("a real new long gap after restart is surfaced, not frozen at the pre-restart value", () => {
@@ -295,8 +294,8 @@ describe("EF3 — warm-restart gap-aggregate write-guard", () => {
     ing1.runBackscan();
     expect(snap("sess-warm2")?.gap_n).toBe(3);
 
-    // Warm restart: fresh Ingestor, empty in-memory map. Append 2 more user turns,
-    // the 2nd separated from the 1st by a gap far over LONG_GAP_THRESHOLD_S (300s).
+    // Warm restart: append 2 more user turns. Both extend the persisted history;
+    // the 2nd is far over LONG_GAP_THRESHOLD_S (300s) from the 1st.
     fs.appendFileSync(
       filePath,
       `${JSON.stringify(userPrompt({ session: "sess-warm2", ts: "2026-01-01T10:20:00.000Z" }))}\n`,
@@ -304,8 +303,7 @@ describe("EF3 — warm-restart gap-aggregate write-guard", () => {
     );
     const ing2 = new Ingestor(db, [tmpDir], INGEST_OPTS);
     ing2.runBackscan();
-    // Single post-restart turn so far (gapN=0 in-process) → still guarded, unchanged.
-    expect(snap("sess-warm2")?.gap_n).toBe(3);
+    expect(snap("sess-warm2")?.gap_n).toBe(4);
 
     fs.appendFileSync(
       filePath,
@@ -314,12 +312,12 @@ describe("EF3 — warm-restart gap-aggregate write-guard", () => {
     );
     ing2.runBackscan();
 
-    // A 2nd post-restart turn produces one real in-process gap (10,000s) — it must be
-    // written even though gapN(1) < the pre-restart gap_n(3), not frozen at the old value.
+    // The full six-turn history now has five gaps, including the 10,000s gap.
     const after = snap("sess-warm2");
-    expect(after?.gap_n).toBe(1);
-    expect(after?.gap_median_s).toBe(10000);
-    expect(after?.long_gap_count).toBe(1);
+    expect(after?.gap_n).toBe(5);
+    expect(after?.gap_median_s).toBe(480);
+    expect(after?.gap_p90_s).toBe(10000);
+    expect(after?.long_gap_count).toBe(3);
   });
 });
 

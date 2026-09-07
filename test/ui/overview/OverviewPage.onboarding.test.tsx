@@ -43,7 +43,7 @@ beforeEach(() => {
 describe("OverviewPage first-run onboarding", () => {
   it("shows API-derived ingest progress and hides normal KPI cards before any sessions exist", async () => {
     vi.mocked(client.fetchStatus).mockResolvedValue(
-      mockStatus({ sessions: 0, files_seen: 10, files_parsed: 4 }),
+      mockStatus({ sessions: 0, files_seen: 10, files_parsed: 4, scan_state: "scanning" }),
     );
 
     render(<OverviewPage />);
@@ -51,9 +51,9 @@ describe("OverviewPage first-run onboarding", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: /welcome/i })).toBeTruthy());
     expect(screen.getByRole("checkbox", { name: /daemon running/i })).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: /first session ingested/i })).toBeTruthy();
-    expect(screen.getByRole("checkbox", { name: /first recommendation generated/i })).toBeTruthy();
-    expect(screen.getByText(/\d of 3/)).toBeTruthy();
-    expect(screen.getByText("ingesting… 4 of 10 files")).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: /first recommendation generated/i })).toBeNull();
+    expect(screen.getByText(/\d of 2/)).toBeTruthy();
+    expect(screen.getByText(/Scanning.*4 of 10 files/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: /two meters, several tanks/i })).toBeNull();
   });
 
@@ -66,5 +66,55 @@ describe("OverviewPage first-run onboarding", () => {
       expect(screen.getByRole("heading", { name: /two meters, several tanks/i })).toBeTruthy(),
     );
     expect(screen.queryByRole("heading", { name: /welcome to agentwrangler/i })).toBeNull();
+  });
+});
+
+describe("scan recovery and healthy empty findings", () => {
+  it.each([
+    [{ scan_state: "complete" as const }, /Scan complete.*no readable sessions found/],
+    [{ scan_state: "failed" as const }, /Initial scan failed/],
+    [{ invalid_scan_root_count: 2 }, /2 scan root.*missing or unreadable/],
+    [{ lines_quarantined: 3 }, /3 transcript line.*could not be parsed/],
+  ])("distinguishes recovery state %j", async (status, message) => {
+    vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 0, ...status }));
+    render(<OverviewPage />);
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByText(/Scanning.*0 of 0/)).toBeNull();
+  });
+
+  it("keeps older daemon completion status unknown", async () => {
+    const { scan_state: _scanState, ...status } = mockStatus({ sessions: 0 });
+    vi.mocked(client.fetchStatus).mockResolvedValue(status);
+    render(<OverviewPage />);
+    expect(await screen.findByText(/Scan completion status is unavailable/)).toBeTruthy();
+  });
+
+  it("completes setup with history and no recommendations or integrations", async () => {
+    const recs = mockRecommendations();
+    if (!recs.data) throw new Error("missing fixture");
+    recs.data = {
+      ...recs.data,
+      active: [],
+      active_groups: [],
+      limit_warnings: [],
+      adopted: [],
+      dismissed: [],
+    };
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(recs);
+    vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 1 }));
+    render(<OverviewPage />);
+    expect(await screen.findByText(/Setup complete.*no recommendations were found/)).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: /Read an ingested session/ }).getAttribute("href"),
+    ).toBe("#/sessions");
+    expect(screen.queryByRole("heading", { name: /welcome to agentwrangler/i })).toBeNull();
+  });
+
+  it("does not describe a failed recommendations request as no findings", async () => {
+    vi.mocked(client.fetchRecommendations).mockRejectedValue(new Error("unavailable"));
+    vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 1 }));
+    render(<OverviewPage />);
+    await screen.findByRole("heading", { name: /two meters, several tanks/i });
+    expect(screen.queryByText(/no recommendations were found/)).toBeNull();
   });
 });

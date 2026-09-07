@@ -13,7 +13,9 @@ npm run build:ui      # build the dashboard (dist/ui)
 npm run daemon        # start the daemon on 127.0.0.1:47821 and open the browser
 ```
 
-Or, from a clean clone, `npx agentwrangler` does the build-if-needed + launch in one step.
+The published npm package includes compiled daemon and UI assets, so `npx agentwrangler@latest`
+is useful for trying the release. It does not build an uncompiled source clone. For source work,
+run `npm ci`, then `npm run build` before launching.
 
 The daemon `tsx`-loads source at boot and does **not** hot-reload — restart it after editing
 backend code, and re-run `npm run build:ui` after editing the UI.

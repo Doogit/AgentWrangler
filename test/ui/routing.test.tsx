@@ -90,36 +90,36 @@ describe("dashboard hash routing", () => {
     ["#/recommendations", "Recommendations page"],
     ["#/workspaces", "Workspaces page"],
     ["#/settings", "Settings page"],
-  ])("renders %s as %s", (hash, page) => {
+  ])("renders %s as %s", async (hash, page) => {
     replaceHash(hash);
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: page })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: page })).toBeTruthy();
   });
 
   it.each(["", "#/unknown", "#/sessions/", "#/sessions/%E0%A4%A"])(
     'falls back to overview for "%s"',
-    (hash) => {
+    async (hash) => {
       replaceHash(hash);
       render(<App />);
 
-      expect(screen.getByRole("heading", { name: "Overview page" })).toBeTruthy();
+      expect(await screen.findByRole("heading", { name: "Overview page" })).toBeTruthy();
     },
   );
 
-  it("renders a session detail route with its session id", () => {
+  it("renders a session detail route with its session id", async () => {
     replaceHash("#/sessions/session-123");
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Session detail page" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Session detail page" })).toBeTruthy();
     expect(screen.getByTestId("session-id").textContent).toBe("session-123");
   });
 
-  it("decodes an encoded session id from the hash", () => {
+  it("decodes an encoded session id from the hash", async () => {
     replaceHash("#/sessions/session%2F123%20details");
     render(<App />);
 
-    expect(screen.getByTestId("session-id").textContent).toBe("session/123 details");
+    expect((await screen.findByTestId("session-id")).textContent).toBe("session/123 details");
   });
 
   it("updates the rendered page when the hash changes", async () => {

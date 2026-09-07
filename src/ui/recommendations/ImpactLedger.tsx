@@ -92,6 +92,15 @@ function hasSparseSample(entry: LedgerEntry, effect: LedgerEntry["effects"][numb
 function RealizedLine({ entry }: { entry: LedgerEntry }) {
   const effect = entry.effects[0] ?? null;
 
+  if (entry.detector_id === "D5") {
+    return (
+      <div className="ledger-row">
+        <span className="ledger-key">Outcome</span>
+        <span className="ledger-val">Acknowledged — not measured</span>
+      </div>
+    );
+  }
+
   if (entry.state === "ADOPTED" || entry.state === "MEASURING") {
     // Clock + deadline. Deadline comes from the effect row when present,
     // else derived from adopted_at + 14d.
@@ -231,6 +240,16 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
 
       <RealizedLine entry={entry} />
 
+      {entry.detector_id !== "D5" && entry.effects[0] !== undefined && (
+        <div className="ledger-row ledger-sample-counts">
+          <span className="ledger-key">Samples</span>
+          <span className="ledger-val">
+            Baseline: {entry.effects[0].before_n ?? "unknown"} · Follow-up:{" "}
+            {entry.effects[0].after_n ?? "unknown"}
+          </span>
+        </div>
+      )}
+
       {isRoutingAdvisory && (
         <p className="kpi-off-hint">
           Advisory: which cap binds is not observable; dollar savings are not asserted.
@@ -311,7 +330,7 @@ function HeadroomSummary() {
   );
 }
 
-export default function ImpactLedger() {
+export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string[] } = {}) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -349,12 +368,16 @@ export default function ImpactLedger() {
   }
 
   const view = state.value.data;
-  if (view === null || view.entries.length === 0) {
+  const entries =
+    view?.entries.filter(
+      (entry) => visibleRecIds === undefined || visibleRecIds.includes(entry.rec_id),
+    ) ?? [];
+  if (view === null || entries.length === 0) {
     return (
       <div className="impact-ledger">
         <p className="kpi-off-hint">
-          No measured recommendations yet. Adopted recs appear here once the probe measures their
-          effect.
+          No measured recommendations in this selection. Adopted recs appear here once the probe
+          measures their effect.
         </p>
       </div>
     );
@@ -366,10 +389,10 @@ export default function ImpactLedger() {
         Cap-weighted estimate uses COEFF={view.cap_read_coeff} (unverified — Anthropic has not
         published a cap coefficient for cache reads).
       </p>
-      {view.entries.map((entry) => (
+      {entries.map((entry) => (
         <LedgerRow key={entry.rec_id} entry={entry} />
       ))}
-      <HeadroomSummary />
+      {visibleRecIds === undefined && <HeadroomSummary />}
     </div>
   );
 }

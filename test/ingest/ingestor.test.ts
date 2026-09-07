@@ -78,6 +78,272 @@ beforeEach(() => {
 afterEach(() => db.close());
 
 describe("back-scan aggregates over the committed corpus", () => {
+  it("does not inflate user and friction counters when a timestamp change replays a file", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-counter-replay-"));
+    try {
+      const file = path.join(tmp, "proj-replay", "s.jsonl");
+      writeCorpus(tmp, {
+        "proj-replay": {
+          "s.jsonl": [
+            {
+              type: "user",
+              promptSource: "typed",
+              timestamp: "2026-01-03T00:00:00.000Z",
+              sessionId: "counter-replay",
+              message: { content: [] },
+            },
+            assistant({
+              id: "counter-message",
+              session: "counter-replay",
+              ts: "2026-01-03T00:01:00.000Z",
+              input: 100,
+              output: 10,
+              extra: { isCompactSummary: true, isApiErrorMessage: true },
+            }),
+          ],
+        },
+      });
+      const ingestor = new Ingestor(db, [tmp], OPTS);
+      ingestor.runBackscan();
+      const counters = () =>
+        db
+          .prepare(
+            "SELECT user_turn_count, compaction_count, api_error_count FROM sessions WHERE session_id = 'counter-replay'",
+          )
+          .get();
+      const expected = { user_turn_count: 1, compaction_count: 1, api_error_count: 1 };
+      expect(counters()).toEqual(expected);
+      const touched = new Date(fs.statSync(file).mtimeMs + 2000);
+      fs.utimesSync(file, touched, touched);
+      ingestor.ingestFile(file, "proj-replay");
+      expect(counters()).toEqual(expected);
+      const retouched = new Date(touched.getTime() + 2000);
+      fs.utimesSync(file, retouched, retouched);
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-replay");
+      expect(counters()).toEqual(expected);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes a source uuid across JSON whitespace and key-order changes", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-metric-uuid-"));
+    try {
+      const dir = path.join(tmp, "proj-uuid");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "s.jsonl");
+      const record = {
+        type: "user",
+        uuid: "metric-source-uuid",
+        promptSource: "typed",
+        timestamp: "2026-01-03T00:00:00.000Z",
+        sessionId: "metric-uuid",
+        message: { content: [] },
+      };
+      fs.writeFileSync(file, `${JSON.stringify(record)}\n`);
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-uuid");
+
+      const reordered =
+        ` { "message" : { "content" : [] }, "sessionId" : "metric-uuid", ` +
+        `"timestamp" : "2026-01-03T00:00:00.000Z", "promptSource" : "typed", ` +
+        `"uuid" : "metric-source-uuid", "type" : "user" } \n`;
+      fs.writeFileSync(file, reordered);
+      const touched = new Date(fs.statSync(file).mtimeMs + 2_000);
+      fs.utimesSync(file, touched, touched);
+      const replay = new Ingestor(db, [tmp], OPTS);
+      replay.ingestFile(file, "proj-uuid");
+      expect(replay.healthSnapshot().linesQuarantined).toBe(0);
+
+      expect(
+        db.prepare("SELECT user_turn_count FROM sessions WHERE session_id = ?").get("metric-uuid"),
+      ).toEqual({ user_turn_count: 1 });
+      expect(
+        db
+          .prepare("SELECT COUNT(*) AS n FROM ingest_metric_events WHERE session_id = ?")
+          .get("metric-uuid"),
+      ).toEqual({ n: 1 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("counts only genuinely new metric records in an equal-size rewrite", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-metric-rewrite-"));
+    try {
+      const dir = path.join(tmp, "proj-rewrite");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "s.jsonl");
+      const user = (uuid: string) => ({
+        type: "user",
+        uuid,
+        promptSource: "typed",
+        timestamp: "2026-01-03T00:00:00.000Z",
+        sessionId: "metric-rewrite",
+        message: { content: [] },
+      });
+      const shared = assistant({
+        id: "metric-shared-message",
+        session: "metric-rewrite",
+        ts: "2026-01-03T00:01:00.000Z",
+        extra: { uuid: "metric-shared-event", isCompactSummary: true },
+      });
+      const before = toJsonl([user("metric-user-old"), shared]);
+      const after = toJsonl([user("metric-user-new"), shared]);
+      expect(Buffer.byteLength(after)).toBe(Buffer.byteLength(before));
+
+      fs.writeFileSync(file, before);
+      const ingestor = new Ingestor(db, [tmp], OPTS);
+      ingestor.ingestFile(file, "proj-rewrite");
+      fs.writeFileSync(file, after);
+      const touched = new Date(fs.statSync(file).mtimeMs + 2_000);
+      fs.utimesSync(file, touched, touched);
+      ingestor.ingestFile(file, "proj-rewrite");
+
+      expect(
+        db
+          .prepare("SELECT user_turn_count, compaction_count FROM sessions WHERE session_id = ?")
+          .get("metric-rewrite"),
+      ).toEqual({ user_turn_count: 2, compaction_count: 1 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("persists metric and gap identity across restarts and session files", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-metric-multifile-"));
+    try {
+      const user = (uuid: string, timestamp: string) => ({
+        type: "user",
+        uuid,
+        promptSource: "typed",
+        timestamp,
+        sessionId: "metric-multifile",
+        message: { content: [] },
+      });
+      const shared = user("multi-user-2", "2026-01-03T00:01:00.000Z");
+      writeCorpus(tmp, {
+        "proj-multifile": {
+          "a.jsonl": [user("multi-user-1", "2026-01-03T00:00:00.000Z"), shared],
+          "b.jsonl": [shared, user("multi-user-3", "2026-01-03T00:03:00.000Z")],
+        },
+      });
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+      const snapshot = () =>
+        db
+          .prepare(
+            "SELECT user_turn_count, gap_n, gap_median_s, gap_p90_s FROM sessions WHERE session_id = ?",
+          )
+          .get("metric-multifile");
+      const expected = { user_turn_count: 3, gap_n: 2, gap_median_s: 90, gap_p90_s: 120 };
+      expect(snapshot()).toEqual(expected);
+
+      for (const name of ["a.jsonl", "b.jsonl"]) {
+        const file = path.join(tmp, "proj-multifile", name);
+        const touched = new Date(fs.statSync(file).mtimeMs + 2_000);
+        fs.utimesSync(file, touched, touched);
+      }
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+      expect(snapshot()).toEqual(expected);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("seeds a pre-017 consumed prefix without incrementing legacy aggregates", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-metric-legacy-"));
+    try {
+      const file = path.join(tmp, "proj-legacy", "s.jsonl");
+      writeCorpus(tmp, {
+        "proj-legacy": {
+          "s.jsonl": [
+            {
+              type: "user",
+              uuid: "legacy-user",
+              promptSource: "typed",
+              timestamp: "2026-01-03T00:00:00.000Z",
+              sessionId: "metric-legacy",
+              message: { content: [] },
+            },
+            assistant({
+              id: "legacy-assistant",
+              session: "metric-legacy",
+              ts: "2026-01-03T00:01:00.000Z",
+              extra: { uuid: "legacy-friction", isCompactSummary: true },
+            }),
+          ],
+        },
+      });
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-legacy");
+      db.prepare("DELETE FROM ingest_metric_events").run();
+      db.prepare("DELETE FROM ingest_metric_baselines").run();
+
+      const touched = new Date(fs.statSync(file).mtimeMs + 2_000);
+      fs.utimesSync(file, touched, touched);
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-legacy");
+
+      expect(
+        db
+          .prepare("SELECT user_turn_count, compaction_count FROM sessions WHERE session_id = ?")
+          .get("metric-legacy"),
+      ).toEqual({ user_turn_count: 1, compaction_count: 1 });
+      expect(db.prepare("SELECT COUNT(*) AS n FROM ingest_metric_events").get()).toEqual({ n: 2 });
+      expect(
+        db
+          .prepare("SELECT seeded_offset FROM ingest_metric_baselines WHERE file_path = ?")
+          .get(file),
+      ).toEqual({ seeded_offset: fs.statSync(file).size });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves richer legacy gaps until every session file has a ledger baseline", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-metric-legacy-gaps-"));
+    try {
+      const user = (uuid: string, timestamp: string) => ({
+        type: "user",
+        uuid,
+        promptSource: "typed",
+        timestamp,
+        sessionId: "metric-legacy-gaps",
+        message: { content: [] },
+      });
+      writeCorpus(tmp, {
+        "proj-legacy-gaps": {
+          "a.jsonl": [
+            user("legacy-gap-1", "2026-01-03T00:00:00.000Z"),
+            user("legacy-gap-2", "2026-01-03T00:00:30.000Z"),
+          ],
+          "b.jsonl": [
+            user("legacy-gap-3", "2026-01-03T00:02:00.000Z"),
+            user("legacy-gap-4", "2026-01-03T00:10:00.000Z"),
+          ],
+        },
+      });
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+      db.prepare("DELETE FROM ingest_metric_events").run();
+      db.prepare("DELETE FROM ingest_metric_baselines").run();
+
+      const a = path.join(tmp, "proj-legacy-gaps", "a.jsonl");
+      fs.appendFileSync(a, toJsonl([user("legacy-gap-5", "2026-01-03T00:20:00.000Z")]));
+      const upgraded = new Ingestor(db, [tmp], OPTS);
+      upgraded.ingestFile(a, "proj-legacy-gaps");
+      expect(
+        db.prepare("SELECT gap_n FROM sessions WHERE session_id = ?").get("metric-legacy-gaps"),
+      ).toEqual({ gap_n: 3 });
+
+      const b = path.join(tmp, "proj-legacy-gaps", "b.jsonl");
+      upgraded.ingestFile(b, "proj-legacy-gaps");
+      fs.appendFileSync(b, toJsonl([user("legacy-gap-6", "2026-01-03T00:30:00.000Z")]));
+      upgraded.ingestFile(b, "proj-legacy-gaps");
+      expect(
+        db.prepare("SELECT gap_n FROM sessions WHERE session_id = ?").get("metric-legacy-gaps"),
+      ).toEqual({ gap_n: 5 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("produces the documented per-workspace and global aggregates", () => {
     const health = runBackscan(db, [FIXTURE_ROOT], OPTS);
 
@@ -750,6 +1016,39 @@ describe("tail size guard — unchanged files are skipped (event-loop de-jam)", 
     }
   });
 
+  it("does not rewrite an existing offset when a restarted ingestor finds an idle file", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-guard-restart-idle-"));
+    try {
+      const dir = path.join(tmp, "proj-restart-idle");
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, "s.jsonl");
+      fs.writeFileSync(
+        fp,
+        toJsonl([
+          assistant({
+            id: "idle-1",
+            session: "idle-s",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+
+      new Ingestor(db, [tmp], OPTS).ingestFile(fp, "proj-restart-idle");
+      const marker = "1999-12-31T23:59:59.000Z";
+      db.prepare("UPDATE ingest_offsets SET updated_at = ? WHERE file_path = ?").run(marker, fp);
+
+      new Ingestor(db, [tmp], OPTS).ingestFile(fp, "proj-restart-idle");
+      const offset = db
+        .prepare("SELECT updated_at FROM ingest_offsets WHERE file_path = ?")
+        .get(fp) as { updated_at: string };
+      expect(offset.updated_at).toBe(marker);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("re-processes an unchanged-on-disk file after clearRuntimeState (post-reset rescan)", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-guard-reset-"));
     try {
@@ -786,6 +1085,112 @@ describe("tail size guard — unchanged files are skipped (event-loop de-jam)", 
         n: number;
       };
       expect(n.n).toBe(1);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("file-version tail reset", () => {
+  it("resets after a larger staged file is renamed over the tailed path", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-version-rename-"));
+    try {
+      const dir = path.join(tmp, "proj-rename");
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, "s.jsonl");
+      fs.writeFileSync(
+        fp,
+        toJsonl([
+          assistant({
+            id: "rename-old",
+            session: "rename-s",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+      const ing = new Ingestor(db, [tmp], OPTS);
+      ing.ingestFile(fp, "proj-rename");
+
+      const staged = path.join(dir, "replacement.jsonl");
+      fs.writeFileSync(
+        staged,
+        toJsonl([
+          assistant({
+            id: "rename-new-1",
+            session: "rename-s",
+            ts: "2026-01-03T00:01:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+          assistant({
+            id: "rename-new-2",
+            session: "rename-s",
+            ts: "2026-01-03T00:02:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+      fs.renameSync(staged, fp);
+      ing.ingestFile(fp, "proj-rename");
+
+      const ids = db
+        .prepare("SELECT message_id FROM turns WHERE session_id = ? ORDER BY message_id")
+        .all("rename-s") as Array<{ message_id: string }>;
+      expect(ids.map((row) => row.message_id)).toEqual([
+        "rename-new-1",
+        "rename-new-2",
+        "rename-old",
+      ]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("ingests equal-size same-prefix rewrites immediately and after restart", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-version-reset-"));
+    try {
+      const dir = path.join(tmp, "proj-version");
+      fs.mkdirSync(dir, { recursive: true });
+      const fp = path.join(dir, "s.jsonl");
+      const idPrefix = `version-${"x".repeat(300)}-`;
+      const write = (suffix: string) =>
+        fs.writeFileSync(
+          fp,
+          toJsonl([
+            assistant({
+              id: `${idPrefix}${suffix}`,
+              session: "version-s",
+              ts: "2026-01-03T00:00:00.000Z",
+              input: 100,
+              output: 10,
+            }),
+          ]),
+        );
+
+      write("old");
+      const first = new Ingestor(db, [tmp], OPTS);
+      first.ingestFile(fp, "proj-version");
+
+      write("new");
+      const immediateMtime = new Date(Date.now() + 2_000);
+      fs.utimesSync(fp, immediateMtime, immediateMtime);
+      first.ingestFile(fp, "proj-version");
+
+      write("two");
+      const restartMtime = new Date(Date.now() + 4_000);
+      fs.utimesSync(fp, restartMtime, restartMtime);
+      const restarted = new Ingestor(db, [tmp], OPTS);
+      restarted.ingestFile(fp, "proj-version");
+
+      const ids = db
+        .prepare("SELECT message_id FROM turns WHERE session_id = ? ORDER BY message_id")
+        .all("version-s") as Array<{ message_id: string }>;
+      expect(ids.map((row) => row.message_id)).toEqual(
+        [`${idPrefix}new`, `${idPrefix}old`, `${idPrefix}two`].sort(),
+      );
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

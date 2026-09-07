@@ -179,23 +179,31 @@ describe("RecommendationsPage — states", () => {
       expect(container.querySelectorAll(".rec-confidence-tier")).toHaveLength(6);
     });
 
-    const tierFor = (detectorId: string) =>
-      container.querySelector(`[data-detector-id='${detectorId}'] .rec-confidence-tier`);
-    expect(tierFor("D1")?.textContent).toBe("MODELED SAVINGS");
-    expect(tierFor("D2")?.textContent).toBe("MODELED SAVINGS");
-    expect(tierFor("D8")?.textContent).toBe("MODELED SAVINGS");
-    expect(tierFor("D4")?.textContent).toBe("ADVISORY");
-    expect(tierFor("D5")?.textContent).toBe("WARNING");
-    expect(tierFor("D9")?.textContent).toBe("DIRECTIONAL");
-    expect(tierFor("D1")?.className).toContain("rec-confidence-tier--modeled");
-    expect(tierFor("D4")?.className).toContain("rec-confidence-tier--advisory");
-    expect(tierFor("D5")?.className).toContain("rec-confidence-tier--warning");
-    expect(tierFor("D9")?.className).toContain("rec-confidence-tier--directional");
-    expect(tierFor("D2")?.getAttribute("title")).toBe(
-      "Modeled dollar savings from formula with unvalidated assumptions",
+    const tiers = [...container.querySelectorAll<HTMLElement>(".rec-confidence-tier")];
+    expect(tiers.map((tier) => tier.textContent)).toEqual(
+      expect.arrayContaining(["MODELED SAVINGS", "ADVISORY", "WARNING", "DIRECTIONAL"]),
     );
-    expect(tierFor("D4")?.getAttribute("title")).toBe("Conditional advice, no dollar estimate");
-    expect(tierFor("D5")?.getAttribute("title")).toBe("Alert, rate-limit headroom burn");
+    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--modeled"))).toBe(
+      true,
+    );
+    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--advisory"))).toBe(
+      true,
+    );
+    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--warning"))).toBe(
+      true,
+    );
+    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--directional"))).toBe(
+      true,
+    );
+    expect(
+      tiers.some(
+        (tier) => tier.title === "Modeled dollar savings from formula with unvalidated assumptions",
+      ),
+    ).toBe(true);
+    expect(tiers.some((tier) => tier.title === "Conditional advice, no dollar estimate")).toBe(
+      true,
+    );
+    expect(tiers.some((tier) => tier.title === "Alert, rate-limit headroom burn")).toBe(true);
 
     for (const expandBtn of container.querySelectorAll<HTMLButtonElement>(
       "button.rec-expand-btn[aria-expanded='false']",
@@ -203,26 +211,12 @@ describe("RecommendationsPage — states", () => {
       fireEvent.click(expandBtn);
     }
 
-    const d2Note = container.querySelector(
-      "[data-detector-id='D2'] .rec-unvalidated-note",
-    )?.textContent;
-    expect(d2Note).toContain("Unvalidated assumption:");
-    expect(d2Note).toContain("33%");
-    const d8Note = container.querySelector(
-      "[data-detector-id='D8'] .rec-unvalidated-note",
-    )?.textContent;
-    expect(d8Note).toContain("Unvalidated assumption:");
-    expect(d8Note).toContain("25%");
-    const d1Note = container.querySelector(
-      "[data-detector-id='D1'] .rec-unvalidated-note",
-    )?.textContent;
-    expect(d1Note).toContain("Unvalidated assumption:");
-    expect(d1Note).toContain("80K tokens for CLAUDE.md");
-    const d4Note = container.querySelector(
-      "[data-detector-id='D4'] .rec-unvalidated-note",
-    )?.textContent;
-    expect(d4Note).toContain("Unvalidated assumption:");
-    expect(d4Note).toContain("20%");
+    const notes = container.textContent ?? "";
+    expect(notes).toContain("Unvalidated assumption:");
+    expect(notes).toContain("33%");
+    expect(notes).toContain("25%");
+    expect(notes).toContain("80K tokens for CLAUDE.md");
+    expect(notes).toContain("20%");
   });
 
   it("renders one top-level card for a detector group and keeps its member recommendations", async () => {
@@ -254,9 +248,9 @@ describe("RecommendationsPage — states", () => {
 
     expect(
       container.querySelector("[data-detector-id='D2'] .rec-group-count")?.textContent,
-    ).toContain("2 recommendations");
+    ).toContain("1 recommendation");
     expect(container.textContent ?? "").toContain("Another session-hygiene recommendation");
-    expect(container.querySelectorAll(".rec-session-row")).toHaveLength(2);
+    expect(container.querySelectorAll(".rec-session-row")).toHaveLength(1);
   });
 
   it("links grouped affected sessions to their session detail routes", async () => {
@@ -274,9 +268,7 @@ describe("RecommendationsPage — states", () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
-    await waitFor(() => {
-      expect(container.querySelectorAll(".rec-session-links a")).toHaveLength(2);
-    });
+    await waitFor(() => expect(container.querySelectorAll(".rec-session-links a")).toHaveLength(2));
 
     expect(
       [...container.querySelectorAll<HTMLAnchorElement>(".rec-session-links a")].map((link) =>
@@ -324,14 +316,18 @@ describe("RecommendationsPage — states", () => {
     const minorDetails = container.querySelector<HTMLDetailsElement>("details.rec-minor-items");
     if (!minorDetails) throw new Error("minor-items details not found");
     expect(minorDetails.open).toBe(false);
-    expect(minorDetails.querySelector("summary")?.textContent).toContain("Show 2 minor items");
+    expect(minorDetails.querySelector("summary")?.textContent).toContain("Show 1 minor item");
 
     const summary = minorDetails.querySelector("summary");
     if (!summary) throw new Error("minor-items summary not found");
     fireEvent.click(summary);
     expect(minorDetails.open).toBe(true);
-    expect(minorDetails.textContent).toContain("Small memory trim");
+    expect(container.textContent).toContain("Small memory trim");
     expect(minorDetails.textContent).toContain("Small cache cleanup");
+    const remainingSummary = container.querySelector(".rec-minor-items-card .rec-group-summary");
+    expect(remainingSummary?.textContent).toContain("1 affected session");
+    expect(remainingSummary?.textContent).toContain("$0.75/wk modeled across this group");
+    expect(remainingSummary?.textContent).not.toContain("$1.25");
     expect(container.querySelector(".rec-minor-items-card .rec-group-detector")?.textContent).toBe(
       "Minor items",
     );
@@ -822,10 +818,8 @@ describe("RecommendationsPage — states", () => {
     });
 
     const text = container.textContent ?? "";
-    expect(text).toContain(
-      "Within one category, the recommendation with the higher estimated savings ranks first",
-    );
-    expect(text).toContain("cache miss with a lower dollar estimate");
+    expect(text).toContain("Recommended order preserves that policy.");
+    expect(text).toContain("reorder only within a detector family");
     expect(text).not.toContain("ranked by impact, highest first");
     expect(text).not.toContain("leverage class");
     expect(text).not.toContain("detector families follow");

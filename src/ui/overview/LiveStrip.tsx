@@ -94,7 +94,7 @@ export default function LiveStrip({
             LIVE ({count})
           </span>
           <span className="live-strip-freshness">
-            {freshness === null ? "freshness ≤30 s" : freshness}
+            {freshness === null ? "awaiting first refresh" : freshness}
           </span>
         </div>
 
@@ -122,7 +122,7 @@ export default function LiveStrip({
             </div>
           )}
 
-          {!isPending && !isLoading && error === null && count > 0 && (
+          {!isPending && !isLoading && count > 0 && (
             <table>
               <thead>
                 <tr>

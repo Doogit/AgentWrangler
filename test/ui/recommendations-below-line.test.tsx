@@ -85,7 +85,7 @@ function responseWithActiveRecommendations(): ApiResponse<RecommendationsView> {
 }
 
 describe("RecommendationsPage below-the-line summary", () => {
-  it("shows the summary header with active count, biggest lever, trio, and the non-additive note", async () => {
+  it("shows the summary header with active count, most findings, trio, and the non-additive note", async () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(responseWithActiveRecommendations());
     const { container } = render(<RecommendationsPage />);
 
@@ -96,8 +96,8 @@ describe("RecommendationsPage below-the-line summary", () => {
     const header = container.querySelector(".recs-summary-header");
     // Big count — total active
     expect(header?.textContent).toContain("3 active recommendations");
-    // Biggest lever line
-    expect(header?.textContent).toContain("Biggest lever this week:");
+    // Most findings line
+    expect(header?.textContent).toContain("Most findings:");
     // Non-additive honesty note
     expect(header?.textContent).toContain("Modeled savings are not additive.");
     // Trio counts present

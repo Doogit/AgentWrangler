@@ -583,3 +583,21 @@ describe("SettingsPage — calibrate-primary UX", () => {
     });
   });
 });
+
+describe("Settings section navigation", () => {
+  afterEach(() => {
+    window.location.hash = "";
+  });
+  it("focuses the requested section after loading and on same-page navigation", async () => {
+    window.location.hash = "#/settings?section=scan-roots";
+    setupSuccess();
+    render(<SettingsPage />);
+    await waitFor(() => expect(document.activeElement?.id).toBe("scan-roots"));
+    window.location.hash = "#/settings?section=parser-health";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    await waitFor(() => expect(document.activeElement?.id).toBe("settings-parser-health"));
+    window.location.hash = "#/settings?section=unknown";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect(document.activeElement?.id).toBe("settings-parser-health");
+  });
+});

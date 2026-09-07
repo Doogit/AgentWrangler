@@ -76,7 +76,7 @@ achieved.
 
 ![Recommendations tab — ranked detector families with modeled savings and one-click actions](docs/assets/recommendations.png)
 
-### Installable guardrails — warnings inside Claude Code, before the waste
+### Installable guardrails — local checks inside Claude Code, before the waste
 
 Five small hooks you can install from the dashboard (directly, or via a copyable prompt that
 Claude Code applies itself):
@@ -86,11 +86,13 @@ Claude Code applies itself):
 | **Context-budget warning** | Warns when a session's context crosses your soft/hard thresholds |
 | **Loop guard** | Flags repeated identical tool failures before they spiral |
 | **Burn alert** | Catches idle sessions still burning tokens in the background |
-| **Pre-compaction checkpoint** | Nudges a checkpoint before `/compact` destroys recoverable state |
-| **Dangerous-command block** | Denies a configurable list of destructive shell commands |
+| **Pre-compaction checkpoint** | Copies the raw local transcript before an automatic compaction, subject to a local retention cap |
+| **Dangerous-command guard** | Asks before risky shell commands and denies a small catastrophe list |
 
-The in-session guards only warn — they never block a tool call. Thresholds are tunable from
-Settings, and every hook has a matching one-click uninstall.
+The context-budget and burn hooks warn. The loop guard warns before it denies repeated identical
+failures, and the dangerous-command guard can ask or deny. Direct install enables all five hooks;
+the copied install prompt enables the context-budget, loop, and burn hooks only. Thresholds are
+tunable from Settings, and direct uninstall removes every AgentWrangler hook.
 
 ### Sessions — who spent it, and on what
 
@@ -138,12 +140,13 @@ key metric in plain language. The full tour: **[Dashboard tour →](docs/dashboa
 
 ## Privacy — local-only by design
 
-- The daemon binds to **`127.0.0.1`** only. No cloud, no telemetry, nothing phones home.
-- Only **aggregates, ids, counts, and structural anchors** are stored — never raw transcript
-  or PR content (the SEC-101 privacy invariant, enforced in code and CI).
+- The daemon binds to **`127.0.0.1`** only. There is no cloud backend, telemetry, or account.
+- Most dashboard data is **aggregates, ids, counts, and structural anchors**. Local command text
+  and filesystem paths can also be retained in SQLite; treat the database as sensitive. The optional
+  direct-install PreCompact hook can separately copy full raw transcripts locally.
 - The optional GitHub token is read locally, never logged, never persisted to the DB.
-- The only network calls to Anthropic are two **opt-in** calibration features, both off by
-  default.
+- Usage refreshes can call Anthropic with an existing Claude Code sign-in. GitHub outcomes sync
+  calls GitHub only when a token is configured; calibration and G2 judging are separate opt-ins.
 
 Full details, including exactly what is and isn't stored: **[Privacy model →](docs/privacy.md)**
 
@@ -159,7 +162,7 @@ and [`.env.example`](.env.example).
 |---|---|
 | [Getting started](docs/getting-started.md) | Install paths, optional setup, configuration, troubleshooting |
 | [Dashboard tour](docs/dashboard-tour.md) | Every tab in depth, plus the metric vocabulary |
-| [Privacy model](docs/privacy.md) | What's stored, what never is, and the two opt-in exceptions |
+| [Privacy model](docs/privacy.md) | Local storage, raw-checkpoint exception, and network integrations |
 | [Architecture](docs/planning/AgentWrangler_Technical_Architecture_v4_5_0.md) | Daemon, ingestion, detector, and query design |
 | [Data model & metrics](docs/planning/AgentWrangler_Data_Model_and_Metrics_v2.md) | SQLite schema and metric definitions |
 | [Contributing](.github/CONTRIBUTING.md) | Dev setup, checks, PR expectations |

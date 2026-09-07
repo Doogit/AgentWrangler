@@ -120,10 +120,14 @@ per-workspace scope selector; and **Copy as Markdown** for standups.
 - **Bytes→token calibration** — opt-in, off by default (see [Privacy](privacy.md)).
 - **Workspace mappings** — edit repo path / canonical name per workspace.
 - **Parser health** — read-only ingestion counters.
-- **Usage reader** — local Claude Code OAuth status.
-- **Outcomes sync** — GitHub token status.
-- **In-session guards** — install/uninstall and tune the guardrail hooks (warn thresholds,
-  loop window, idle cutoff). The guards only warn — they never block a tool call.
+- **Usage reader** — uses the existing Claude Code OAuth sign-in to call Anthropic's usage
+  endpoint for live rate-limit state; it does not upload transcript text.
+- **Outcomes sync** — with a GitHub token, reads outcome metadata at startup and on the scheduled
+  pass; without a token it makes no GitHub requests.
+- **In-session guards** — direct install adds five hooks; the copied prompt adds context-budget,
+  loop, and burn only. Context-budget and burn warn, loop can deny repeated failures, and the
+  direct-only dangerous-command guard can ask or deny. The direct-only PreCompact hook can make
+  local raw-transcript checkpoint copies; see [Privacy](privacy.md#raw-transcript-checkpoint-copies).
 - **Danger zone** — type-to-confirm database reset.
 
 ## Glossary ("How to read this dashboard")

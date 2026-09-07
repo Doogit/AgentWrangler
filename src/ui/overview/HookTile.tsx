@@ -21,7 +21,7 @@ export default function HookTile({ hookConfig, isLoading }: Props) {
         CONTEXT-BUDGET HOOK{" "}
         <InfoTip
           label="What the context-budget hook does"
-          content="A one-line install that warns you in-session as context fills, so you checkpoint before a costly auto-compact. Install it from Settings if the tile shows it's off."
+          content="A local hook that warns you in-session as context fills. Install it from Settings if the tile shows it's off."
         />
       </div>
 
@@ -74,8 +74,7 @@ export default function HookTile({ hookConfig, isLoading }: Props) {
               marginBottom: 10,
             }}
           >
-            Install the context-budget hook to automatically pause sessions before they hit the rate
-            limit.
+            Install the context-budget hook to warn as the context window fills.
           </div>
           <a
             href="#/settings"

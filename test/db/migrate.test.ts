@@ -34,6 +34,8 @@ const V2_TABLES = [
   "tool_event_metadata",
   "analysis_runs",
   "ingest_quarantine",
+  "ingest_metric_events",
+  "ingest_metric_baselines",
   "ingest_offsets",
   "schema_migrations",
   "user_config",
@@ -87,7 +89,7 @@ describe("runMigrations", () => {
       expect(rows.length).toBe(applied.length);
       // The first migration must be 001_observe.
       expect(rows[0]?.version).toBe("001_observe");
-      expect(rows.at(-1)?.version).toBe("015_gap_aggregates");
+      expect(rows.at(-1)?.version).toBe("017_ingest_metric_events");
     } finally {
       db.close();
     }
@@ -105,6 +107,64 @@ describe("runMigrations", () => {
       expect(cols.has("compaction_count"), "expected compaction_count column").toBe(true);
       expect(cols.has("api_error_count"), "expected api_error_count column").toBe(true);
       expect(cols.has("interrupt_count"), "expected interrupt_count column").toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("adds nullable file-version fields to ingest offsets (016)", () => {
+    const db = openDb(dbPath);
+    try {
+      runMigrations(db);
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(ingest_offsets)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      );
+      for (const name of ["file_size", "file_dev", "file_ino", "file_mtime_ms", "file_ctime_ms"]) {
+        expect(columns.has(name), `expected ${name}`).toBe(true);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it("upgrades a populated 015 offset without changing its position or head hash", () => {
+    const db = openDb(dbPath);
+    try {
+      expect(runMigrations(db, "015_gap_aggregates").at(-1)).toBe("015_gap_aggregates");
+      db.prepare(
+        `INSERT INTO ingest_offsets (file_path, byte_offset, file_hash_head, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      ).run("C:/synthetic/session.jsonl", 1234, "old-head-hash", "2026-01-01T00:00:00.000Z");
+
+      expect(runMigrations(db)).toEqual([
+        "016_ingest_offset_file_version",
+        "017_ingest_metric_events",
+      ]);
+      const row = db
+        .prepare(
+          `SELECT byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms
+           FROM ingest_offsets WHERE file_path = ?`,
+        )
+        .get("C:/synthetic/session.jsonl") as {
+        byte_offset: number;
+        file_hash_head: string;
+        file_size: number | null;
+        file_dev: string | null;
+        file_ino: string | null;
+        file_mtime_ms: number | null;
+        file_ctime_ms: number | null;
+      };
+      expect(row).toEqual({
+        byte_offset: 1234,
+        file_hash_head: "old-head-hash",
+        file_size: null,
+        file_dev: null,
+        file_ino: null,
+        file_mtime_ms: null,
+        file_ctime_ms: null,
+      });
     } finally {
       db.close();
     }

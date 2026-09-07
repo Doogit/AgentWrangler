@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { fetchGlobalOverview, isDaemonUnreachableError } from "./api/client";
-import BriefsPage from "./briefs/BriefsPage";
-import GlossaryPage from "./glossary/GlossaryPage";
 import Sidebar from "./nav/Sidebar";
-import OverviewPage from "./overview/OverviewPage";
-import RecommendationsPage from "./recommendations/RecommendationsPage";
-import HotSessionsPage from "./sessions/HotSessionsPage.js";
-import SessionDetailPage from "./sessions/SessionDetailPage";
-import SettingsPage from "./settings/SettingsPage";
-import WorkspaceDetailPage from "./workspaces/WorkspaceDetailPage";
-import WorkspacesPage from "./workspaces/WorkspacesPage";
+import LoadBoundary from "./shell/LoadBoundary";
+
+const BriefsPage = lazy(() => import("./briefs/BriefsPage"));
+const GlossaryPage = lazy(() => import("./glossary/GlossaryPage"));
+const OverviewPage = lazy(() => import("./overview/OverviewPage"));
+const RecommendationsPage = lazy(() => import("./recommendations/RecommendationsPage"));
+const HotSessionsPage = lazy(() => import("./sessions/HotSessionsPage.js"));
+const SessionDetailPage = lazy(() => import("./sessions/SessionDetailPage"));
+const SettingsPage = lazy(() => import("./settings/SettingsPage"));
+const WorkspaceDetailPage = lazy(() => import("./workspaces/WorkspaceDetailPage"));
+const WorkspacesPage = lazy(() => import("./workspaces/WorkspacesPage"));
 
 export type AppRoute =
   | "overview"
@@ -139,7 +141,10 @@ export default function App() {
           </div>
           <h1 id="daemon-unreachable-title">Local daemon unavailable</h1>
           <p>The dashboard cannot reach the AgentWrangler daemon on this computer.</p>
-          <p>Start it from this project, then try again:</p>
+          <p>For an npm installation, start the installed command or use npx:</p>
+          <code className="daemon-unreachable-command">agentwrangler</code>
+          <code className="daemon-unreachable-command">npx agentwrangler@latest</code>
+          <p>From a source checkout with dependencies installed:</p>
           <code className="daemon-unreachable-command">npm run daemon</code>
           <button
             type="button"
@@ -171,25 +176,28 @@ export default function App() {
   };
 
   // Show workspaces nav item as active for the workspace-detail route too.
-  const sidebarActive: AppRoute = route === "workspace-detail" ? "workspaces" : route;
+  const sidebarActive: AppRoute =
+    route === "workspace-detail" ? "workspaces" : route === "session-detail" ? "sessions" : route;
 
   return (
     <div className="shell">
       <Sidebar active={sidebarActive} onNavigate={navigate} />
       <div className="main-content">
-        {route === "overview" && <OverviewPage onSelectSession={openSession} />}
-        {route === "briefs" && <BriefsPage />}
-        {route === "recommendations" && <RecommendationsPage />}
-        {route === "settings" && <SettingsPage />}
-        {route === "workspaces" && <WorkspacesPage />}
-        {route === "sessions" && <HotSessionsPage onSelectSession={openSession} />}
-        {route === "glossary" && <GlossaryPage />}
-        {route === "session-detail" && sessionId !== null && (
-          <SessionDetailPage sessionId={sessionId} onBack={closeSession} />
-        )}
-        {route === "workspace-detail" && workspaceId !== null && (
-          <WorkspaceDetailPage workspaceId={workspaceId} onBack={closeSession} />
-        )}
+        <LoadBoundary key={route} label="page">
+          {route === "overview" && <OverviewPage onSelectSession={openSession} />}
+          {route === "briefs" && <BriefsPage />}
+          {route === "recommendations" && <RecommendationsPage />}
+          {route === "settings" && <SettingsPage />}
+          {route === "workspaces" && <WorkspacesPage />}
+          {route === "sessions" && <HotSessionsPage onSelectSession={openSession} />}
+          {route === "glossary" && <GlossaryPage />}
+          {route === "session-detail" && sessionId !== null && (
+            <SessionDetailPage sessionId={sessionId} onBack={closeSession} />
+          )}
+          {route === "workspace-detail" && workspaceId !== null && (
+            <WorkspaceDetailPage workspaceId={workspaceId} onBack={closeSession} />
+          )}
+        </LoadBoundary>
       </div>
     </div>
   );

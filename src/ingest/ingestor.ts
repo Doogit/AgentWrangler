@@ -29,7 +29,14 @@ import {
   type ReconcileOptions,
   reconcileSessions,
 } from "./reconcile.js";
-import { loadOffset, saveOffset, tailFile } from "./tail.js";
+import {
+  type FileVersion,
+  fileVersion,
+  loadOffset,
+  sameFileVersion,
+  saveOffset,
+  tailFile,
+} from "./tail.js";
 import type { HealthCounters, TurnProjection } from "./types.js";
 import { LONG_GAP_THRESHOLD_S } from "./types.js";
 import {
@@ -77,10 +84,9 @@ export class Ingestor {
   private readonly countedResults = new Set<string>(); // toolUseIds already summed
   private readonly resultBytesByMsg = new Map<string, number>(); // messageId → running byte sum
   private readonly lineCursor = new Map<string, number>(); // filePath → complete lines consumed
-  private readonly lastSize = new Map<string, number>(); // filePath → last-seen size (skip unchanged files)
+  private readonly lastVersion = new Map<string, FileVersion>(); // filePath → last-seen version
   private readonly discoveryCache = createDiscoveryCache();
   private readonly unresolvedRemotes = new Set<string>();
-  private readonly userTurnTsBySession = new Map<string, number[]>(); // sessionId → epoch-ms of user turns
 
   // Prepared statements.
   private readonly stInsertTurn;
@@ -89,7 +95,11 @@ export class Ingestor {
   private readonly stBumpUserTurnCount;
   private readonly stBumpFrictionCounts;
   private readonly stSetGapAggregates;
+  private readonly stInsertMetricEvent;
+  private readonly stGetMetricTimestamps;
   private readonly stGetGapN;
+  private readonly stGetMetricBaseline;
+  private readonly stSetMetricBaseline;
   private readonly stInsertToolEvent;
   private readonly stUpsertToolEventMetadata;
   private readonly stSetToolResult;
@@ -145,7 +155,24 @@ export class Ingestor {
     this.stSetGapAggregates = db.prepare(
       "UPDATE sessions SET gap_median_s=?, gap_p90_s=?, long_gap_count=?, gap_n=? WHERE session_id=?",
     );
-    this.stGetGapN = db.prepare("SELECT gap_n FROM sessions WHERE session_id=?");
+    this.stInsertMetricEvent = db.prepare(
+      `INSERT OR IGNORE INTO ingest_metric_events
+         (event_id, session_id, user_turn_ts, is_user_turn,
+          is_compact_summary, is_api_error, is_interrupt)
+       VALUES (?,?,?,?,?,?,?)`,
+    );
+    this.stGetMetricTimestamps = db.prepare(
+      `SELECT user_turn_ts FROM ingest_metric_events
+       WHERE session_id = ? AND is_user_turn = 1 AND user_turn_ts IS NOT NULL`,
+    );
+    this.stGetGapN = db.prepare("SELECT gap_n FROM sessions WHERE session_id = ?");
+    this.stGetMetricBaseline = db.prepare(
+      "SELECT seeded_offset FROM ingest_metric_baselines WHERE file_path = ?",
+    );
+    this.stSetMetricBaseline = db.prepare(
+      `INSERT INTO ingest_metric_baselines (file_path, seeded_offset) VALUES (?, ?)
+       ON CONFLICT(file_path) DO UPDATE SET seeded_offset = excluded.seeded_offset`,
+    );
     this.stInsertToolEvent = db.prepare(
       `INSERT INTO tool_events
          (event_id, session_id, ts, tool_name, input_bytes, result_bytes, input_hash, exit_class, commit_sha)
@@ -310,9 +337,8 @@ export class Ingestor {
     this.countedResults.clear();
     this.resultBytesByMsg.clear();
     this.lineCursor.clear();
-    this.lastSize.clear();
+    this.lastVersion.clear();
     this.unresolvedRemotes.clear();
-    this.userTurnTsBySession.clear();
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -359,31 +385,41 @@ export class Ingestor {
 
   /** Tail one file from its stored offset and ingest the complete new lines. */
   ingestFile(filePath: string, projectSlug: string): void {
-    // Cheap size guard: transcripts are append-only, so an unchanged file size
-    // means zero new complete lines. Skip it before touching the DB — this keeps
-    // the 2s tail tick from doing ~4,700 sqlite writes across ~2,352 idle files
+    // Skip only when size, identity, and timestamps all match. This keeps the
+    // 2s tail tick from touching the DB for idle files while still noticing
+    // same-size rewrites and path replacement.
     // every tick, which was starving the daemon's event loop (outcomes pass).
     // Keep the per-file stat: directory mtimes only decide when to refresh paths;
     // they cannot safely replace append/rotation change detection for each file.
-    let curSize: number;
+    let currentVersion: FileVersion;
     try {
-      curSize = fs.statSync(filePath).size;
+      currentVersion = fileVersion(fs.statSync(filePath));
     } catch {
       return; // file vanished between discovery and tail; nothing to ingest
     }
-    if (this.lastSize.get(filePath) === curSize) return; // unchanged since last tick — no new bytes
-    this.lastSize.set(filePath, curSize);
+    const previousVersion = this.lastVersion.get(filePath);
+    if (previousVersion !== undefined && sameFileVersion(previousVersion, currentVersion)) return;
+    this.lastVersion.set(filePath, currentVersion);
 
     this.health.fileSeen();
     registerWorkspace(this.db, projectSlug);
 
     const stored = loadOffset(this.db, filePath);
-    const result = tailFile(filePath, stored);
+    this.seedLegacyMetricPrefix(filePath, stored?.offset ?? null, currentVersion.size);
+    const result = tailFile(filePath, stored, currentVersion);
     if (result.wasReset) this.lineCursor.set(filePath, 0);
 
     if (result.lines.length === 0) {
-      // Still persist head-hash/offset so first-touch rotation detection is armed.
-      saveOffset(this.db, filePath, result.newOffset, result.newHeadHash);
+      if (
+        stored === null ||
+        stored.offset !== result.newOffset ||
+        stored.headHash !== result.newHeadHash ||
+        stored.fileVersion === null ||
+        !sameFileVersion(stored.fileVersion, currentVersion)
+      ) {
+        saveOffset(this.db, filePath, result.newOffset, result.newHeadHash, currentVersion);
+      }
+      this.stSetMetricBaseline.run(filePath, result.newOffset);
       return;
     }
 
@@ -400,8 +436,54 @@ export class Ingestor {
     tx();
 
     this.lineCursor.set(filePath, base + result.lines.length);
-    saveOffset(this.db, filePath, result.newOffset, result.newHeadHash);
+    saveOffset(this.db, filePath, result.newOffset, result.newHeadHash, currentVersion);
+    this.stSetMetricBaseline.run(filePath, result.newOffset);
     this.health.fileParsed();
+  }
+
+  /**
+   * Upgrade bridge for offsets created before the metric-event ledger existed.
+   * Already-consumed complete lines are registered without advancing counters.
+   */
+  private seedLegacyMetricPrefix(
+    filePath: string,
+    storedOffset: number | null,
+    currentSize: number,
+  ): void {
+    const baseline = this.stGetMetricBaseline.get(filePath) as
+      | { seeded_offset: number }
+      | undefined;
+    if (baseline !== undefined) return;
+
+    if (storedOffset === null || storedOffset <= 0 || storedOffset > currentSize) {
+      this.stSetMetricBaseline.run(filePath, 0);
+      return;
+    }
+
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buf = Buffer.alloc(storedOffset);
+      const bytesRead = fs.readSync(fd, buf, 0, storedOffset, 0);
+      let lastNl = -1;
+      for (let i = bytesRead - 1; i >= 0; i--) {
+        if (buf[i] === 0x0a) {
+          lastNl = i;
+          break;
+        }
+      }
+      const lines = lastNl < 0 ? [] : buf.subarray(0, lastNl).toString("utf8").split("\n");
+      const defaultSessionId = sessionStemFor(filePath);
+      this.db.transaction(() => {
+        for (const raw of lines) {
+          if (raw.length === 0) continue;
+          const proj = projectLine(raw, { defaultSessionId });
+          if (proj.kind === "record") this.recordMetricEvent(raw, proj, false);
+        }
+        this.stSetMetricBaseline.run(filePath, storedOffset);
+      })();
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   private applyLine(
@@ -434,36 +516,16 @@ export class Ingestor {
       this.ensureSession(lineSessionId, workspaceId, filePath, lineTs === "" ? null : lineTs);
     }
 
-    if (proj.isUserTurn === true) {
-      this.stBumpUserTurnCount.run(proj.sessionId);
-      if (typeof proj.ts === "string" && proj.ts.length > 0) {
-        const epochMs = Date.parse(proj.ts);
-        if (Number.isFinite(epochMs)) {
-          const list = this.userTurnTsBySession.get(proj.sessionId);
-          if (list !== undefined) {
-            list.push(epochMs);
-          } else {
-            this.userTurnTsBySession.set(proj.sessionId, [epochMs]);
-          }
-          this.applyGapAggregates(proj.sessionId);
-        }
-      }
+    if (
+      lineSessionId === null &&
+      (proj.isCompactSummary || proj.isApiErrorMessage || proj.isInterrupt)
+    ) {
+      this.ensureSession(proj.sessionId, workspaceId, filePath, null);
     }
 
-    // Friction counters (RV2a): compact summary, API error, interrupt.
-    if (proj.isCompactSummary || proj.isApiErrorMessage || proj.isInterrupt) {
-      // Ensure session row exists for lines that carry only top-level flags
-      // (no turn, command, or tool events — so lineSessionId would be null).
-      if (lineSessionId === null) {
-        this.ensureSession(proj.sessionId, workspaceId, filePath, null);
-      }
-      this.stBumpFrictionCounts.run(
-        proj.isCompactSummary ? 1 : 0,
-        proj.isApiErrorMessage ? 1 : 0,
-        proj.isInterrupt ? 1 : 0,
-        proj.sessionId,
-      );
-    }
+    // User/friction aggregates advance only for a structurally new source record.
+    // The persisted digest makes replay idempotent across restarts and files.
+    this.recordMetricEvent(raw, proj, true);
 
     // Command markers → tool_events(local_command) for hygiene evaluation.
     if (proj.command !== null) {
@@ -632,25 +694,99 @@ export class Ingestor {
     );
   }
 
-  private applyGapAggregates(sessionId: string): void {
-    const tsList = this.userTurnTsBySession.get(sessionId);
-    if (tsList === undefined || tsList.length === 0) {
-      this.clearGapAggregatesUnlessRicher(sessionId);
+  private recordMetricEvent(
+    raw: string,
+    proj: Extract<ReturnType<typeof projectLine>, { kind: "record" }>,
+    applyAggregates: boolean,
+  ): void {
+    if (
+      !proj.isUserTurn &&
+      !proj.isCompactSummary &&
+      !proj.isApiErrorMessage &&
+      !proj.isInterrupt
+    ) {
       return;
     }
-    const sorted = [...tsList].sort((a, b) => a - b);
+    const flags = [
+      proj.isUserTurn ? "u" : "",
+      proj.isCompactSummary ? "c" : "",
+      proj.isApiErrorMessage ? "a" : "",
+      proj.isInterrupt ? "i" : "",
+    ].join("");
+    let sourceIdentity: string;
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed.uuid === "string" && parsed.uuid.trim() !== "") {
+        sourceIdentity = `uuid:${parsed.uuid}`;
+      } else {
+        const message = parsed.message;
+        const messageId =
+          typeof message === "object" && message !== null
+            ? (message as Record<string, unknown>).id
+            : null;
+        if (typeof messageId === "string" && messageId.trim() !== "") {
+          sourceIdentity = `message:${String(parsed.type ?? "")}:${messageId}:${flags}`;
+        } else {
+          sourceIdentity = `raw:${crypto.createHash("sha256").update(raw).digest("hex")}`;
+        }
+      }
+    } catch {
+      // projectLine already parsed record lines; retain a safe fallback if that contract changes.
+      sourceIdentity = `raw:${crypto.createHash("sha256").update(raw).digest("hex")}`;
+    }
+    const eventId = crypto
+      .createHash("sha256")
+      .update(`${proj.sessionId}\0${sourceIdentity}`)
+      .digest("hex");
+    const validUserTs =
+      proj.isUserTurn && typeof proj.ts === "string" && Number.isFinite(Date.parse(proj.ts))
+        ? proj.ts
+        : null;
+    const inserted = this.stInsertMetricEvent.run(
+      eventId,
+      proj.sessionId,
+      validUserTs,
+      proj.isUserTurn ? 1 : 0,
+      proj.isCompactSummary ? 1 : 0,
+      proj.isApiErrorMessage ? 1 : 0,
+      proj.isInterrupt ? 1 : 0,
+    );
+    if (!applyAggregates || inserted.changes === 0) return;
+
+    if (proj.isUserTurn) this.stBumpUserTurnCount.run(proj.sessionId);
+    if (proj.isCompactSummary || proj.isApiErrorMessage || proj.isInterrupt) {
+      this.stBumpFrictionCounts.run(
+        proj.isCompactSummary ? 1 : 0,
+        proj.isApiErrorMessage ? 1 : 0,
+        proj.isInterrupt ? 1 : 0,
+        proj.sessionId,
+      );
+    }
+    if (validUserTs !== null) this.applyGapAggregates(proj.sessionId);
+  }
+
+  private applyGapAggregates(sessionId: string): void {
+    const rows = this.stGetMetricTimestamps.all(sessionId) as Array<{ user_turn_ts: string }>;
+    const sorted = rows
+      .map((row) => Date.parse(row.user_turn_ts))
+      .filter((epochMs) => Number.isFinite(epochMs))
+      .sort((a, b) => a - b);
     const gaps: number[] = [];
     for (let i = 1; i < sorted.length; i++) {
       gaps.push(((sorted[i] as number) - (sorted[i - 1] as number)) / 1000);
     }
     const gapN = gaps.length;
+    const stored = this.stGetGapN.get(sessionId) as { gap_n: number } | undefined;
+    // During the 017 upgrade, a session's legacy timestamps can be spread across
+    // files that have not all established their metric-ledger baselines yet.
+    // Preserve the richer legacy aggregate until the ledger has caught up.
+    if (stored !== undefined && gapN < stored.gap_n) return;
     if (gapN === 0) {
-      this.clearGapAggregatesUnlessRicher(sessionId);
+      this.stSetGapAggregates.run(null, null, 0, 0, sessionId);
       return;
     }
-    // gapN >= 1: a real gap was observed in-process. Always write it — even a partial,
-    // post-restart sample reflects genuine current friction (e.g. a new long gap) and
-    // must not be suppressed just because it's smaller than a pre-restart gap_n.
+    // The persisted event ledger supplies the complete known history across
+    // restarts and source files, so this aggregate can be recomputed deterministically.
     const g = [...gaps].sort((a, b) => a - b);
     const mid = g.length;
     const gapMedianS =
@@ -661,17 +797,6 @@ export class Ingestor {
     const gapP90S = g[Math.max(0, p90Idx)] as number;
     const longGapCount = g.filter((x) => x > LONG_GAP_THRESHOLD_S).length;
     this.stSetGapAggregates.run(gapMedianS, gapP90S, longGapCount, gapN, sessionId);
-  }
-
-  // Write-guard for the "no computable gap" collapse (0 or 1 in-process user turns):
-  // the in-memory turn-timestamp map resets on every daemon restart, so this state is
-  // reached on the first post-restart user turn even when a prior cold runBackscan()
-  // already persisted a richer gap_n. Skip the null/zero write in that case so it
-  // doesn't clobber the richer aggregate.
-  private clearGapAggregatesUnlessRicher(sessionId: string): void {
-    const storedRow = this.stGetGapN.get(sessionId) as { gap_n: number | null } | undefined;
-    if ((storedRow?.gap_n ?? 0) > 0) return;
-    this.stSetGapAggregates.run(null, null, 0, 0, sessionId);
   }
 
   private quarantine(filePath: string, lineNo: number, errorClass: string): void {

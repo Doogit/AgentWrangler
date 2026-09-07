@@ -78,10 +78,14 @@ describe("NU4 — first-run activation CTAs", () => {
     const activation = await screen.findByTestId("first-run-activation");
     expect(activation).toBeTruthy();
 
-    for (const testid of ["first-run-calibrate", "first-run-token", "first-run-hook"]) {
+    for (const [testid, section] of [
+      ["first-run-calibrate", "calibration"],
+      ["first-run-token", "outcomes-sync"],
+      ["first-run-hook", "in-session-guards"],
+    ] as const) {
       const item = screen.getByTestId(testid);
       const link = item.querySelector("a");
-      expect(link?.getAttribute("href")).toBe("#/settings");
+      expect(link?.getAttribute("href")).toBe(`#/settings?section=${section}`);
     }
 
     // The "First session ingested" step gains its one specific sentence.

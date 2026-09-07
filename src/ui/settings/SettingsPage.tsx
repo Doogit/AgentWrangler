@@ -45,6 +45,7 @@ import { setExperimentalActions, useExperimentalActions } from "../hooks/useExpe
 import { formatAbsolute, relativeTime } from "../lib/relative-time";
 import Chip, { type ChipProps } from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
+import Modal from "../shell/Modal";
 import AnchorsPanel from "./AnchorsPanel";
 import { buildHookInstallPrompt, buildHookUninstallPrompt } from "./install-prompt";
 
@@ -278,7 +279,10 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
       <div className="settings-field">
         <label className="settings-label" htmlFor="scan-roots">
           Scan roots
-          <span className="settings-hint"> (one absolute path per line)</span>
+          <span className="settings-hint">
+            {" "}
+            (one absolute path per line; restart the daemon after saving)
+          </span>
         </label>
         <textarea
           id="scan-roots"
@@ -741,7 +745,7 @@ function GithubTokenStatusPanel() {
       <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Outcomes sync</h2>
       <p className="settings-hint">
         Cross-checks sessions against your git history to tell finished work from abandoned, feeding
-        the Success metric.
+        the Success metric. Optional: requires GitHub CLI (gh) on PATH and a read-only GitHub token.
       </p>
       {status === null && <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>}
       {status?.configured && (
@@ -843,8 +847,8 @@ function ContextBudgetHookPanel() {
         )}
       </div>
       <p style={{ color: "var(--muted)", fontSize: 12, margin: "6px 0 14px" }}>
-        Three small hooks inside Claude Code that warn you before waste happens — they only warn and
-        never block a tool call.
+        The copied prompt installs three context, loop, and burn hooks. Direct install adds the
+        dangerous-command guard, which can ask or deny, and the PreCompact checkpoint hook.
       </p>
       {config !== null && (
         <>
@@ -1201,7 +1205,7 @@ function IdleSessionsPanel() {
       {/* Single end confirm dialog */}
       {confirmSingle !== null && (
         <div className="settings-modal-backdrop">
-          <dialog open aria-labelledby="end-session-title" className="settings-modal">
+          <Modal labelledBy="end-session-title" onCancel={() => setConfirmSingle(null)}>
             <h3 id="end-session-title" style={{ margin: "0 0 10px" }}>
               End session?
             </h3>
@@ -1236,14 +1240,14 @@ function IdleSessionsPanel() {
                 Confirm End
               </button>
             </div>
-          </dialog>
+          </Modal>
         </div>
       )}
 
       {/* Bulk end confirm dialog */}
       {confirmBulk !== null && (
         <div className="settings-modal-backdrop">
-          <dialog open aria-labelledby="bulk-end-title" className="settings-modal">
+          <Modal labelledBy="bulk-end-title" onCancel={() => setConfirmBulk(null)}>
             <h3 id="bulk-end-title" style={{ margin: "0 0 10px" }}>
               End all idle interactive sessions?
             </h3>
@@ -1275,7 +1279,7 @@ function IdleSessionsPanel() {
                 Confirm End All
               </button>
             </div>
-          </dialog>
+          </Modal>
         </div>
       )}
     </section>
@@ -1345,7 +1349,12 @@ function DbReset({ dbPath, onReset }: DbResetProps) {
 
       {showModal && (
         <div className="settings-modal-backdrop">
-          <dialog open aria-labelledby="reset-modal-title" className="settings-modal">
+          <Modal
+            labelledBy="reset-modal-title"
+            onCancel={() => {
+              if (!resetting) closeModal();
+            }}
+          >
             <h3 id="reset-modal-title" style={{ margin: "0 0 10px", color: "var(--red)" }}>
               Confirm reset
             </h3>
@@ -1386,7 +1395,7 @@ function DbReset({ dbPath, onReset }: DbResetProps) {
                 {resetting ? "Resetting…" : "Reset database"}
               </button>
             </div>
-          </dialog>
+          </Modal>
         </div>
       )}
     </div>
@@ -1433,6 +1442,29 @@ export default function SettingsPage() {
 
   const settings = state.status === "ok" ? state.value.data : null;
 
+  useEffect(() => {
+    if (state.status !== "ok") return;
+    const navigateToSection = () => {
+      const section = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("section");
+      const targets: Record<string, string> = {
+        "scan-roots": "scan-roots",
+        calibration: "limit-tokens",
+        "outcomes-sync": "settings-outcomes-sync",
+        "in-session-guards": "settings-in-session-guards",
+        "idle-sessions": "settings-idle-sessions",
+        "parser-health": "settings-parser-health",
+      };
+      const id = section === null ? undefined : targets[section];
+      if (id === undefined) return;
+      const target = document.getElementById(id);
+      target?.scrollIntoView?.({ block: "start" });
+      target?.focus({ preventScroll: true });
+    };
+    navigateToSection();
+    window.addEventListener("hashchange", navigateToSection);
+    return () => window.removeEventListener("hashchange", navigateToSection);
+  }, [state.status]);
+
   return (
     <div>
       <div className="page-top">
@@ -1477,9 +1509,15 @@ export default function SettingsPage() {
           <ConfigForm settings={settings} onSaved={handleUpdated} />
           <BytesCalibrationSection settings={settings} onSaved={handleUpdated} />
           <OAuthStatusPanel />
-          <GithubTokenStatusPanel />
-          <ContextBudgetHookPanel />
-          <IdleSessionsPanel />
+          <div id="settings-outcomes-sync" tabIndex={-1}>
+            <GithubTokenStatusPanel />
+          </div>
+          <div id="settings-in-session-guards" tabIndex={-1}>
+            <ContextBudgetHookPanel />
+          </div>
+          <div id="settings-idle-sessions" tabIndex={-1}>
+            <IdleSessionsPanel />
+          </div>
           <WorkspaceMappings mappings={settings.workspace_mappings} onSaved={handleUpdated} />
           <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
             <h2 style={{ margin: "0 0 14px", fontSize: 15 }}>Experimental actions</h2>
@@ -1497,11 +1535,13 @@ export default function SettingsPage() {
             </label>
             <p>
               Off by default. When on, shows the experimental Apply/dry-run controls on
-              recommendation cards. Adopt/Dismiss are always available.
+              recommendation cards. Tracking requires a completed action; Dismiss remains available.
             </p>
           </section>
-          <ParserHealthPanel health={settings.parser_health} />
-          <ParseFailuresPanel rows={settings.quarantine_rows} />
+          <div id="settings-parser-health" tabIndex={-1}>
+            <ParserHealthPanel health={settings.parser_health} />
+            <ParseFailuresPanel rows={settings.quarantine_rows} />
+          </div>
           <AnchorsPanel />
           <WeeklyReportsPanel reports={reports} />
           <DbReset dbPath={settings.db_path} onReset={handleUpdated} />

@@ -21,6 +21,15 @@ const HEAD_BYTES = 256; // bytes hashed for rotation detection
 export interface Offset {
   offset: number;
   headHash: string | null;
+  fileVersion: FileVersion | null;
+}
+
+export interface FileVersion {
+  size: number;
+  dev: string;
+  ino: string;
+  mtimeMs: number;
+  ctimeMs: number;
 }
 
 export interface TailResult {
@@ -29,6 +38,26 @@ export interface TailResult {
   newHeadHash: string;
   event: null | "TRUNCATION" | "ROTATION";
   wasReset: boolean;
+}
+
+export function fileVersion(stat: fs.Stats): FileVersion {
+  return {
+    size: stat.size,
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  };
+}
+
+export function sameFileVersion(a: FileVersion, b: FileVersion): boolean {
+  return (
+    a.size === b.size &&
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.mtimeMs === b.mtimeMs &&
+    a.ctimeMs === b.ctimeMs
+  );
 }
 
 /** SHA-256 of the first n bytes of a file (or fewer if the file is shorter). */
@@ -66,13 +95,17 @@ export function headHash(filePath: string): string {
  * Tail one file from its stored offset. Returns complete lines only.
  * See module header for the rotation/truncation contract.
  */
-export function tailFile(filePath: string, stored: Offset | null): TailResult {
+export function tailFile(
+  filePath: string,
+  stored: Offset | null,
+  currentVersion?: FileVersion,
+): TailResult {
   let storedOffset = stored?.offset ?? 0;
   let storedHead = stored?.headHash ?? null;
 
-  let stat: fs.Stats;
+  let version = currentVersion;
   try {
-    stat = fs.statSync(filePath);
+    version ??= fileVersion(fs.statSync(filePath));
   } catch {
     return {
       lines: [],
@@ -83,7 +116,7 @@ export function tailFile(filePath: string, stored: Offset | null): TailResult {
     };
   }
 
-  const fileSize = stat.size;
+  const fileSize = version.size;
   let event: TailResult["event"] = null;
   let wasReset = false;
 
@@ -103,13 +136,22 @@ export function tailFile(filePath: string, stored: Offset | null): TailResult {
     // fileSize < storedN: size regression — headChanged stays false; handled below.
   }
 
+  const storedVersion = stored?.fileVersion ?? null;
+  const identityChanged =
+    storedVersion !== null &&
+    (storedVersion.dev !== version.dev || storedVersion.ino !== version.ino);
+  const equalSizeTimestampChanged =
+    storedVersion !== null &&
+    storedVersion.size === version.size &&
+    (storedVersion.mtimeMs !== version.mtimeMs || storedVersion.ctimeMs !== version.ctimeMs);
+
   if (storedOffset > fileSize) {
     // Size regression always means truncation, regardless of head change.
     event = "TRUNCATION";
     storedOffset = 0;
     wasReset = true;
     storedHead = curHead;
-  } else if (headChanged) {
+  } else if (identityChanged || equalSizeTimestampChanged || headChanged) {
     event = "ROTATION";
     storedOffset = 0;
     wasReset = true;
@@ -157,25 +199,71 @@ export function tailFile(filePath: string, stored: Offset | null): TailResult {
 interface OffsetRow {
   byte_offset: number;
   file_hash_head: string | null;
+  file_size: number | null;
+  file_dev: string | null;
+  file_ino: string | null;
+  file_mtime_ms: number | null;
+  file_ctime_ms: number | null;
 }
 
 /** Read the persisted offset for a file, or null if never tailed. */
 export function loadOffset(db: Db, filePath: string): Offset | null {
   const row = db
-    .prepare("SELECT byte_offset, file_hash_head FROM ingest_offsets WHERE file_path = ?")
+    .prepare(
+      "SELECT byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms FROM ingest_offsets WHERE file_path = ?",
+    )
     .get(filePath) as OffsetRow | undefined;
   if (row === undefined) return null;
-  return { offset: row.byte_offset, headHash: row.file_hash_head };
+  const hasVersion =
+    row.file_size !== null &&
+    row.file_dev !== null &&
+    row.file_ino !== null &&
+    row.file_mtime_ms !== null &&
+    row.file_ctime_ms !== null;
+  return {
+    offset: row.byte_offset,
+    headHash: row.file_hash_head,
+    fileVersion: hasVersion
+      ? {
+          size: row.file_size as number,
+          dev: row.file_dev as string,
+          ino: row.file_ino as string,
+          mtimeMs: row.file_mtime_ms as number,
+          ctimeMs: row.file_ctime_ms as number,
+        }
+      : null,
+  };
 }
 
 /** Upsert the persisted offset for a file. */
-export function saveOffset(db: Db, filePath: string, offset: number, headHash: string): void {
+export function saveOffset(
+  db: Db,
+  filePath: string,
+  offset: number,
+  headHash: string,
+  version: FileVersion,
+): void {
   db.prepare(
-    `INSERT INTO ingest_offsets (file_path, byte_offset, file_hash_head, updated_at)
-     VALUES (?,?,?,?)
+    `INSERT INTO ingest_offsets (file_path, byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?)
      ON CONFLICT(file_path) DO UPDATE SET
        byte_offset = excluded.byte_offset,
        file_hash_head = excluded.file_hash_head,
+       file_size = excluded.file_size,
+       file_dev = excluded.file_dev,
+       file_ino = excluded.file_ino,
+       file_mtime_ms = excluded.file_mtime_ms,
+       file_ctime_ms = excluded.file_ctime_ms,
        updated_at = excluded.updated_at`,
-  ).run(filePath, offset, headHash, new Date().toISOString());
+  ).run(
+    filePath,
+    offset,
+    headHash,
+    version.size,
+    version.dev,
+    version.ino,
+    version.mtimeMs,
+    version.ctimeMs,
+    new Date().toISOString(),
+  );
 }

@@ -513,6 +513,8 @@ export const RESET_DATA_TABLES = [
   "context_inventory_history",
   "workspaces",
   "ingest_quarantine",
+  "ingest_metric_events",
+  "ingest_metric_baselines",
   "ingest_offsets",
 ] as const;
 
