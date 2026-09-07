@@ -41,10 +41,6 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      # OIDC Trusted Publishing requires npm >= 11.5.0; Node 22 ships an older npm.
-      - name: Upgrade npm (OIDC support)
-        run: npm install -g npm@latest
-
       # Prerelease version: strip any prerelease suffix, bump patch so `next` sorts ABOVE
       # `latest`, append the short SHA for uniqueness (npm rejects re-publishing a version).
       # Set in-job only — the tarball carries it; the tracked package.json is NOT committed.
@@ -61,5 +57,20 @@ jobs:
 
       # prepublishOnly runs build + test (a red test blocks the publish); --tag next keeps
       # `latest` untouched; publish uses the OIDC credential.
+      #
+      # npm >= 11.5.1 is REQUIRED for tokenless OIDC Trusted Publishing, but Node 22 ships
+      # npm 10.x. The upgrade MUST happen in this same step: a `npm install -g` in an earlier
+      # step does not reliably become the npm this step resolves, and the old npm silently
+      # skips OIDC → "ENEEDAUTH ... npm login" (npm/cli#9088). The version guard fails loud
+      # if the upgrade did not take; the .npmrc echo confirms no _authToken line is blocking
+      # the OIDC exchange (actions/setup-node#1551). ENEEDAUTH here means OIDC was NOT
+      # attempted (version/.npmrc); a 4xx would mean it was attempted but the npmjs.com
+      # Trusted Publisher config (repo/workflow-filename/environment) does not match.
       - name: Publish prerelease to npm (next)
-        run: npm publish --tag next
+        run: |
+          npm install -g npm@latest
+          echo "node $(node -v) / npm $(npm -v)"
+          node -e "const v=require('child_process').execSync('npm -v').toString().trim();const [x,y]=v.split('.').map(Number);if(x<11||(x===11&&y<5)){console.error('npm '+v+' < 11.5.1 — tokenless OIDC unavailable; publish would fail with ENEEDAUTH');process.exit(1);}"
+          echo '--- ~/.npmrc (must have NO _authToken line for OIDC) ---'
+          cat ~/.npmrc 2>/dev/null || echo '(no ~/.npmrc — good)'
+          npm publish --tag next
