@@ -53,8 +53,9 @@ function npm(args, cwd) {
 
 try {
   await fs.access(path.join(repo, "dist/ui/index.html"));
-  // ignore-scripts packs the already validated build without rebuilding or publishing.
-  const [pack] = JSON.parse(await npm(["pack", "--ignore-scripts", "--json", "--pack-destination", root], repo));
+  // Older npm versions still run prepare despite ignore-scripts. Keep lifecycle
+  // output captured so stdout remains the pack JSON on every supported runner.
+  const [pack] = JSON.parse(await npm(["pack", "--ignore-scripts", "--foreground-scripts=false", "--json", "--pack-destination", root], repo));
   const files = new Set(pack.files.map((file) => file.path));
   for (const required of ["dist/cli/agentwrangler.js", "dist/daemon/index.js", "dist/ui/index.html", "README.md", "LICENSE"]) {
     assert(files.has(required), `tarball missing ${required}`);
