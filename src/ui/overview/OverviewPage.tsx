@@ -68,6 +68,7 @@ import RateLimitGauges from "./RateLimitGauges";
 const TrendChart = lazy(() => import("./TrendChart"));
 import VerdictBand, { DeltaBadge, TrendSparkline, windowDelta } from "./VerdictBand";
 import WorkspaceTable, { type TopRec } from "./WorkspaceTable";
+import { seriesPalette } from "./chart-theme";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -348,7 +349,7 @@ function ContextPerTurnSection({ rows }: { rows: GlobalOverview["context_per_tur
               gap: 14,
             }}
           >
-            {rows.slice(0, 3).map((row, index) => {
+            {rows.map((row, index) => {
               const model = fmtModel(row.model);
               const ratio =
                 row.avg_context_per_turn > 0
@@ -386,7 +387,7 @@ function ContextPerTurnSection({ rows }: { rows: GlobalOverview["context_per_tur
                         width: 8,
                         height: 8,
                         borderRadius: "50%",
-                        background: ["var(--teal)", "var(--amber)", "var(--purple)"][index],
+                        background: seriesPalette[index % seriesPalette.length],
                         marginRight: 6,
                       }}
                     />
@@ -419,7 +420,7 @@ function ContextPerTurnSection({ rows }: { rows: GlobalOverview["context_per_tur
                         width: `${fill}%`,
                         minWidth: fill > 0 ? 3 : 0,
                         height: "100%",
-                        background: ["var(--teal)", "var(--amber)", "var(--purple)"][index],
+                        background: seriesPalette[index % seriesPalette.length],
                         borderRadius: "5px 0 0 5px",
                       }}
                     />

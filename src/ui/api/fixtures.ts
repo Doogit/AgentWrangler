@@ -132,12 +132,20 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
       avg_output_per_turn: 620,
       usd_per_turn: 0.018,
     },
+    {
+      model: "claude-haiku-4-5",
+      n: 96,
+      avg_context_per_turn: 61_000,
+      avg_output_per_turn: 940,
+      usd_per_turn: 0.004,
+    },
   ];
 
   const model_mix: ModelMixRow[] = [
     { model: "claude-opus-5", turns: 8089 },
     { model: "claude-sonnet-5", turns: 3767 },
     { model: "claude-fable-5", turns: 119 },
+    { model: "claude-haiku-4-5", turns: 96 },
   ];
 
   const data: GlobalOverview = {
@@ -174,6 +182,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       avg_context_per_turn: 238_000,
       cache_write_pct: 0.12,
       opus_pct: 0.67,
+      premium_pct: 0.71,
     },
     {
       workspace_id: "ws-2",
@@ -189,6 +198,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       avg_context_per_turn: 180_000,
       cache_write_pct: 0.09,
       opus_pct: 0.45,
+      premium_pct: 0.45,
     },
     {
       workspace_id: "ws-3",
@@ -204,6 +214,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       avg_context_per_turn: 120_000,
       cache_write_pct: 0.18,
       opus_pct: 0.3,
+      premium_pct: 0.34,
     },
     {
       workspace_id: "ws-4",
@@ -219,6 +230,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       avg_context_per_turn: 95_000,
       cache_write_pct: 0.07,
       opus_pct: 0.22,
+      premium_pct: 0.22,
     },
     {
       workspace_id: "ws-5",
@@ -234,6 +246,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       avg_context_per_turn: 210_000,
       cache_write_pct: 0.14,
       opus_pct: 0.55,
+      premium_pct: 0.58,
     },
   ];
 

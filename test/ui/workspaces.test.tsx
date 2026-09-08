@@ -215,7 +215,7 @@ describe("WorkspacesPage — RV1a spend table", () => {
     expect(screen.getByRole("columnheader", { name: "Trend" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Ctx/turn" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Cache-write %" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Opus %" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Premium %" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "$/turn" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Success" })).toBeTruthy();
   });

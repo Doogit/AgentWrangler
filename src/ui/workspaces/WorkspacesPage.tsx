@@ -2,7 +2,7 @@
  * src/ui/workspaces/WorkspacesPage.tsx — Workspace spend + efficiency home (RV1a).
  *
  * Leads with a per-workspace table: spend, share bar, trend sparkline, ctx/turn,
- * cache-write %, opus %, $/turn, success (EXP chip). Row click → #/workspaces/:id.
+ * cache-write %, premium %, $/turn, success (EXP chip). Row click → #/workspaces/:id.
  * Transient workspaces are hidden by default.
  */
 
@@ -202,7 +202,7 @@ export default function WorkspacesPage() {
                   <th>Trend</th>
                   <th>Ctx/turn</th>
                   <th>Cache-write %</th>
-                  <th>Opus %</th>
+                  <th>Premium %</th>
                   <th>$/turn</th>
                   <th>Success</th>
                 </tr>
@@ -261,11 +261,11 @@ export default function WorkspacesPage() {
                       content="Share of tokens written to the prompt cache rather than served from it. Persistently high means the cache keeps getting invalidated — often an editing pattern worth changing."
                     />
                   </th>
-                  <th aria-label="Opus %">
-                    Opus %{" "}
+                  <th aria-label="Premium %">
+                    Premium %{" "}
                     <InfoTip
-                      label="What Opus % means"
-                      content="Share of turns run on Opus, the most expensive model. If routine work is on Opus, moving it to Sonnet is the fastest saving."
+                      label="What Premium % means"
+                      content="Share of turns run on premium models (Opus, Fable). If routine work is on a premium model, moving it to Sonnet is the fastest saving."
                     />
                   </th>
                   <th aria-label="$/turn">
@@ -348,7 +348,7 @@ export default function WorkspacesPage() {
                       </td>
                       <td>{fmtCtxPerTurn(ws.avg_context_per_turn)}</td>
                       <td>{fmtPct(ws.cache_write_pct)}</td>
-                      <td>{fmtPct(ws.opus_pct)}</td>
+                      <td>{fmtPct(ws.premium_pct ?? ws.opus_pct)}</td>
                       <td>{fmtUsdPerTurn(ws.usd_per_turn)}</td>
                       <td>
                         <Chip

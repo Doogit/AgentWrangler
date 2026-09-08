@@ -22,6 +22,7 @@
  */
 
 import type { Db } from "../db/open.js";
+import { PREMIUM_MODEL_SQL } from "../ingest/pricing.js";
 import { GLOBAL_WORKSPACE_ID } from "./context-probe.js";
 import { isD1SourceBackedRecommendation, parseD1SourceIdentity } from "./d1-source-identity.js";
 
@@ -139,7 +140,7 @@ function avgFloorContext(
 /**
  * D4 signal: routing-adherence score = ROUND(100 × (1 − premium_share)) over
  * non-sidechain reconciled turns in [fromIso, toIso), where premium = model
- * contains 'opus'. The data-model's "mechanical turn" classifier is not yet
+ * matches PREMIUM_MODEL_SQL (Opus/Fable/Mythos). The data-model's "mechanical turn" classifier is not yet
  * shipped, so all reconciled turns are the mechanical set (conservative proxy —
  * documented in the W4 build digest).
  */
@@ -151,7 +152,7 @@ function routingAdherenceScore(
 ): { value: number; n: number } | null {
   const scoped = scopeWorkspaceId !== null;
   const sql = `SELECT COUNT(*) AS n,
-                      AVG(CASE WHEN model LIKE '%opus%' THEN 1.0 ELSE 0.0 END) AS premium_share
+                      AVG(CASE WHEN ${PREMIUM_MODEL_SQL} THEN 1.0 ELSE 0.0 END) AS premium_share
                  FROM turns
                 WHERE is_sidechain = 0 AND provisional = 0 AND ts >= ? AND ts < ? ${
                   scoped ? "AND workspace_id = ?" : ""

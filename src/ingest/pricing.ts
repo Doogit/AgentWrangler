@@ -90,6 +90,14 @@ export function modelTier(model: string | null | undefined): string | null {
   return null;
 }
 
+/**
+ * SQL predicate matching premium-priced models on a `model` column: Opus plus
+ * the Fable/Mythos families (Fable's $10/$50 base is 2× Opus). Shared by every
+ * premium-share aggregate so the family list can't drift between queries.
+ */
+export const PREMIUM_MODEL_SQL =
+  "(model LIKE '%opus%' OR model LIKE '%fable%' OR model LIKE '%mythos%')";
+
 function addDaysIso(iso: string, days: number): string {
   const d = new Date(iso);
   d.setUTCDate(d.getUTCDate() + days);

@@ -12,6 +12,7 @@
  * SQL references: Data Model v2 §2 lines 261-275 / 303-314 / 329-334.
  */
 
+import { PREMIUM_MODEL_SQL } from "../../ingest/pricing.js";
 import { getQueryDb } from "../db-context.js";
 import type { ApiResponse } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
@@ -51,7 +52,7 @@ export interface WorkspaceOutcomeSummary {
   failure_n: number;
   success_rate: number | null;
   linkage_rate: number | null;
-  /** Existing D4 proxy: 100 minus Opus share over non-sidechain, non-provisional turns. */
+  /** Existing D4 proxy: 100 minus premium-model (Opus/Fable/Mythos) share over non-sidechain, non-provisional turns. */
   adherence_score: number | null;
 }
 
@@ -243,7 +244,7 @@ export function listWorkspaceOutcomes(): ApiResponse<WorkspaceOutcomeSummary[]> 
   const adherenceRows = db
     .prepare(
       `SELECT workspace_id, COUNT(*) AS n,
-              AVG(CASE WHEN model LIKE '%opus%' THEN 1.0 ELSE 0.0 END) AS premium_share
+              AVG(CASE WHEN ${PREMIUM_MODEL_SQL} THEN 1.0 ELSE 0.0 END) AS premium_share
          FROM turns
         WHERE is_sidechain = 0 AND provisional = 0
         GROUP BY workspace_id`,

@@ -12,6 +12,7 @@
 
 import { loadConfig } from "../../daemon/config.js";
 import type { Db } from "../../db/open.js";
+import { PREMIUM_MODEL_SQL } from "../../ingest/pricing.js";
 import { getQueryDb } from "../db-context.js";
 import type {
   ApiResponse,
@@ -169,6 +170,8 @@ export interface WorkspaceSummary {
   cache_write_pct?: number | null;
   /** Opus-model share of all turns (0–1). */
   opus_pct?: number | null;
+  /** Premium-model (Opus/Fable/Mythos) share of all turns (0–1). */
+  premium_pct?: number | null;
 }
 
 /** Full workspace detail. */
@@ -509,12 +512,14 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
     ).map((r) => r.id),
   );
 
-  // RV1 additive efficiency columns: avg context/turn, cache-write share, opus share.
+  // RV1 additive efficiency columns: avg context/turn, cache-write share, opus +
+  // premium (Opus/Fable/Mythos) share.
   interface WorkspaceAggRow {
     workspace_id: string;
     avg_context_per_turn: number | null;
     cache_write_pct: number | null;
     opus_pct: number | null;
+    premium_pct: number | null;
   }
   const aggRows = cachedQuery(
     db,
@@ -534,7 +539,9 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
                          + cache_write_5m + cache_write_1h + cache_write_other)
               ELSE NULL END AS cache_write_pct,
             CAST(SUM(CASE WHEN model LIKE '%opus%' THEN 1 ELSE 0 END) AS REAL)
-              / NULLIF(COUNT(*), 0) AS opus_pct
+              / NULLIF(COUNT(*), 0) AS opus_pct,
+            CAST(SUM(CASE WHEN ${PREMIUM_MODEL_SQL} THEN 1 ELSE 0 END) AS REAL)
+              / NULLIF(COUNT(*), 0) AS premium_pct
          FROM turns WHERE ts >= ? AND ts < ?
          GROUP BY workspace_id`,
         )
@@ -558,6 +565,7 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
       avg_context_per_turn: agg?.avg_context_per_turn ?? null,
       cache_write_pct: agg?.cache_write_pct ?? null,
       opus_pct: agg?.opus_pct ?? null,
+      premium_pct: agg?.premium_pct ?? null,
     };
   });
 

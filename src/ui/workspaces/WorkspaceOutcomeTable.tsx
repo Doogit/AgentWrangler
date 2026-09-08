@@ -57,7 +57,7 @@ export default function WorkspaceOutcomeTable({ rows, workspaceSpendById }: Prop
               <tr>
                 <th>Workspace</th>
                 <th>$/turn</th>
-                <th title="100 minus Opus share across non-sidechain, non-provisional turns">
+                <th title="100 minus premium-model (Opus/Fable) share across non-sidechain, non-provisional turns">
                   Routing proxy
                 </th>
                 <th>Total PRs</th>
