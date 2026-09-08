@@ -202,16 +202,30 @@ export interface SessionSummary {
   first_turn_at: string | null;
   last_turn_at: string | null;
   hygiene_flags: string[];
-  /** RV2a friction signal counters. Backfilled on next full re-scan; historical rows are 0. */
+  /** Legacy friction counters. Stored interrupt zeros do not establish observed interrupts. */
   compaction_count: number;
   api_error_count: number;
   interrupt_count: number;
+  interrupts_supported?: false;
+  /** API request exposure is not recorded, so its rate remains unavailable. */
+  api_error_eligible_request_count?: null;
+  api_error_rate?: null;
   /** Count of user turns in the session. Migration 009. Default 0 for historical rows. */
   user_turn_count: number;
   /** COUNT(tool_events WHERE exit_class='ERROR') for this session. */
   tool_error_count: number;
+  tool_completed_count?: number;
+  tool_completed_error_count?: number;
+  tool_error_rate?: number | null;
   /** COUNT(tool_events WHERE exit_class='TEST_FAIL') for this session. */
   test_fail_count: number;
+  test_completed_count?: number;
+  test_pass_count?: number;
+  test_outcome?:
+    | "NO_TEST_OUTCOMES"
+    | "NO_FAILURES_OBSERVED"
+    | "FAILURES_OBSERVED"
+    | "FAILED_THEN_PASSED";
   /** EF1/EF3 session-envelope fields. Always populated by getSession/listSessions
    *  (post-migration-015); EF1 fields remain optional for pre-migration compat. */
   /** EF1: user+assistant turns (is_sidechain=0) up to first commit; null when no commit. */
@@ -355,6 +369,7 @@ function claimNote(claimKinds: number, stale: boolean): string {
 }
 
 interface MetaOpts {
+  metric_definition_version?: "observe-1" | "esf-1";
   n: number;
   window: QueryWindow;
   claim_kind: ClaimKind;
@@ -376,7 +391,7 @@ function makeResponse<T>(data: T | null, o: MetaOpts): ApiResponse<T> {
         note: "",
         ...o.qualification,
       },
-      metric_definition_version: "observe-1",
+      metric_definition_version: o.metric_definition_version ?? "observe-1",
       claim_kind: o.claim_kind,
       drilldown_ids: o.drilldown_ids ?? {},
     },
@@ -711,7 +726,30 @@ export function listSessions(
               (SELECT COUNT(*) FROM tool_events te
                 WHERE te.session_id = s.session_id AND te.exit_class = 'ERROR')     AS tool_error_count,
               (SELECT COUNT(*) FROM tool_events te
-                WHERE te.session_id = s.session_id AND te.exit_class = 'TEST_FAIL') AS test_fail_count,
+                WHERE te.session_id = s.session_id AND te.result_bytes IS NOT NULL) AS tool_completed_count,
+              (SELECT COUNT(*) FROM tool_events te
+                WHERE te.session_id = s.session_id AND te.exit_class = 'ERROR'
+                  AND te.result_bytes IS NOT NULL)                                 AS tool_completed_error_count,
+              (SELECT COUNT(*) FROM tool_events te
+                WHERE te.session_id = s.session_id AND te.exit_class = 'TEST_FAIL'
+                  AND EXISTS (SELECT 1 FROM tool_event_metadata metadata
+                               WHERE metadata.event_id = te.event_id AND metadata.is_test_command = 1)) AS test_fail_count,
+              (SELECT COUNT(*) FROM tool_events te JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
+                WHERE te.session_id = s.session_id AND metadata.is_test_command = 1 AND te.result_bytes IS NOT NULL) AS test_completed_count,
+              (SELECT COUNT(*) FROM tool_events te JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
+                WHERE te.session_id = s.session_id AND metadata.is_test_command = 1 AND te.exit_class = 'OK' AND te.result_bytes IS NOT NULL) AS test_pass_count,
+              CASE WHEN NOT EXISTS (SELECT 1 FROM tool_events observed JOIN tool_event_metadata observed_metadata ON observed_metadata.event_id = observed.event_id
+                                     WHERE observed.session_id = s.session_id AND observed_metadata.is_test_command = 1 AND observed.result_bytes IS NOT NULL)
+                     THEN 'NO_TEST_OUTCOMES'
+                   WHEN NOT EXISTS (SELECT 1 FROM tool_events failed JOIN tool_event_metadata failed_metadata ON failed_metadata.event_id = failed.event_id
+                                    WHERE failed.session_id = s.session_id AND failed_metadata.is_test_command = 1 AND failed.exit_class = 'TEST_FAIL' AND failed.result_bytes IS NOT NULL)
+                     THEN 'NO_FAILURES_OBSERVED'
+                   WHEN EXISTS (SELECT 1 FROM tool_events passed JOIN tool_event_metadata passed_metadata ON passed_metadata.event_id = passed.event_id
+                                WHERE passed.session_id = s.session_id AND passed_metadata.is_test_command = 1 AND passed.exit_class = 'OK' AND passed.result_bytes IS NOT NULL
+                                  AND EXISTS (SELECT 1 FROM tool_events failed_before JOIN tool_event_metadata failed_before_metadata ON failed_before_metadata.event_id = failed_before.event_id
+                                              WHERE failed_before.session_id = s.session_id AND failed_before_metadata.is_test_command = 1
+                                                AND failed_before.exit_class = 'TEST_FAIL' AND failed_before.result_bytes IS NOT NULL AND failed_before.ts < passed.ts))
+                     THEN 'FAILED_THEN_PASSED' ELSE 'FAILURES_OBSERVED' END AS test_outcome,
               s.gap_median_s, s.gap_p90_s, s.long_gap_count, s.gap_n,
               CASE WHEN EXISTS (
                      SELECT 1 FROM tool_events te
@@ -726,6 +764,11 @@ export function listSessions(
                         )
                    ) ELSE NULL END AS turns_to_first_commit,
               CASE WHEN s.state = 'RECONCILED' AND s.user_turn_count >= 10
+                        AND EXISTS (
+                          SELECT 1 FROM tool_events te
+                           WHERE te.session_id = s.session_id
+                             AND te.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
+                        )
                         AND NOT EXISTS (
                           SELECT 1 FROM tool_events te
                            WHERE te.session_id = s.session_id AND te.commit_sha IS NOT NULL
@@ -753,7 +796,16 @@ export function listSessions(
     interrupt_count: number;
     user_turn_count: number;
     tool_error_count: number;
+    tool_completed_count: number;
+    tool_completed_error_count: number;
     test_fail_count: number;
+    test_completed_count: number;
+    test_pass_count: number;
+    test_outcome:
+      | "NO_TEST_OUTCOMES"
+      | "NO_FAILURES_OBSERVED"
+      | "FAILURES_OBSERVED"
+      | "FAILED_THEN_PASSED";
     gap_median_s: number | null;
     gap_p90_s: number | null;
     long_gap_count: number;
@@ -778,9 +830,19 @@ export function listSessions(
     compaction_count: r.compaction_count,
     api_error_count: r.api_error_count,
     interrupt_count: r.interrupt_count,
+    interrupts_supported: false,
+    api_error_eligible_request_count: null,
+    api_error_rate: null,
     user_turn_count: r.user_turn_count,
     tool_error_count: r.tool_error_count,
+    tool_completed_count: r.tool_completed_count,
+    tool_completed_error_count: r.tool_completed_error_count,
+    tool_error_rate:
+      r.tool_completed_count > 0 ? r.tool_completed_error_count / r.tool_completed_count : null,
     test_fail_count: r.test_fail_count,
+    test_completed_count: r.test_completed_count,
+    test_pass_count: r.test_pass_count,
+    test_outcome: r.test_outcome,
     gap_median_s: r.gap_median_s,
     gap_p90_s: r.gap_p90_s,
     long_gap_count: r.long_gap_count,
@@ -792,6 +854,7 @@ export function listSessions(
   return makeResponse<PagedList<SessionSummary>>(
     { items, next_cursor: nextCursor(offset, limit, total) },
     {
+      metric_definition_version: "esf-1",
       n: items.length,
       window,
       claim_kind: "LIST_EQUIV",
@@ -812,7 +875,30 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
               (SELECT COUNT(*) FROM tool_events te
                 WHERE te.session_id = s.session_id AND te.exit_class = 'ERROR')     AS tool_error_count,
               (SELECT COUNT(*) FROM tool_events te
-                WHERE te.session_id = s.session_id AND te.exit_class = 'TEST_FAIL') AS test_fail_count,
+                WHERE te.session_id = s.session_id AND te.result_bytes IS NOT NULL) AS tool_completed_count,
+              (SELECT COUNT(*) FROM tool_events te
+                WHERE te.session_id = s.session_id AND te.exit_class = 'ERROR'
+                  AND te.result_bytes IS NOT NULL)                                 AS tool_completed_error_count,
+              (SELECT COUNT(*) FROM tool_events te
+                WHERE te.session_id = s.session_id AND te.exit_class = 'TEST_FAIL'
+                  AND EXISTS (SELECT 1 FROM tool_event_metadata metadata
+                               WHERE metadata.event_id = te.event_id AND metadata.is_test_command = 1)) AS test_fail_count,
+              (SELECT COUNT(*) FROM tool_events te JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
+                WHERE te.session_id = s.session_id AND metadata.is_test_command = 1 AND te.result_bytes IS NOT NULL) AS test_completed_count,
+              (SELECT COUNT(*) FROM tool_events te JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
+                WHERE te.session_id = s.session_id AND metadata.is_test_command = 1 AND te.exit_class = 'OK' AND te.result_bytes IS NOT NULL) AS test_pass_count,
+              CASE WHEN NOT EXISTS (SELECT 1 FROM tool_events observed JOIN tool_event_metadata observed_metadata ON observed_metadata.event_id = observed.event_id
+                                     WHERE observed.session_id = s.session_id AND observed_metadata.is_test_command = 1 AND observed.result_bytes IS NOT NULL)
+                     THEN 'NO_TEST_OUTCOMES'
+                   WHEN NOT EXISTS (SELECT 1 FROM tool_events failed JOIN tool_event_metadata failed_metadata ON failed_metadata.event_id = failed.event_id
+                                    WHERE failed.session_id = s.session_id AND failed_metadata.is_test_command = 1 AND failed.exit_class = 'TEST_FAIL' AND failed.result_bytes IS NOT NULL)
+                     THEN 'NO_FAILURES_OBSERVED'
+                   WHEN EXISTS (SELECT 1 FROM tool_events passed JOIN tool_event_metadata passed_metadata ON passed_metadata.event_id = passed.event_id
+                                WHERE passed.session_id = s.session_id AND passed_metadata.is_test_command = 1 AND passed.exit_class = 'OK' AND passed.result_bytes IS NOT NULL
+                                  AND EXISTS (SELECT 1 FROM tool_events failed_before JOIN tool_event_metadata failed_before_metadata ON failed_before_metadata.event_id = failed_before.event_id
+                                              WHERE failed_before.session_id = s.session_id AND failed_before_metadata.is_test_command = 1
+                                                AND failed_before.exit_class = 'TEST_FAIL' AND failed_before.result_bytes IS NOT NULL AND failed_before.ts < passed.ts))
+                     THEN 'FAILED_THEN_PASSED' ELSE 'FAILURES_OBSERVED' END AS test_outcome,
               s.gap_median_s, s.gap_p90_s, s.long_gap_count, s.gap_n
          FROM sessions s JOIN workspaces w USING (workspace_id)
         WHERE s.session_id = ?`,
@@ -836,7 +922,16 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
         interrupt_count: number;
         user_turn_count: number;
         tool_error_count: number;
+        tool_completed_count: number;
+        tool_completed_error_count: number;
         test_fail_count: number;
+        test_completed_count: number;
+        test_pass_count: number;
+        test_outcome:
+          | "NO_TEST_OUTCOMES"
+          | "NO_FAILURES_OBSERVED"
+          | "FAILURES_OBSERVED"
+          | "FAILED_THEN_PASSED";
         gap_median_s: number | null;
         gap_p90_s: number | null;
         long_gap_count: number;
@@ -847,6 +942,7 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
   const window = resolveWindow({});
   if (row === undefined) {
     return makeResponse<SessionSummary>(null, {
+      metric_definition_version: "esf-1",
       n: 0,
       window,
       claim_kind: "N_A",
@@ -872,9 +968,21 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
     compaction_count: row.compaction_count,
     api_error_count: row.api_error_count,
     interrupt_count: row.interrupt_count,
+    interrupts_supported: false,
+    api_error_eligible_request_count: null,
+    api_error_rate: null,
     user_turn_count: row.user_turn_count,
     tool_error_count: row.tool_error_count,
+    tool_completed_count: row.tool_completed_count,
+    tool_completed_error_count: row.tool_completed_error_count,
+    tool_error_rate:
+      row.tool_completed_count > 0
+        ? row.tool_completed_error_count / row.tool_completed_count
+        : null,
     test_fail_count: row.test_fail_count,
+    test_completed_count: row.test_completed_count,
+    test_pass_count: row.test_pass_count,
+    test_outcome: row.test_outcome,
     gap_median_s: row.gap_median_s,
     gap_p90_s: row.gap_p90_s,
     long_gap_count: row.long_gap_count,
@@ -883,6 +991,7 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
   };
 
   return makeResponse<SessionSummary>(data, {
+    metric_definition_version: "esf-1",
     n: 1,
     window,
     claim_kind: "LIST_EQUIV",

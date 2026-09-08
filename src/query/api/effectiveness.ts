@@ -19,7 +19,7 @@ import { buildResponse } from "../envelope.js";
 export interface SessionDelivery {
   /** Count of non-sidechain turns (is_sidechain=0) up to and including the first commit turn's ts. Null when no commit occurred. */
   turns_to_first_commit: number | null;
-  /** True when: user_turn_count >= 10 AND no commit AND state === 'RECONCILED'. Never true for LIVE sessions. */
+  /** Compatibility alias: RECONCILED, >=10 user turns, qualifying tool activity and no observed commit. */
   deep_abandoned: boolean;
 }
 
@@ -75,13 +75,22 @@ export function computeSessionDelivery(db: Db, sessionId: string): SessionDelive
   }
 
   const sessRow = db
-    .prepare("SELECT user_turn_count, state FROM sessions WHERE session_id = ?")
-    .get(sessionId) as { user_turn_count: number; state: string } | undefined;
+    .prepare(
+      `SELECT user_turn_count, state,
+              EXISTS (SELECT 1 FROM tool_events te WHERE te.session_id = sessions.session_id
+                      AND te.tool_name IN ('Bash','Write','Edit','NotebookEdit')) AS has_activity
+         FROM sessions WHERE session_id = ?`,
+    )
+    .get(sessionId) as { user_turn_count: number; state: string; has_activity: number } | undefined;
 
   const user_turn_count = sessRow?.user_turn_count ?? 0;
   const state = sessRow?.state ?? "";
 
-  const deep_abandoned = user_turn_count >= 10 && firstCommitTs === null && state === "RECONCILED";
+  const deep_abandoned =
+    user_turn_count >= 10 &&
+    firstCommitTs === null &&
+    state === "RECONCILED" &&
+    sessRow?.has_activity === 1;
 
   return { turns_to_first_commit, deep_abandoned };
 }
@@ -132,8 +141,9 @@ export function getAbandonedSpendSplit(db: Db, opts: AbandonedSpendSplitOpts): A
                     FROM tool_events te
                    WHERE te.session_id = iws.session_id
                      AND te.commit_sha IS NOT NULL
-                ) AS is_abandoned_session
+                ) AND s.state = 'RECONCILED' AS is_abandoned_session
            FROM in_window_sessions iws
+           JOIN sessions s USING (session_id)
        ),
        session_spend AS (
          SELECT session_id,
@@ -184,6 +194,10 @@ export interface ClosureProxy {
   unresolved_count: number;
   pending_count: number;
   resolved_share: number | null;
+  /** ESF1 observation names. Legacy resolved/unresolved fields remain aliases. */
+  no_later_workspace_session_count?: number;
+  later_workspace_session_count?: number;
+  no_later_workspace_session_share?: number | null;
   window_hours: number;
   workspace_id: string | null;
 }
@@ -232,6 +246,9 @@ export function getClosureProxy(
     unresolved_count: 0,
     pending_count: 0,
     resolved_share: null,
+    no_later_workspace_session_count: 0,
+    later_workspace_session_count: 0,
+    no_later_workspace_session_share: null,
     window_hours: windowHours,
     workspace_id: opts.workspaceId,
   });
@@ -239,9 +256,15 @@ export function getClosureProxy(
   if (candidates.length === 0) {
     return buildResponse(emptyProxy(), {
       claim_kind: "EXPERIMENTAL",
+      metric_definition_version: "esf-1",
       n: 0,
       window: { from: opts.now, to: opts.now },
-      qualification: { provisional_excluded: false, unpriced_turns: 0, claim_kinds_count: 1, note },
+      qualification: {
+        provisional_excluded: false,
+        unpriced_turns: 0,
+        claim_kinds_count: 1,
+        note: `${note} No later workspace session is an observation, not task resolution.`,
+      },
       ...(opts.workspaceId === null ? {} : { drilldown_ids: { workspace_id: opts.workspaceId } }),
     });
   }
@@ -302,15 +325,24 @@ export function getClosureProxy(
     unresolved_count,
     pending_count,
     resolved_share,
+    no_later_workspace_session_count: resolved_count,
+    later_workspace_session_count: unresolved_count,
+    no_later_workspace_session_share: resolved_share,
     window_hours: windowHours,
     workspace_id: opts.workspaceId,
   };
 
   return buildResponse(proxy, {
     claim_kind: "EXPERIMENTAL",
+    metric_definition_version: "esf-1",
     n: no_commit_session_count,
     window: { from: opts.now, to: opts.now },
-    qualification: { provisional_excluded: false, unpriced_turns: 0, claim_kinds_count: 1, note },
+    qualification: {
+      provisional_excluded: false,
+      unpriced_turns: 0,
+      claim_kinds_count: 1,
+      note: `${note} "Resolved" and "unresolved" are legacy aliases for no later workspace session and a later workspace session; neither establishes task resolution.`,
+    },
     ...(opts.workspaceId === null ? {} : { drilldown_ids: { workspace_id: opts.workspaceId } }),
   });
 }

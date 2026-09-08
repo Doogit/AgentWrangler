@@ -60,14 +60,8 @@ describe("frictionBand", () => {
     expect(frictionBand({ ...base, compaction_count: THRESHOLDS.compactions.high })).toBe("HIGH");
   });
 
-  it("returns ELEVATED when interrupt_count meets elevated threshold", () => {
-    expect(frictionBand({ ...base, interrupt_count: THRESHOLDS.interrupts.elevated })).toBe(
-      "ELEVATED",
-    );
-  });
-
-  it("returns HIGH when interrupt_count meets high threshold", () => {
-    expect(frictionBand({ ...base, interrupt_count: THRESHOLDS.interrupts.high })).toBe("HIGH");
+  it("does not treat a stored interrupt count as observed telemetry", () => {
+    expect(frictionBand({ ...base, interrupt_count: THRESHOLDS.interrupts.high })).toBe("LOW");
   });
 
   it("returns ELEVATED when reprompt density meets elevated threshold", () => {
@@ -106,7 +100,7 @@ describe("FrictionCell compact variant", () => {
   it("shows DIRECTIONAL chip", () => {
     render(<FrictionCell counts={base} />);
     // Chip renders the label text
-    expect(screen.getByText("LOW")).toBeTruthy();
+    expect(screen.getByText("LEGACY LOW")).toBeTruthy();
   });
 
   it("shows non-zero counts as inline text", () => {
@@ -151,26 +145,87 @@ describe("FrictionCell compact variant", () => {
     expect(tip).toContain("Compactions");
     expect(tip).toContain("Interrupts");
     expect(tip).toContain("User-message share");
-    expect(tip).toContain("ELEVATED");
-    expect(tip).toContain("HIGH");
+    expect(tip).toContain("Legacy friction heuristic");
+    expect(tip).toContain("unsupported telemetry");
   });
 });
 
 describe("FrictionCell strip variant", () => {
-  it("renders all six components with labels", () => {
+  it("renders operational, test, and interaction/context observations separately", () => {
     render(<FrictionCell counts={base} variant="strip" />);
     const cell = screen.getByTestId("friction-cell");
     expect(cell.textContent).toContain("API errors");
-    expect(cell.textContent).toContain("Tool errors");
-    expect(cell.textContent).toContain("Test fails");
-    expect(cell.textContent).toContain("Compactions");
+    expect(cell.textContent).toContain("Operational: tool errors");
+    expect(cell.textContent).toContain("Recorded test failure signals");
+    expect(cell.textContent).toContain("Completed-test outcome");
+    expect(cell.textContent).toContain("Context: compactions");
     expect(cell.textContent).toContain("Interrupts");
-    expect(cell.textContent).toContain("User-message share");
+    expect(cell.textContent).toContain("Interaction: user-message share");
   });
 
-  it("renders interrupt count of 0 without crashing", () => {
+  it("renders interrupts as unavailable even for a legacy zero", () => {
     render(<FrictionCell counts={{ ...base, interrupt_count: 0 }} variant="strip" />);
-    expect(screen.getByTestId("friction-cell")).toBeTruthy();
+    expect(screen.getByTestId("friction-cell").textContent).toContain(
+      "Unavailable (legacy zero is unsupported)",
+    );
+  });
+
+  it("uses the completed-only numerator in the displayed tool-error rate", () => {
+    render(
+      <FrictionCell
+        counts={{
+          ...base,
+          tool_error_count: 2,
+          tool_completed_count: 2,
+          tool_completed_error_count: 1,
+          tool_error_rate: 0.5,
+        }}
+        variant="strip"
+      />,
+    );
+    expect(screen.getByTestId("friction-cell").textContent).toContain("50% (1/2 completed)");
+  });
+
+  it("keeps missing legacy completed-test outcome metadata unavailable", () => {
+    render(<FrictionCell counts={base} variant="strip" />);
+    const content = screen.getByTestId("friction-cell").textContent;
+    expect(content).toContain("Unavailable (completed-test outcome metadata not recorded)");
+    expect(content).not.toContain("0 completed passes · No completed test outcomes");
+  });
+
+  it("shows an explicit completed-test cohort with no outcomes as observed none", () => {
+    render(
+      <FrictionCell
+        counts={{
+          ...base,
+          test_completed_count: 0,
+          test_pass_count: 0,
+          test_outcome: "NO_TEST_OUTCOMES",
+        }}
+        variant="strip"
+      />,
+    );
+    const content = screen.getByTestId("friction-cell").textContent;
+    expect(content).toContain("0 completed passes · No completed test outcomes");
+    expect(content).not.toContain("completed-test outcome metadata not recorded");
+  });
+
+  it("separates recorded failure signals from the completed-test outcome", () => {
+    render(
+      <FrictionCell
+        counts={{
+          ...base,
+          test_fail_count: 1,
+          test_completed_count: 1,
+          test_pass_count: 1,
+          test_outcome: "NO_FAILURES_OBSERVED",
+        }}
+        variant="strip"
+      />,
+    );
+    const content = screen.getByTestId("friction-cell").textContent;
+    expect(content).toContain("Recorded test failure signals1");
+    expect(content).toContain("1 completed passes · No failures observed");
   });
 
   it("shows data-band attribute in strip mode", () => {

@@ -1018,6 +1018,7 @@ function ua11SessionSummary(sessionId: string, workspaceId: string): SessionSumm
     compaction_count: 0,
     api_error_count: 0,
     interrupt_count: 0,
+    interrupts_supported: false,
     user_turn_count: 0,
     tool_error_count: 0,
     test_fail_count: 0,
@@ -1046,6 +1047,7 @@ export function mockSession(sessionId: string): ApiResponse<SessionSummary> {
     data,
     meta: {
       ...baseMeta(windowFor("7d"), 1),
+      metric_definition_version: "esf-1",
       drilldown_ids: { session_id: sessionId, workspace_id: data.workspace_id },
     },
   };
@@ -1061,7 +1063,7 @@ export function mockWorkspaceSessions(
     .filter((session) => session.workspace_id === workspaceId);
   return {
     data: { items, next_cursor: null },
-    meta: baseMeta(windowFor(preset), items.length),
+    meta: { ...baseMeta(windowFor(preset), items.length), metric_definition_version: "esf-1" },
   };
 }
 
@@ -1490,6 +1492,7 @@ export function mockHotSessions(filter: WindowFilter = { preset: "7d" }): HotSes
       api_error_count: 0,
       compaction_count: 0,
       interrupt_count: 0,
+      interrupts_supported: false,
       user_turn_count: 0,
       tool_error_count: 0,
       test_fail_count: 0,
@@ -1715,7 +1718,7 @@ export function mockPractices(): PracticesResult {
 // BM2 — Efficiency headroom fixtures
 // ---------------------------------------------------------------------------
 
-/** Efficiency headroom fixture — 3 open recs, ~35% modeled headroom. */
+/** Three independent modeled opportunities; overlap and time horizons prevent a combined ratio. */
 export function mockEfficiencyHeadroom(): ApiResponse<EfficiencyHeadroom> {
   const window = windowFor("7d");
   const headroom_u_per_wk = 2_450_000; // ~$2.45/wk
@@ -1723,7 +1726,12 @@ export function mockEfficiencyHeadroom(): ApiResponse<EfficiencyHeadroom> {
   const data: EfficiencyHeadroom = {
     headroom_u_per_wk,
     actual_u_per_wk,
-    headroom_pct: headroom_u_per_wk / actual_u_per_wk,
+    headroom_pct: null,
+    opportunities: [
+      { rec_id: "esf-opportunity-1", modeled_savings_u_per_wk: 1_200_000 },
+      { rec_id: "esf-opportunity-2", modeled_savings_u_per_wk: 800_000 },
+      { rec_id: "esf-opportunity-3", modeled_savings_u_per_wk: 450_000 },
+    ],
     open_rec_count: 3,
     from: window.from,
     to: window.to,
@@ -1737,9 +1745,9 @@ export function mockEfficiencyHeadroom(): ApiResponse<EfficiencyHeadroom> {
         provisional_excluded: true,
         unpriced_turns: 0,
         claim_kinds_count: 1,
-        note: "Modeled headroom — if every open recommendation were applied; built from unvalidated per-detector fractions.",
+        note: "Individual modeled opportunities use unvalidated fractions and may overlap. Weekly estimates are not added or compared with selected-window spend.",
       },
-      metric_definition_version: "observe-1",
+      metric_definition_version: "esf-1",
       claim_kind: "EXPERIMENTAL",
       drilldown_ids: {},
     },
@@ -1772,9 +1780,9 @@ export function mockClosureProxy(workspaceId: string): ApiResponse<ClosureProxy>
         provisional_excluded: false,
         unpriced_turns: 0,
         claim_kinds_count: 1,
-        note: "Directional: a re-open within 48h may be unrelated work; burst-working operators will false-flag as unresolved. PENDING until the window elapses.",
+        note: "Workspace-history observation as of the response time, independent of the selected spend window. A later session may concern different work; no later session does not prove resolution. Pending until 48h elapses.",
       },
-      metric_definition_version: "observe-1",
+      metric_definition_version: "esf-1",
       drilldown_ids: { workspace_id: workspaceId },
     },
   };
@@ -1785,7 +1793,7 @@ export function mockClosureProxy(workspaceId: string): ApiResponse<ClosureProxy>
 // ---------------------------------------------------------------------------
 
 const COST_PER_SUCCESS_NOTE =
-  "Directional (OBS_PROXY): survivorship bias (heavy-spend sessions that never open a PR are invisible); reviewer-dependence (merge is a human decision, not a quality guarantee); linkage-coverage cap (only linkage_coverage_pct% of in-window sessions are linked to a PR, so unlinked spend is excluded). cost_per_merged_pr_u uses lifecycle attribution: each merged PR carries the full cost of every linked session whenever it ran, so narrowing the window changes the PR population, not the per-PR cost.";
+  "Directional (OBS_PROXY): survivorship bias (heavy-spend sessions that never open a PR are invisible); reviewer-dependence (merge is a human decision, not a quality guarantee); linkage-coverage cap (only linkage_coverage_pct% of in-window sessions are linked to a PR, so unlinked spend is excluded). cost_per_merged_pr_u uses lifecycle attribution: each linked session is counted once across the merged-PR cohort, including sessions linked to multiple PRs. Full lifecycle cost is not allocated per PR. Narrowing the window changes the terminal-date PR population; linkage coverage instead uses session-start dates.";
 
 /** Realistic populated cost-per-success proxy for a workspace (or global when id omitted). */
 export function mockCostPerSuccess(
@@ -1797,6 +1805,8 @@ export function mockCostPerSuccess(
   );
   const data: CostPerSuccess = {
     merged_pr_count: 8,
+    unique_linked_session_count: 10,
+    shared_linked_session_count: 2,
     closed_unmerged_count: 2,
     cost_per_merged_pr_u: 4_250_000, // ~$4.25 per merged PR
     commit_session_count: 5,
@@ -1817,7 +1827,7 @@ export function mockCostPerSuccess(
         claim_kinds_count: 1,
         note: COST_PER_SUCCESS_NOTE,
       },
-      metric_definition_version: "observe-1",
+      metric_definition_version: "esf-1",
       drilldown_ids: workspaceId === undefined ? {} : { workspace_id: workspaceId },
     },
   };
@@ -1843,9 +1853,9 @@ export function mockEfficiencyHeadroomNull(): ApiResponse<EfficiencyHeadroom> {
         provisional_excluded: true,
         unpriced_turns: 0,
         claim_kinds_count: 1,
-        note: "Modeled headroom — if every open recommendation were applied; built from unvalidated per-detector fractions.",
+        note: "Individual modeled opportunities use unvalidated fractions and may overlap. Weekly estimates are not added or compared with selected-window spend.",
       },
-      metric_definition_version: "observe-1",
+      metric_definition_version: "esf-1",
       claim_kind: "EXPERIMENTAL",
       drilldown_ids: {},
     },

@@ -177,6 +177,7 @@ describe("getWorkspace", () => {
 describe("listSessions", () => {
   it("lists a workspace's sessions most-recent-first", () => {
     const res = listSessions("ws-alpha", WINDOW);
+    expect(res.meta.metric_definition_version).toBe("esf-1");
     const ids = (res.data?.items ?? []).map((s) => s.session_id);
     expect(ids).toEqual(["sess-a3", "sess-a2", "sess-a1"]);
     expect(res.meta.drilldown_ids.workspace_id).toBe("ws-alpha");
@@ -200,6 +201,7 @@ describe("listSessions", () => {
 describe("getSession", () => {
   it("returns one session summary with parsed hygiene flags", () => {
     const res = getSession("sess-a1");
+    expect(res.meta.metric_definition_version).toBe("esf-1");
     const d = res.data;
     if (d === null) throw new Error("null data");
     expect(d.turn_count).toBe(3);
@@ -210,6 +212,7 @@ describe("getSession", () => {
 
   it("returns null + N_A for an unknown session", () => {
     const res = getSession("nope");
+    expect(res.meta.metric_definition_version).toBe("esf-1");
     expect(res.data).toBeNull();
     expect(res.meta.claim_kind).toBe("N_A");
   });

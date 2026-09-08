@@ -36,6 +36,21 @@ export interface FrictionCounts {
   test_fail_count: number;
   compaction_count: number;
   interrupt_count: number;
+  /** Missing on legacy payloads; stored zero is unsupported in either case. */
+  interrupts_supported?: false | undefined;
+  api_error_eligible_request_count?: null | undefined;
+  api_error_rate?: null | undefined;
+  tool_completed_count?: number | undefined;
+  tool_completed_error_count?: number | undefined;
+  tool_error_rate?: number | null | undefined;
+  test_completed_count?: number | undefined;
+  test_pass_count?: number | undefined;
+  test_outcome?:
+    | "NO_TEST_OUTCOMES"
+    | "NO_FAILURES_OBSERVED"
+    | "FAILURES_OBSERVED"
+    | "FAILED_THEN_PASSED"
+    | undefined;
   user_turn_count: number;
   turn_count: number;
   /** EF3 gap aggregates — null when gap_n < 2 (not enough user turns). */
@@ -58,7 +73,6 @@ export function frictionBand(c: FrictionCounts): FrictionBand {
     c.tool_error_count >= THRESHOLDS.tool_errors.high ||
     c.test_fail_count >= THRESHOLDS.test_fails.high ||
     c.compaction_count >= THRESHOLDS.compactions.high ||
-    c.interrupt_count >= THRESHOLDS.interrupts.high ||
     density >= THRESHOLDS.reprompt.high;
   if (isHigh) return "HIGH";
 
@@ -67,7 +81,6 @@ export function frictionBand(c: FrictionCounts): FrictionBand {
     c.tool_error_count >= THRESHOLDS.tool_errors.elevated ||
     c.test_fail_count >= THRESHOLDS.test_fails.elevated ||
     c.compaction_count >= THRESHOLDS.compactions.elevated ||
-    c.interrupt_count >= THRESHOLDS.interrupts.elevated ||
     density >= THRESHOLDS.reprompt.elevated;
   if (isElevated) return "ELEVATED";
 
@@ -79,19 +92,21 @@ export function frictionBand(c: FrictionCounts): FrictionBand {
 // ---------------------------------------------------------------------------
 
 export const FRICTION_TOOLTIP = [
-  "Friction is a signal, not an exact score.",
+  "Legacy friction heuristic: an observation aid, not a health or quality rating.",
   "",
   "Thresholds (any component triggers the band):",
   `  API errors: ELEVATED ≥ ${THRESHOLDS.api_errors.elevated}, HIGH ≥ ${THRESHOLDS.api_errors.high}`,
   `  Tool errors: ELEVATED ≥ ${THRESHOLDS.tool_errors.elevated}, HIGH ≥ ${THRESHOLDS.tool_errors.high}`,
   `  Test failures: ELEVATED ≥ ${THRESHOLDS.test_fails.elevated}, HIGH ≥ ${THRESHOLDS.test_fails.high}`,
   `  Compactions: ELEVATED ≥ ${THRESHOLDS.compactions.elevated}, HIGH ≥ ${THRESHOLDS.compactions.high}`,
-  `  Interrupts: ELEVATED ≥ ${THRESHOLDS.interrupts.elevated}, HIGH ≥ ${THRESHOLDS.interrupts.high} (not currently recorded, so always 0)`,
+  "  Interrupts: unavailable. The stored legacy zero is unsupported telemetry, not an observed zero.",
   `  User-message share (user turns / total turns): ELEVATED ≥ ${THRESHOLDS.reprompt.elevated * 100}%, HIGH ≥ ${THRESHOLDS.reprompt.high * 100}%`,
   "",
   `Time between user messages: middle value and 90th-percentile value in seconds; a long gap is over ${LONG_GAP_THRESHOLD_S}s. Shown after at least two gaps.`,
   "",
-  "Repeated-loop events appear in Cost drivers when detected.",
+  "Operational observations: API-request exposure is unavailable, so API-error rate is unavailable. Tool-error rate uses completed tool results when available.",
+  "Test outcomes are separate from task success or failure. 'Failed then passed' only means a later test pass was observed; it does not link the tests.",
+  "Interaction/context signals (compactions, user-message share, gaps) describe flow, not corrections or human wait time.",
 ].join("\n");
 
 // ---------------------------------------------------------------------------
@@ -150,6 +165,22 @@ export function FrictionCell({
       ? `${Math.round(counts.gap_p90_s)}s`
       : "—";
   const longGapFmt = hasGaps ? String(counts.long_gap_count ?? 0) : "—";
+  const toolRateFmt =
+    counts.tool_error_rate !== undefined && counts.tool_error_rate !== null
+      ? `${Math.round(counts.tool_error_rate * 100)}% (${counts.tool_completed_error_count ?? 0}/${counts.tool_completed_count ?? 0} completed)`
+      : "unavailable";
+  const testOutcomeLabel =
+    counts.test_outcome === "FAILED_THEN_PASSED"
+      ? "Failed then passed observed"
+      : counts.test_outcome === "FAILURES_OBSERVED"
+        ? "Failures observed"
+        : counts.test_outcome === "NO_FAILURES_OBSERVED"
+          ? "No failures observed"
+          : "No completed test outcomes";
+  const completedTestOutcomeFmt =
+    counts.test_pass_count !== undefined && counts.test_outcome !== undefined
+      ? `${counts.test_pass_count} completed passes · ${testOutcomeLabel}`
+      : "Unavailable (completed-test outcome metadata not recorded)";
 
   if (variant === "compact") {
     // Compact: band dot + chip + non-zero counts on one line
@@ -158,7 +189,7 @@ export function FrictionCell({
     if (counts.tool_error_count > 0) parts.push(`err ${counts.tool_error_count}`);
     if (counts.test_fail_count > 0) parts.push(`fail ${counts.test_fail_count}`);
     if (counts.compaction_count > 0) parts.push(`compact ${counts.compaction_count}`);
-    if (counts.interrupt_count > 0) parts.push(`intr ${counts.interrupt_count}`);
+    if (counts.test_outcome === "FAILED_THEN_PASSED") parts.push("test fail then pass");
     if (Math.round(density * 100) > 0) parts.push(`user messages ${Math.round(density * 100)}%`);
     if (hasGaps && (counts.long_gap_count ?? 0) > 0)
       parts.push(`long-gap ${counts.long_gap_count ?? 0}`);
@@ -172,7 +203,7 @@ export function FrictionCell({
       >
         <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 2 }}>
           {bandDot}
-          <Chip kind="DIRECTIONAL" label={band} title={FRICTION_TOOLTIP} />
+          <Chip kind="DIRECTIONAL" label={`LEGACY ${band}`} title={FRICTION_TOOLTIP} />
         </div>
         {parts.length > 0 && (
           <div style={{ color: "var(--text-muted)", lineHeight: 1.4 }}>{parts.join(" · ")}</div>
@@ -191,7 +222,7 @@ export function FrictionCell({
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
         {bandDot}
-        <Chip kind="DIRECTIONAL" label={band} title={FRICTION_TOOLTIP} />
+        <Chip kind="DIRECTIONAL" label={`LEGACY ${band}`} title={FRICTION_TOOLTIP} />
       </div>
       <dl
         style={{
@@ -203,17 +234,23 @@ export function FrictionCell({
           color: "var(--text-muted)",
         }}
       >
-        <dt>API errors</dt>
+        <dt>Operational: API errors</dt>
         <dd style={{ margin: 0 }}>{counts.api_error_count}</dd>
-        <dt>Tool errors</dt>
+        <dt>API error rate</dt>
+        <dd style={{ margin: 0 }}>Unavailable (request exposure not recorded)</dd>
+        <dt>Operational: tool errors</dt>
         <dd style={{ margin: 0 }}>{counts.tool_error_count}</dd>
-        <dt>Test fails</dt>
+        <dt>Tool error rate</dt>
+        <dd style={{ margin: 0 }}>{toolRateFmt}</dd>
+        <dt>Recorded test failure signals</dt>
         <dd style={{ margin: 0 }}>{counts.test_fail_count}</dd>
-        <dt>Compactions</dt>
+        <dt>Completed-test outcome</dt>
+        <dd style={{ margin: 0 }}>{completedTestOutcomeFmt}</dd>
+        <dt>Context: compactions</dt>
         <dd style={{ margin: 0 }}>{counts.compaction_count}</dd>
         <dt>Interrupts</dt>
-        <dd style={{ margin: 0 }}>{counts.interrupt_count}</dd>
-        <dt>User-message share</dt>
+        <dd style={{ margin: 0 }}>Unavailable (legacy zero is unsupported)</dd>
+        <dt>Interaction: user-message share</dt>
         <dd style={{ margin: 0 }}>{Math.round(density * 100)}%</dd>
         <dt>Gap median</dt>
         <dd style={{ margin: 0 }} data-testid="gap-median">

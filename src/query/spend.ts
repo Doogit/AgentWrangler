@@ -232,13 +232,31 @@ export interface HotSessionRow {
   avg_context_tokens: number;
   model: string;
   last_turn_at: string;
-  /** RV2b friction fields — counts from sessions + tool_events; 0 for pre-RV2a rows. */
+  /** Operational and interaction/context observations. Legacy counters remain compatible. */
   api_error_count: number;
+  /** The adapter records no eligible API-request exposure, so this rate is unavailable. */
+  api_error_eligible_request_count?: null;
+  api_error_rate?: null;
   compaction_count: number;
+  /** Stored legacy zero is unsupported telemetry, not an observed zero. */
   interrupt_count: number;
+  interrupts_supported?: false;
   user_turn_count: number;
   tool_error_count: number;
+  /** Tool results actually observed, including successful and failed completions. */
+  tool_completed_count?: number;
+  /** Error numerator limited to the same completed-tool exposure as the rate. */
+  tool_completed_error_count?: number;
+  tool_error_rate?: number | null;
   test_fail_count: number;
+  test_completed_count?: number;
+  test_pass_count?: number;
+  /** Describes ordered observations only; a later pass is not linked to the same test. */
+  test_outcome?:
+    | "NO_TEST_OUTCOMES"
+    | "NO_FAILURES_OBSERVED"
+    | "FAILURES_OBSERVED"
+    | "FAILED_THEN_PASSED";
   /** EF3 gap aggregates from the sessions table (post-migration-015). Null when <2 user turns. */
   gap_median_s: number | null;
   gap_p90_s: number | null;
@@ -286,7 +304,61 @@ export function hotSessionsByCost(
                   AND te.exit_class = 'ERROR')                                AS tool_error_count,
               (SELECT COUNT(*) FROM tool_events te
                 WHERE te.session_id = s.session_id
-                  AND te.exit_class = 'TEST_FAIL')                            AS test_fail_count,
+                  AND te.exit_class = 'ERROR'
+                  AND te.result_bytes IS NOT NULL)                             AS tool_completed_error_count,
+              (SELECT COUNT(*) FROM tool_events te
+                WHERE te.session_id = s.session_id
+                  AND te.result_bytes IS NOT NULL)                             AS tool_completed_count,
+              (SELECT COUNT(*) FROM tool_events te
+                WHERE te.session_id = s.session_id
+                  AND te.exit_class = 'TEST_FAIL'
+                  AND EXISTS (
+                    SELECT 1 FROM tool_event_metadata metadata
+                     WHERE metadata.event_id = te.event_id AND metadata.is_test_command = 1
+                  ))                                                          AS test_fail_count,
+              (SELECT COUNT(*) FROM tool_events te
+                 JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
+                WHERE te.session_id = s.session_id
+                  AND metadata.is_test_command = 1
+                  AND te.result_bytes IS NOT NULL)                             AS test_completed_count,
+              (SELECT COUNT(*) FROM tool_events te
+                 JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
+                WHERE te.session_id = s.session_id
+                  AND metadata.is_test_command = 1
+                  AND te.exit_class = 'OK'
+                  AND te.result_bytes IS NOT NULL)                             AS test_pass_count,
+              CASE WHEN NOT EXISTS (
+                     SELECT 1 FROM tool_events observed
+                      JOIN tool_event_metadata observed_metadata ON observed_metadata.event_id = observed.event_id
+                     WHERE observed.session_id = s.session_id
+                       AND observed_metadata.is_test_command = 1
+                       AND observed.result_bytes IS NOT NULL
+                   ) THEN 'NO_TEST_OUTCOMES'
+                   WHEN NOT EXISTS (
+                     SELECT 1 FROM tool_events failed
+                      JOIN tool_event_metadata failed_metadata ON failed_metadata.event_id = failed.event_id
+                     WHERE failed.session_id = s.session_id
+                       AND failed_metadata.is_test_command = 1
+                       AND failed.exit_class = 'TEST_FAIL'
+                       AND failed.result_bytes IS NOT NULL
+                   ) THEN 'NO_FAILURES_OBSERVED'
+                   WHEN EXISTS (
+                     SELECT 1 FROM tool_events passed
+                      JOIN tool_event_metadata passed_metadata ON passed_metadata.event_id = passed.event_id
+                     WHERE passed.session_id = s.session_id
+                       AND passed_metadata.is_test_command = 1
+                       AND passed.exit_class = 'OK'
+                       AND passed.result_bytes IS NOT NULL
+                       AND EXISTS (
+                         SELECT 1 FROM tool_events failed_before
+                          JOIN tool_event_metadata failed_before_metadata ON failed_before_metadata.event_id = failed_before.event_id
+                         WHERE failed_before.session_id = s.session_id
+                           AND failed_before_metadata.is_test_command = 1
+                           AND failed_before.exit_class = 'TEST_FAIL'
+                           AND failed_before.result_bytes IS NOT NULL
+                           AND failed_before.ts < passed.ts
+                       )
+                   ) THEN 'FAILED_THEN_PASSED' ELSE 'FAILURES_OBSERVED' END  AS test_outcome,
               s.gap_median_s                                                   AS gap_median_s,
               s.gap_p90_s                                                      AS gap_p90_s,
               s.long_gap_count                                                 AS long_gap_count,
@@ -298,5 +370,24 @@ export function hotSessionsByCost(
         LIMIT @limit`,
     )
     .all(window === undefined ? { limit } : { limit, from: window.from, to: window.to });
-  return rows as HotSessionRow[];
+  return (
+    rows as Array<
+      Omit<
+        HotSessionRow,
+        | "api_error_eligible_request_count"
+        | "api_error_rate"
+        | "interrupts_supported"
+        | "tool_error_rate"
+      > & { tool_completed_count: number; tool_completed_error_count: number }
+    >
+  ).map((row) => ({
+    ...row,
+    api_error_eligible_request_count: null,
+    api_error_rate: null,
+    interrupts_supported: false,
+    tool_error_rate:
+      row.tool_completed_count > 0
+        ? row.tool_completed_error_count / row.tool_completed_count
+        : null,
+  }));
 }

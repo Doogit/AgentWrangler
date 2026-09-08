@@ -604,15 +604,15 @@ export default function SessionDetailPage({
         </div>
         <div>
           <span>
-            Long session without a commit{" "}
+            Reconciled Bash/edit activity without an observed commit{" "}
             <InfoTip
-              label="Long session without a commit"
-              content="Shown when a completed session has at least 10 user turns and no commit. It can indicate significant effort without a recorded change."
+              label="Reconciled activity without an observed commit"
+              content="Shown only for a reconciled session with at least 10 user turns, Bash/Write/Edit/NotebookEdit activity, and no observed SHA. This is an activity cohort, not abandonment or a judgment about usefulness."
             />
           </span>
           <b data-testid="deep-abandoned">
             {session.deep_abandoned === true ? (
-              <Chip kind="ATTENTION" label="LONG, NO COMMIT" />
+              <Chip kind="DIRECTIONAL" label="DEEP ACTIVITY, NO OBSERVED COMMIT" />
             ) : (
               "No"
             )}
@@ -631,7 +631,7 @@ export default function SessionDetailPage({
             Friction signals{" "}
             <InfoTip
               label="What the friction band means"
-              content="A low, elevated, or high signal based on errors, test failures, context compactions, interrupts, and user-message share. It is a guide, not an exact score. The details below show why."
+              content="A legacy heuristic based on observed errors, test outcomes, and interaction/context signals. It is not a health or quality rating. Interrupt telemetry and API request exposure are unavailable; the details show counts, available rates, and limits."
             />
           </h2>
           <div className="chips">
@@ -641,7 +641,7 @@ export default function SessionDetailPage({
         <div style={{ padding: "8px 16px 12px" }}>
           <InfoTip
             label="What the friction components are"
-            content="The signals behind this rating include errors, test failures, context compactions, interrupts, and user-message share. Open the rating details to see the thresholds."
+            content="Operational errors, test outcomes, and interaction/context signals are shown separately. A test failure followed by a later pass is not task failure or proof that the same test recovered."
           />
           <FrictionCell
             counts={{
@@ -650,6 +650,15 @@ export default function SessionDetailPage({
               test_fail_count: session.test_fail_count,
               compaction_count: session.compaction_count,
               interrupt_count: session.interrupt_count,
+              interrupts_supported: session.interrupts_supported,
+              api_error_eligible_request_count: session.api_error_eligible_request_count,
+              api_error_rate: session.api_error_rate,
+              tool_completed_count: session.tool_completed_count,
+              tool_completed_error_count: session.tool_completed_error_count,
+              tool_error_rate: session.tool_error_rate,
+              test_completed_count: session.test_completed_count,
+              test_pass_count: session.test_pass_count,
+              test_outcome: session.test_outcome,
               user_turn_count: session.user_turn_count,
               turn_count: session.turn_count,
               gap_median_s: session.gap_median_s,

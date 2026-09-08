@@ -108,7 +108,9 @@ describe("EF1 cells on SessionDetailPage", () => {
     render(<SessionDetailPage sessionId="session-deep" onBack={() => {}} />);
 
     await screen.findByText("Session detail");
-    expect(screen.getByTestId("deep-abandoned").textContent).toContain("LONG, NO COMMIT");
+    expect(screen.getByTestId("deep-abandoned").textContent).toContain(
+      "DEEP ACTIVITY, NO OBSERVED COMMIT",
+    );
   });
 
   it("renders 'No' for deep_abandoned when false", async () => {

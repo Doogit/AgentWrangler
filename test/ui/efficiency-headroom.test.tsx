@@ -42,31 +42,42 @@ beforeEach(() => {
   mockLedgerOk([entryWith({})]);
 });
 
-describe("HeadroomSummary — known fixture", () => {
-  it("renders the headroom percentage from the fixture (~35%)", async () => {
-    vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
+describe("HeadroomSummary — individual opportunities", () => {
+  it("renders individual modeled opportunities without a combined percentage", async () => {
+    const response = mockEfficiencyHeadroom();
+    if (response.data === null) throw new Error("fixture must have data");
+    response.data = {
+      ...response.data,
+      opportunities: [
+        { rec_id: "rec-a", modeled_savings_u_per_wk: 2_450_000 },
+        { rec_id: "rec-b", modeled_savings_u_per_wk: 500_000 },
+      ],
+      headroom_pct: null,
+    };
+    vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(response);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    // headroom_u_per_wk / actual_u_per_wk = 2_450_000 / 7_000_000 ≈ 35%
-    // Exact phrase, not bare "35%", so a unit-scale bug rendering "135%" is caught.
-    expect(text).toContain("35% of trailing spend");
+    expect(text).toContain("rec-a: $2.45/wk");
+    expect(text).toContain("rec-b: $0.50/wk");
+    expect(text).not.toMatch(/\d+% of trailing spend/);
   });
 
-  it("caps the display at '>100%' when modeled savings exceed trailing spend", async () => {
+  it("does not render a legacy combined percentage when one is supplied", async () => {
     const over = mockEfficiencyHeadroom();
     if (over.data === null) throw new Error("fixture must have data");
-    over.data = { ...over.data, headroom_pct: 3.0 }; // 300% — modeled > actual
+    const { opportunities: _opportunities, ...legacyData } = over.data;
+    over.data = { ...legacyData, headroom_pct: 3.0 }; // Legacy payload: no opportunity coverage.
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(over);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain(">100% of trailing spend");
     expect(text).not.toContain("300%");
+    expect(text).toContain("individual opportunity coverage unavailable");
   });
 
   it("frames output as 'Possible improvement' — never a dollar-headline (INT-5)", async () => {
@@ -93,8 +104,8 @@ describe("HeadroomSummary — known fixture", () => {
   });
 });
 
-describe("HeadroomSummary — null headroom_pct", () => {
-  it("renders the honest empty state when headroom_pct is null — no NaN or ∞", async () => {
+describe("HeadroomSummary — unavailable opportunity coverage", () => {
+  it("renders unavailable coverage when opportunities are absent — no NaN or ∞", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroomNull());
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
@@ -105,8 +116,7 @@ describe("HeadroomSummary — null headroom_pct", () => {
     expect(text).not.toContain("NaN");
     expect(text).not.toContain("Infinity");
     expect(text).not.toContain("∞");
-    // Must render an honest empty state
-    expect(text).toContain("not enough data to estimate");
+    expect(text).toContain("individual opportunity coverage unavailable");
   });
 
   it("zero-spend scenario does not divide by zero", async () => {
@@ -119,9 +129,9 @@ describe("HeadroomSummary — null headroom_pct", () => {
     const summaryText = summaryEl?.textContent ?? "";
     // The headroom row must render without crashing
     expect(summaryText).toContain("Possible improvement");
-    // pctDisplay for null case renders the empty-state, not a numeric percentage
+    // Missing legacy opportunity coverage never renders a numeric percentage.
     expect(summaryText).not.toMatch(/\d+%/);
-    expect(summaryText).toContain("not enough data to estimate");
+    expect(summaryText).toContain("individual opportunity coverage unavailable");
   });
 });
 
