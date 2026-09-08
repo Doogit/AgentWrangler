@@ -162,7 +162,7 @@ export default function WorkspacesPage() {
       <div className="page-top">
         <div className="page-title">
           <h1>Workspaces</h1>
-          <p className="page-sub">Spend efficiency by repository</p>
+          <p className="page-sub">Compare estimated token value across repositories</p>
         </div>
         <div className="chips">
           <Chip kind="LIST_EQUIV" />
@@ -197,14 +197,14 @@ export default function WorkspacesPage() {
               <thead>
                 <tr>
                   <th>Workspace</th>
-                  <th>Spend</th>
-                  <th>Share</th>
+                  <th>Est. value</th>
+                  <th>Share of total</th>
                   <th>Trend</th>
-                  <th>Ctx/turn</th>
-                  <th>Cache-write %</th>
-                  <th>Premium %</th>
-                  <th>$/turn</th>
-                  <th>Success</th>
+                  <th>Context / turn</th>
+                  <th>Cache-write share</th>
+                  <th>High-cost model use</th>
+                  <th>Est. value / turn</th>
+                  <th>Outcome signal</th>
                 </tr>
               </thead>
               <tbody>
@@ -226,15 +226,15 @@ export default function WorkspacesPage() {
               <thead>
                 <tr>
                   <th>Workspace</th>
-                  <th aria-label="Spend">
-                    Spend{" "}
+                  <th aria-label="Estimated value">
+                    Est. value{" "}
                     <InfoTip
-                      label="What Spend means"
-                      content="Modeled USD-equivalent at list prices for this workspace, not billed spend. Rank workspaces by where the tokens actually go."
+                      label="What estimated value means"
+                      content="An estimate using public API list prices, not a bill. Use it to find the repositories where a change could matter most."
                     />
                   </th>
                   <th aria-label="Share">
-                    Share{" "}
+                    Share of total{" "}
                     <InfoTip
                       label="What Share means"
                       content="This workspace's percentage of your total modeled spend. A few workspaces usually dominate — start optimizing there."
@@ -247,42 +247,42 @@ export default function WorkspacesPage() {
                       content="Direction of this workspace's spend versus the prior period. A sharp rise is worth opening before it compounds."
                     />
                   </th>
-                  <th aria-label="Ctx/turn">
-                    Ctx/turn{" "}
+                  <th aria-label="Context per turn">
+                    Context / turn{" "}
                     <InfoTip
-                      label="What Ctx/turn means"
-                      content="Average context tokens re-read each turn — the biggest cost lever, since context is re-sent every turn. High values point to sessions that should /clear or split."
+                      label="What context per turn means"
+                      content="The average context tokens sent again on each turn. A high value can mean it is time to use /clear or split the work."
                     />
                   </th>
-                  <th aria-label="Cache-write %">
-                    Cache-write %{" "}
+                  <th aria-label="Cache-write share">
+                    Cache-write share{" "}
                     <InfoTip
                       label="What Cache-write % means"
-                      content="Share of tokens written to the prompt cache rather than served from it. Persistently high means the cache keeps getting invalidated — often an editing pattern worth changing."
+                      content="Share of all token categories that were cache writes. A high share can be worth investigating; it does not by itself prove the cache was invalidated."
                     />
                   </th>
-                  <th aria-label="Premium %">
-                    Premium %{" "}
+                  <th aria-label="High-cost model use">
+                    High-cost model use{" "}
                     <InfoTip
                       label="What Premium % means"
-                      content="Share of turns run on premium models (Opus, Fable). If routine work is on a premium model, moving it to Sonnet is the fastest saving."
+                      content="Share of turns on premium models (Opus, Fable, or Mythos). Check /usage before moving routine work to Sonnet; your Sonnet limit may already be filling."
                     />
                   </th>
-                  <th aria-label="$/turn">
-                    $/turn{" "}
+                  <th aria-label="Estimated value per turn">
+                    Est. value / turn{" "}
                     <InfoTip
                       label="What $/turn means"
                       content="Modeled cost per turn for this workspace — a size-independent efficiency number. Compare workspaces here rather than on total spend."
                     />
                   </th>
                   <th
-                    aria-label="Success"
-                    title="Success rate (EXPERIMENTAL): methodology validated at ~73% on a sample corpus."
+                    aria-label="Outcome signal"
+                    title="Outcome signal: based on a limited sample and may change."
                   >
-                    Success{" "}
+                    Outcome signal{" "}
                     <InfoTip
-                      label="What Success means"
-                      content="Share of sessions that reached a clean outcome versus stalling or being abandoned. Low success alongside high spend flags a workflow that's fighting the tools."
+                      label="What outcome signal means"
+                      content="Share of linked pull requests with a successful observed outcome among closed outcomes, including success with deferred work. This early estimate helps spot patterns only."
                     />
                   </th>
                 </tr>
@@ -358,11 +358,11 @@ export default function WorkspacesPage() {
                               ? `${(outcome.success_rate * 100).toFixed(0)}%`
                               : "—"
                           }
-                          title="Success rate (EXPERIMENTAL): methodology validated at ~73% on a sample corpus."
+                          title="Outcome signal: based on a limited sample and may change."
                         />{" "}
                         <InfoTip
-                          label="What the EXP chip means"
-                          content="This value comes from a method still under validation, so treat it as directional. Use it to spot patterns, not to make precise claims."
+                          label="What this early estimate means"
+                          content="This value uses a method that is still being checked. Use it to spot patterns, not to make precise claims."
                         />
                       </td>
                     </tr>
@@ -374,8 +374,8 @@ export default function WorkspacesPage() {
         )}
 
         <div className="table-footnotes">
-          Spend = LIST_EQUIV (list-price equivalent; not billing data). Success = EXPERIMENTAL
-          (methodology ~73% validated). Click a row to open the workspace detail.
+          Estimated value uses public API list prices; it is not billing data. Outcome signal is an
+          early estimate based on a limited sample. Click a row to open the workspace detail.
         </div>
       </div>
     </div>

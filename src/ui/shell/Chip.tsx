@@ -58,41 +58,38 @@ const KIND_CLASS: Record<ChipProps["kind"], string> = {
 };
 
 const KIND_LABEL: Record<ChipProps["kind"], string> = {
-  LIST_EQUIV: "LIST_EQUIV",
-  LIST_EQUIV_STALE: "STALE",
-  PROXY: "PROXY",
-  OBS_PROXY: "OBS PROXY ±9% BPE",
-  EXPERIMENTAL: "EXPERIMENTAL",
-  DIRECTIONAL: "DIRECTIONAL",
-  N_A: "N/A",
-  EXACT: "EXACT",
+  LIST_EQUIV: "ESTIMATED VALUE",
+  LIST_EQUIV_STALE: "PRICE ESTIMATE MAY BE OLD",
+  PROXY: "ESTIMATE",
+  OBS_PROXY: "TOKEN-BASED ESTIMATE",
+  EXPERIMENTAL: "EARLY ESTIMATE",
+  DIRECTIONAL: "TREND ONLY",
+  N_A: "NO DATA",
+  EXACT: "MEASURED",
   LIVE: "LIVE",
-  MODELED: "MODELED",
-  PASS: "PASS",
-  ATTENTION: "ATTENTION",
+  MODELED: "PROJECTED",
+  PASS: "ON TRACK",
+  ATTENTION: "REVIEW",
   NO_DATA: "NO DATA",
   VERIFIED_SOURCE: "VERIFIED SOURCE",
 };
 
 export const KIND_TOOLTIP: Record<ChipProps["kind"], string> = {
-  LIST_EQUIV: "LIST_EQUIV: modeled USD equivalent using list pricing; not billed spend.",
-  OBS_PROXY: "OBS_PROXY: observed token usage with an approximate BPE conversion.",
-  EXPERIMENTAL:
-    "EXPERIMENTAL: directional evidence from a methodology that is still under validation.",
-  DIRECTIONAL:
-    "DIRECTIONAL: coarse band derived from observed counts — not a precision score. Thresholds are declared in the friction tooltip.",
-  EXACT: "EXACT: directly measured from observed session data.",
-  PROXY: "PROXY: derived estimate used where direct measurement is unavailable.",
-  MODELED: "MODELED: projected outcome from a model, not achieved savings.",
-  N_A: "N/A: metric is defined, but no value is available.",
+  LIST_EQUIV: "Estimated value at public API list prices. This is not your billed spend.",
+  OBS_PROXY: "Token-based estimate from observed use. It may differ from the exact token count.",
+  EXPERIMENTAL: "Early estimate from a method that is still being checked.",
+  DIRECTIONAL: "Trend only: a broad signal from observed counts, not a precise measurement.",
+  EXACT: "Measured directly from recorded session data.",
+  PROXY: "Estimate used when a direct measurement is unavailable.",
+  MODELED: "Projected outcome from a model, not a result that has happened yet.",
+  N_A: "This measure is available here, but there is no value yet.",
   LIVE: "LIVE: session is currently active.",
-  LIST_EQUIV_STALE: "STALE: list-price equivalent based on pricing data that may be outdated.",
-  PASS: "PASS: this practice is being followed based on the current measurement signal.",
-  ATTENTION:
-    "ATTENTION: this practice may need review — the signal is outside its declared threshold.",
-  NO_DATA: "NO DATA: not enough signal in this window to evaluate this practice.",
+  LIST_EQUIV_STALE: "Estimated value based on public API prices that may be out of date.",
+  PASS: "This practice is on track based on the current measurement signal.",
+  ATTENTION: "Review this practice: the current signal is outside its stated range.",
+  NO_DATA: "There is not enough activity in this period to assess this practice.",
   VERIFIED_SOURCE:
-    "VERIFIED SOURCE: this citation links to the Anthropic documentation or blog post the practice is grounded in.",
+    "Source checked: this links to the Anthropic documentation or post behind the practice.",
 };
 
 export default function Chip({ kind, label, title }: ChipProps) {

@@ -198,11 +198,11 @@ describe("UA11 fixture matrix", () => {
     vi.mocked(client.fetchLedger).mockResolvedValue(mockLedger());
     const { container } = render(<ImpactLedger />);
 
-    await waitFor(() => expect(container.textContent).toContain("Probe checking after"));
+    await waitFor(() => expect(container.textContent).toContain("Local check due after"));
     const text = container.textContent ?? "";
     expect(text).toContain("225,000 tokens (+20.0%)");
-    expect(text).toContain("No signal in this window.");
-    expect(text).toContain("Multiple changes in this window");
+    expect(text).toContain("No reliable reduction was detected in this period.");
+    expect(text).toContain("Several changes happened in this period");
     expect(text).toContain("Acknowledged — not measured");
   });
 });

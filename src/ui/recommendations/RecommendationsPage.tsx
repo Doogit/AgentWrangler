@@ -58,9 +58,9 @@ function getHashServer(): string {
 }
 
 const STANDING_FOOTNOTE =
-  "Modeled savings are never counted as achieved; only verified measured effects contribute to the achieved total.";
+  "Possible savings are kept separate from the results measured after a change.";
 const WASTE_SOURCE_FOOTNOTE =
-  "Ranks compare expected leverage, not achieved savings. Modeled dollars are projections and are not directly comparable across detector methods.";
+  "Estimates show possible reductions, not results. Different suggestion types use different estimation methods.";
 
 const DE_MINIMIS_FLOOR_U = 1_000_000;
 const MINOR_ITEMS_GROUP_ID = "MINOR_ITEMS";
@@ -322,8 +322,7 @@ export default function RecommendationsPage() {
         <div className="page-title">
           <h1>Recommendations</h1>
           <p className="page-sub">
-            Waste-source detectors · ranked by type of impact, then estimated savings · estimates
-            are not yet validated
+            Ways to reduce token use. Review a suggestion, make a change, then check its effect.
           </p>
         </div>
         <div className="chips">
@@ -525,11 +524,11 @@ export default function RecommendationsPage() {
                             {topFamily.session_count === 1 ? "session" : "sessions"}
                           </p>
                         )}
-                        <p className="kpi-fn">Modeled savings are not additive.</p>
+                        <p className="kpi-fn">Estimates can overlap; do not add them together.</p>
                       </div>
                       <div className="recs-summary-trio" aria-label="Scope and adoption counts">
                         <span>
-                          <strong>{trioWsCount}</strong> workspace-scoped
+                          <strong>{trioWsCount}</strong> for a workspace
                         </span>
                         <span>
                           <strong>{trioGlobalCount}</strong> global
@@ -542,14 +541,14 @@ export default function RecommendationsPage() {
                   )}
 
                   <div className="section-head">
-                    <h2>Waste sources · highest-impact types first</h2>
+                    <h2>Where to start</h2>
                   </div>
                   <p className="rec-ranking-explainer">
-                    The ranking here is not a simple dollar sort. Each category of waste has a fixed
-                    position because each one is measured differently — the estimates are not
-                    directly comparable across categories. Recommended order preserves that policy.
-                    Newest orders by creation time within each displayed group; modeled dollars
-                    reorder only within a detector family, including when grouped by workspace.
+                    Suggestions are grouped by the kind of change. Savings are estimates.
+                    <InfoTip
+                      label="How suggestions are ordered"
+                      content="Recommended order uses a fixed category order. Categories use different estimation methods, so dollar amounts cannot be compared across them. Newest sorts within each group; estimated savings sorts within each category."
+                    />
                   </p>
                   {visibleGroups.length === 0 ? (
                     visibleWarnings.length === 0 ? (
@@ -590,7 +589,7 @@ export default function RecommendationsPage() {
                       {remainingGroups.length > 0 && (
                         <details className="recs-remaining-queue">
                           <summary>
-                            Remaining queue (
+                            More suggestions (
                             {remainingGroups.reduce((n, group) => n + group.recs.length, 0)})
                           </summary>
                           {remainingGroups.map((group, i) => (

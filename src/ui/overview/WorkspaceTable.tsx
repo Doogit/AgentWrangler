@@ -21,14 +21,14 @@ import { SkeletonRow } from "../shell/Skeleton";
  * Short forms for the compact table cell; falls back to the raw id if unmapped.
  */
 const LEVER_BY_DETECTOR: Record<string, string> = {
-  D1: "CLAUDE.md / memory",
-  D2: "Marathon sessions",
-  D4: "Model routing",
-  D5: "Limit warning",
-  D6: "Tool-result bloat",
-  D8: "Cache misses",
-  D9: "Background sessions",
-  D10: "Tool catalog",
+  D1: "Always-loaded instructions",
+  D2: "Long sessions",
+  D4: "Model choice",
+  D5: "Usage-limit warning",
+  D6: "Large tool results",
+  D8: "Repeated cache rebuilds",
+  D9: "Background-agent work",
+  D10: "Always-loaded tools",
 };
 
 /** Top active rec per workspace (highest modeled savings). */
@@ -101,11 +101,11 @@ export default function WorkspaceTable({
           <thead>
             <tr>
               <th>Workspace</th>
-              <th>Spend</th>
-              <th>Share</th>
-              <th>Live now</th>
-              <th>$/turn</th>
-              <th>Top waste source</th>
+              <th>Est. value</th>
+              <th>Share of total</th>
+              <th>Active now</th>
+              <th>Est. value / turn</th>
+              <th>Best next improvement</th>
             </tr>
           </thead>
           <tbody>

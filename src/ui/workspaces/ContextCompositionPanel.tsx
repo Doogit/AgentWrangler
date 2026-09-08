@@ -11,8 +11,8 @@ export default function ContextCompositionPanel({ data }: { data: ContextComposi
         <h2>Context composition</h2>
         <p className="muted">
           {data?.observed_turns === 0
-            ? "No context-bearing turns were observed for this workspace in the last 7 days."
-            : "No current CLAUDE.md or MEMORY inventory has been probed for this workspace yet."}
+            ? "No turns were observed for this workspace in the last 7 days."
+            : "This workspace has not yet been scanned for CLAUDE.md or memory files."}
         </p>
       </section>
     );
@@ -24,14 +24,16 @@ export default function ContextCompositionPanel({ data }: { data: ContextComposi
     <section className="card" aria-label="Context composition">
       <h2>Context composition</h2>
       <p className="muted">
-        Average context per turn: {fmtTokens(data.observed_context_tokens ?? 0)} tokens (last 7
-        days).
+        Average context sent with each turn: {fmtTokens(data.observed_context_tokens ?? 0)} tokens
+        (last 7 days).
       </p>
       {data.rows.map((row) => (
         <div key={row.key} style={{ marginTop: "0.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
             <span>
-              {row.key === "always_loaded" ? "CLAUDE.md + MEMORY" : "Session history + tools"}
+              {row.key === "always_loaded"
+                ? "CLAUDE.md and memory files"
+                : "Session history and tools"}
             </span>
             <span>
               {fmtTokens(row.tokens)} tokens

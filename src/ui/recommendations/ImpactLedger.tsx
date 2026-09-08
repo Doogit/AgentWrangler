@@ -2,10 +2,10 @@
  * src/ui/recommendations/ImpactLedger.tsx — W4 realized-vs-modeled ledger.
  *
  * Renders one row per adopted rec with the honesty rails (design §5):
- *   - MODELED chip is always labeled "MODELED · unverified projection"; the
+ *   - projected-value chip is always labeled "PROJECTED · not yet verified"; the
  *     cap-weighted figure carries the COEFF caveat; never summed with realized.
  *   - OBSERVED chip reads "OBSERVED SINCE ADOPTION" — observed, not causal.
- *   - MEASURING shows a clock + "Probe checking after <date>" — never a zero-like
+ *   - MEASURING shows a clock + "Local check due after <date>" — never a zero-like
  *     placeholder.
  *   - MEASURED_NO_EFFECT carries the conservative-measurement note.
  *   - INCONCLUSIVE / confounded_window get their declared banners.
@@ -34,14 +34,14 @@ type HeadroomState =
   | { status: "error" }
   | { status: "ok"; value: ApiResponse<EfficiencyHeadroom> };
 
-const MODELED_LABEL = "MODELED · unverified projection";
-const OBSERVED_LABEL = "OBSERVED SINCE ADOPTION";
+const MODELED_LABEL = "PROJECTED · not yet verified";
+const OBSERVED_LABEL = "OBSERVED AFTER ADOPTION";
 const NO_EFFECT_NOTE =
-  "No signal in this window. Realized figures are conservative (direct bytes); modeled figures may be optimistic. A small realized delta does not mean the rec had no value.";
+  "No reliable reduction was detected in this period. The measured figure is conservative, while the projection may be optimistic. A small change does not prove this recommendation had no value.";
 const INCONCLUSIVE_NOTE =
-  "Multiple changes in this window; per-source deltas shown individually. Spend-rollup impact cannot be isolated.";
+  "Several changes happened in this period, so each source is shown separately. Their combined estimated value cannot be separated reliably.";
 const CONFOUNDED_BANNER =
-  "Other recommendations were adopted within 1 day. Changes are attributed per source; total spend impact cannot be isolated.";
+  "Other recommendations were adopted within one day. Each source is shown separately, but their combined estimated value cannot be separated reliably.";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -108,9 +108,10 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
       effect?.after_to ?? new Date(Date.parse(entry.adopted_at) + 14 * MS_PER_DAY).toISOString();
     return (
       <div className="ledger-row">
-        <span className="ledger-key">Realized (observed)</span>
+        <span className="ledger-key">Observed result</span>
         <span className="ledger-val">
-          <span aria-hidden="true">⏱</span> Measuring — Probe checking after {deadline.slice(0, 10)}
+          <span aria-hidden="true">⏱</span> Measuring — Local check due after{" "}
+          {deadline.slice(0, 10)}
         </span>
       </div>
     );
@@ -119,7 +120,7 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
   if (effect !== null && hasSparseSample(entry, effect)) {
     return (
       <div className="ledger-row">
-        <span className="ledger-key">Realized (observed)</span>
+        <span className="ledger-key">Observed result</span>
         <span className="ledger-val">Not enough data yet (need ≥3 observations)</span>
       </div>
     );
@@ -128,9 +129,9 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
   if (effect === null || effect.verdict === null) {
     return (
       <div className="ledger-row">
-        <span className="ledger-key">Realized (observed)</span>
+        <span className="ledger-key">Observed result</span>
         <span className="ledger-val">
-          <span aria-hidden="true">⏱</span> Measuring — probe checking after{" "}
+          <span aria-hidden="true">⏱</span> Measuring — local check due after{" "}
           {(effect?.after_to ?? "").slice(0, 10) || "a later probe"}
         </span>
       </div>
@@ -140,7 +141,7 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
   if (effect.verdict === "INCONCLUSIVE") {
     return (
       <div className="ledger-row">
-        <span className="ledger-key">Realized (observed)</span>
+        <span className="ledger-key">Observed result</span>
         <span className="ledger-val">{INCONCLUSIVE_NOTE}</span>
       </div>
     );
@@ -192,7 +193,7 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
       : "delta not computable";
   return (
     <div className="ledger-row">
-      <span className="ledger-key">Realized (observed)</span>
+      <span className="ledger-key">Observed result</span>
       <span className="ledger-val">
         {deltaText} <span className="chip chip-observed">{OBSERVED_LABEL}</span>
         {directional && (
@@ -229,11 +230,11 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
 
       {!isRoutingAdvisory && entry.modeled_cap_weighted_u_per_wk !== null && (
         <div className="ledger-row">
-          <span className="ledger-key">Modeled (cap-weighted)</span>
+          <span className="ledger-key">Projected weekly value</span>
           <span className="ledger-val">
             {fmtUsdPerWk(entry.modeled_cap_weighted_u_per_wk)}{" "}
             <Chip kind="MODELED" label={MODELED_LABEL} />{" "}
-            <Chip kind="LIST_EQUIV" label="LIST_EQUIV · modeled USD" />
+            <Chip kind="LIST_EQUIV" label="ESTIMATED VALUE · public API prices" />
           </span>
         </div>
       )}
@@ -242,7 +243,7 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
 
       {entry.detector_id !== "D5" && entry.effects[0] !== undefined && (
         <div className="ledger-row ledger-sample-counts">
-          <span className="ledger-key">Samples</span>
+          <span className="ledger-key">Compared activity</span>
           <span className="ledger-val">
             Baseline: {entry.effects[0].before_n ?? "unknown"} · Follow-up:{" "}
             {entry.effects[0].after_n ?? "unknown"}
@@ -252,7 +253,7 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
 
       {isRoutingAdvisory && (
         <p className="kpi-off-hint">
-          Advisory: which cap binds is not observable; dollar savings are not asserted.
+          We cannot see which usage limit is filling, so this does not claim dollar savings.
         </p>
       )}
 
@@ -309,12 +310,12 @@ function HeadroomSummary() {
   return (
     <div className="headroom-summary ledger-row" data-testid="headroom-summary">
       <span className="ledger-key">
-        Modeled headroom <InfoTip label="What is modeled headroom?" content={caveat} />
+        Possible improvement <InfoTip label="What possible improvement means" content={caveat} />
       </span>
       <span className="ledger-val">
         {pctDisplay !== "—" ? (
           <>
-            {pctDisplay} <Chip kind="EXPERIMENTAL" label="MODELED CEILING" />
+            {pctDisplay} <Chip kind="EXPERIMENTAL" label="EARLY UPPER ESTIMATE" />
           </>
         ) : (
           <span className="kpi-off-hint">not enough data to estimate</span>

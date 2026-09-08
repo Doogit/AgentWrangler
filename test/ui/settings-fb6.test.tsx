@@ -248,7 +248,7 @@ describe("FB6 — Bulk End", () => {
     fireEvent.click(screen.getByRole("button", { name: "End all idle interactive sessions" }));
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeTruthy();
-      expect(screen.getByText(/PID 12345/)).toBeTruthy();
+      expect(screen.getByText(/Process ID \(PID\) 12345/)).toBeTruthy();
     });
     fireEvent.click(screen.getByRole("button", { name: "Confirm End All" }));
     await waitFor(() => expect(client.endSessionPid).toHaveBeenCalledWith(12345));

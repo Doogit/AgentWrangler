@@ -82,7 +82,7 @@ describe("workspaces below-the-line UI", () => {
       />,
     );
 
-    expect(screen.getByRole("columnheader", { name: "$/turn" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Est. value / turn" })).toBeTruthy();
     expect(screen.getByText("$0.04")).toBeTruthy();
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });

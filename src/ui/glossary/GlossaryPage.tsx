@@ -31,26 +31,25 @@ interface Section {
 const SECTIONS: Section[] = [
   {
     id: "glossary-list-equiv",
-    title: "List-price equivalent ($) and the cap-weighted meter",
+    title: "Estimated value and usage limits",
     body: (
       <>
         <p>
-          Every dollar figure is a{" "}
-          <strong>modeled USD equivalent using list pricing — not billed spend</strong>. List-price
-          equivalents only — Max/Team plans are NOT billed this way. Tokens drive rate limits. Check
-          /usage or the status-line 5h/7d % for your real budget signal.
+          Dollar figures show what the same token use would cost at public API list prices. They are
+          <strong> not your Claude subscription bill</strong>. Check /usage or the 5-hour and 7-day
+          bars for your current allowance.
         </p>
         <p>
-          The <strong>cap-weighted</strong> number is cost weighted the way your usage cap counts it
-          — cache reads count roughly a tenth of fresh tokens (an unverified coefficient). It's the
-          number that actually moves you toward a limit, not raw token cost.
+          The usage-limit estimate approximates how quickly activity uses your Claude allowance.
+          Cache reads count less than new tokens in this estimate, but the exact weighting is not
+          published. Use the live usage bars for your actual limit.
         </p>
       </>
     ),
   },
   {
     id: "glossary-honesty-tiers",
-    title: "Honesty-tier chips",
+    title: "How certain each number is",
     body: (
       <>
         <p>
@@ -85,10 +84,9 @@ const SECTIONS: Section[] = [
     title: "Cache write vs read economics",
     body: (
       <p>
-        Cache-write share is the share of tokens written to the prompt cache rather than served from
-        it. Persistently high means the cache keeps getting invalidated — often an editing pattern
-        worth changing. Reads are cheap; resuming a session after the prompt cache expires re-writes
-        the whole context at full price.
+        Cache writes happen when Claude stores the current instructions and history for reuse. A
+        high share usually means the saved context keeps being replaced. Returning after the cache
+        expires can rebuild that context and increase token use.
       </p>
     ),
   },
@@ -107,10 +105,10 @@ const SECTIONS: Section[] = [
     title: "Friction band",
     body: (
       <p>
-        A coarse band (low/medium/high) for how much a session stalled on errors, retries, and dead
-        ends. High-friction sessions are where cleanup time hides. Peak friction is the single worst
-        per-session band across a scope's hot sessions, not an average — it flags whether any one
-        session went badly, which an average would hide.
+        A low, elevated, or high signal based on error and failed-test counts, compactions, recorded
+        interruptions, and the share of user messages. Repeated loops are a separate signal. Peak
+        friction is the highest band among the sessions being summarized, not an average or proof of
+        wasted work.
       </p>
     ),
   },
@@ -119,10 +117,8 @@ const SECTIONS: Section[] = [
     title: "Offload share",
     body: (
       <p>
-        The share of turns handled by specialized subagents rather than the main thread. Subagents
-        return 1–2k-token summaries despite consuming tens of thousands internally. The source gives
-        a shape, not a target, so no threshold is claimed — the observed share is shown for the
-        trend.
+        The share of turns handled by subagents instead of the main conversation. It is shown as a
+        trend, not a target: more subagents are not automatically better.
       </p>
     ),
   },

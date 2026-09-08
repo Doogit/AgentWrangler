@@ -78,7 +78,7 @@ export default function HotSessionsPage({
     <div className="page-top">
       <div className="page-title">
         <h1>Sessions</h1>
-        <p className="page-sub">Highest-cost sessions with output / context split</p>
+        <p className="page-sub">Sessions with the most estimated value</p>
       </div>
     </div>
   );
@@ -130,17 +130,17 @@ export default function HotSessionsPage({
                   <th scope="col">#</th>
                   <th scope="col">Workspace</th>
                   <th scope="col">
-                    Cost ($){" "}
+                    Est. value ($){" "}
                     <InfoTip
-                      label="What Cost means"
-                      content="Modeled USD-equivalent at list prices, not billed spend. Use it to rank which sessions are worth optimizing, not as an invoice."
+                      label="What estimated value means"
+                      content="An estimate using public API list prices, not a bill. Use it to decide which sessions are worth improving first."
                     />
                   </th>
                   <th scope="col">
-                    Output / context (avg){" "}
+                    Output / context (average){" "}
                     <InfoTip
-                      label="What Ctx/turn means"
-                      content="Average context tokens re-read on every turn — the main driver of cost, since the whole context is re-sent each turn. A high number means it's time to /clear or split the task."
+                      label="What output and context mean"
+                      content="The average output tokens and context tokens for each turn. Context is sent again each turn, so a high context value can be a reason to use /clear or split the task."
                     />
                   </th>
                   <th scope="col">Model</th>
@@ -149,7 +149,7 @@ export default function HotSessionsPage({
                     Friction{" "}
                     <InfoTip
                       label="What Friction means"
-                      content="A coarse band (low/medium/high) for how much a session stalled on errors, retries, and dead ends. High-friction sessions are where cleanup time hides."
+                      content="A low, elevated, or high signal based on errors, test failures, context compactions, interrupts, and user-message share. Open a high signal to see what happened."
                     />
                   </th>
                   <th scope="col">Last active</th>

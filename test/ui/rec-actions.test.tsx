@@ -102,12 +102,12 @@ describe("RecCard — action buttons", () => {
     expect(container.querySelector(".rec-category-chip")?.textContent).toBe("Tool catalog");
   });
 
-  it("uses the D7 retry label instead of the session-hygiene fallback", () => {
+  it("uses the plain-language D7 label instead of the session-hygiene fallback", () => {
     const rec = makeRec({ detector_id: "D7", category: "SESSION_HYGIENE" });
     const { container } = render(<RecCard rec={rec} />);
 
     expect(container.querySelector(".rec-category-chip")?.textContent).toBe(
-      "Retry / redundant-read",
+      "Repeated attempts and reads",
     );
   });
 
@@ -455,9 +455,7 @@ describe("RecCard — progressive disclosure", () => {
     fireEvent.click(getByRole("button", { name: /show details/i }));
 
     // Now the D1 backfire warning is visible.
-    expect(container.textContent ?? "").toContain(
-      "batch this edit to a /clear or session boundary",
-    );
+    expect(container.textContent ?? "").toContain("Make this edit between tasks or after /clear.");
   });
 
   it("collapsed state contains no absolute C:\\Users or /Users/ paths", () => {
@@ -670,7 +668,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     vi.useRealTimers();
     const ledgerView = render(<ImpactLedger />);
     await waitFor(() => expect(ledgerView.container.textContent).toContain("Measuring"));
-    expect(ledgerView.container.textContent).toContain("Probe checking after");
+    expect(ledgerView.container.textContent).toContain("Local check due after");
   });
 
   it("shows adopted recs in the adopted section when present", async () => {

@@ -147,10 +147,10 @@ describe("FrictionCell compact variant", () => {
     const tip = cell.getAttribute("title") ?? "";
     expect(tip).toContain("API errors");
     expect(tip).toContain("Tool errors");
-    expect(tip).toContain("Test fails");
+    expect(tip).toContain("Test failures");
     expect(tip).toContain("Compactions");
     expect(tip).toContain("Interrupts");
-    expect(tip).toContain("Re-prompt density");
+    expect(tip).toContain("User-message share");
     expect(tip).toContain("ELEVATED");
     expect(tip).toContain("HIGH");
   });
@@ -165,7 +165,7 @@ describe("FrictionCell strip variant", () => {
     expect(cell.textContent).toContain("Test fails");
     expect(cell.textContent).toContain("Compactions");
     expect(cell.textContent).toContain("Interrupts");
-    expect(cell.textContent).toContain("Re-prompt density");
+    expect(cell.textContent).toContain("User-message share");
   });
 
   it("renders interrupt count of 0 without crashing", () => {

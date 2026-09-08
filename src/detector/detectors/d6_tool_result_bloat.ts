@@ -362,7 +362,7 @@ export const d6Detector: Detector = {
         modeled_savings_u_per_wk: modeledSavingsU,
         modeled_formula: formula,
         evidence: {
-          title: `Trim tool output: ${Math.round(bloatShare * 100)}% bloat share in session`,
+          title: `Reduce large tool results: ${Math.round(bloatShare * 100)}% of this session's context`,
           session_id: row.session_id,
           workspace_id: row.workspace_id,
           tool_result_bytes: row.tool_result_bytes,

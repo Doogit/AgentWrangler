@@ -588,14 +588,25 @@ describe("Settings section navigation", () => {
   afterEach(() => {
     window.location.hash = "";
   });
-  it("focuses the requested section after loading and on same-page navigation", async () => {
+  it("keeps unsaved form state while section navigation focuses targets and opens Advanced", async () => {
     window.location.hash = "#/settings?section=scan-roots";
     setupSuccess();
     render(<SettingsPage />);
     await waitFor(() => expect(document.activeElement?.id).toBe("scan-roots"));
+
+    const scanRoots = screen.getByLabelText(/Scan roots/i) as HTMLTextAreaElement;
+    fireEvent.change(scanRoots, { target: { value: "/unsaved/project" } });
+    fireEvent.click(screen.getByRole("link", { name: "In-session guards" }));
+    await waitFor(() => expect(document.activeElement?.id).toBe("settings-in-session-guards"));
+    expect(scanRoots.value).toBe("/unsaved/project");
+
     window.location.hash = "#/settings?section=parser-health";
     fireEvent(window, new HashChangeEvent("hashchange"));
     await waitFor(() => expect(document.activeElement?.id).toBe("settings-parser-health"));
+    expect(document.querySelector<HTMLDetailsElement>("#settings-advanced details")?.open).toBe(
+      true,
+    );
+
     window.location.hash = "#/settings?section=unknown";
     fireEvent(window, new HashChangeEvent("hashchange"));
     expect(document.activeElement?.id).toBe("settings-parser-health");

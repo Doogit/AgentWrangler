@@ -172,7 +172,7 @@ export default function VerdictBand({
       <div className="verdict-band-summary">
         <div>
           <div className="verdict-band-label" id="verdict-band-title">
-            AT-A-GLANCE VERDICT
+            Usage this period
           </div>
           <CountUpValue value={currentTotal} />
           <div className="verdict-band-caption">{preset.toUpperCase()} list-price equivalent</div>
@@ -184,9 +184,17 @@ export default function VerdictBand({
         <span>Selected-window spend trend</span>
       </div>
       <div className="verdict-band-detail">
-        <strong>Top waste source:</strong> {wasteSource}
+        <strong>Suggested next step:</strong> {wasteSource}
         {claim !== null && <span className="verdict-band-claim"> · {claim}</span>}
       </div>
+      {promptArtifact !== null && (
+        <textarea
+          className="prompt-code verdict-prompt"
+          aria-label="Fix prompt"
+          readOnly
+          value={promptArtifact.text}
+        />
+      )}
       <div className="verdict-band-actions">
         {promptArtifact !== null && (
           <button type="button" className="verdict-band-copy" onClick={handleCopyPrompt}>
@@ -194,7 +202,7 @@ export default function VerdictBand({
           </button>
         )}
         <a className="verdict-band-action" href={focusHref}>
-          {topRecommendation === null ? "Review recommendations →" : "Open rec →"}
+          {topRecommendation === null ? "Review recommendations →" : "Review suggestion →"}
         </a>
       </div>
     </section>

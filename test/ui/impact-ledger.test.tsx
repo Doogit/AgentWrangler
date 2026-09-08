@@ -2,7 +2,7 @@
  * test/ui/impact-ledger.test.tsx — W4 Impact Ledger render rules (design §5).
  *
  * Covers the honesty rails: MODELED chip label ("MODELED · unverified
- * projection"), OBSERVED SINCE ADOPTION chip, MEASURING clock + probe-check
+ * projection"), OBSERVED AFTER ADOPTION chip, MEASURING clock + probe-check
  * date (never a zero-like placeholder), MEASURED_NO_EFFECT conservative note,
  * confounded-window banner, and the COEFF caveat. Client is mocked.
  */
@@ -54,32 +54,32 @@ describe("ImpactLedger — states", () => {
 });
 
 describe("ImpactLedger — honesty rails", () => {
-  it("renders the MODELED chip as 'MODELED · unverified projection' next to the cap-weighted figure", async () => {
+  it("renders the projected-value chip next to the cap-weighted figure", async () => {
     mockOk([entryWith({ state: "MEASURED_EFFECTIVE" })]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector(".chip-modeled")).not.toBeNull();
     });
-    expect(container.textContent ?? "").toContain("MODELED · unverified projection");
+    expect(container.textContent ?? "").toContain("PROJECTED · not yet verified");
     expect(container.textContent ?? "").toContain("$0.42/wk");
   });
 
-  it("uses the human detector group label in the ledger header", async () => {
+  it("uses the plain-language detector label in the ledger header", async () => {
     mockOk([entryWith({ detector_id: "D2" })]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector(".ledger-head strong")?.textContent).toContain(
-        "Session hygiene",
+        "Long sessions",
       );
     });
     expect(container.querySelector(".ledger-head strong")?.textContent).not.toMatch(/^D2\b/);
   });
 
-  it("labels realized deltas 'OBSERVED SINCE ADOPTION' — never 'saved'", async () => {
+  it("labels realized deltas 'OBSERVED AFTER ADOPTION' — never 'saved'", async () => {
     mockOk([entryWith({ state: "MEASURED_EFFECTIVE" })]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
-      expect(container.textContent ?? "").toContain("OBSERVED SINCE ADOPTION");
+      expect(container.textContent ?? "").toContain("OBSERVED AFTER ADOPTION");
     });
     expect(container.textContent ?? "").toContain("-38.0%");
     expect((container.textContent ?? "").toLowerCase()).not.toMatch(/\bsaved\b/);
@@ -91,7 +91,7 @@ describe("ImpactLedger — honesty rails", () => {
     mockOk([measuring]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
-      expect(container.textContent ?? "").toContain("Probe checking after");
+      expect(container.textContent ?? "").toContain("Local check due after");
     });
     expect(container.textContent ?? "").toContain("2026-09-04");
     // No bare em-dash / zero placeholder on the realized line.
@@ -119,7 +119,9 @@ describe("ImpactLedger — honesty rails", () => {
     await waitFor(() => {
       expect(container.textContent ?? "").toContain("conservative");
     });
-    expect(container.textContent ?? "").toContain("No signal in this window.");
+    expect(container.textContent ?? "").toContain(
+      "No reliable reduction was detected in this period.",
+    );
   });
 
   it("renders the confounded-window banner when confounded_window is true", async () => {
@@ -128,7 +130,7 @@ describe("ImpactLedger — honesty rails", () => {
     await waitFor(() => {
       expect(container.querySelector(".banner-warn")).not.toBeNull();
     });
-    expect(container.textContent ?? "").toContain("adopted within 1 day");
+    expect(container.textContent ?? "").toContain("adopted within one day");
   });
 
   it("appends the COEFF caveat when cap_read_coeff < 1", async () => {
@@ -211,7 +213,7 @@ describe("ImpactLedger — honesty rails", () => {
       expect(container.textContent ?? "").toContain("Routing adherence");
     });
     expect(container.textContent ?? "").toContain("62% → 75% (+13 pts)");
-    expect(container.textContent ?? "").toContain("dollar savings are not asserted");
+    expect(container.textContent ?? "").toContain("does not claim dollar savings");
     expect(container.textContent ?? "").not.toContain("75 tokens");
   });
 });

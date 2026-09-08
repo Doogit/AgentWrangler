@@ -49,16 +49,16 @@ function stepsFor(component: string, fileRef: string): string[] {
     case "CLAUDE_MD":
       return [
         `Open ${fileRef}`,
-        "Move changelog/history/rationale prose to a linked doc",
-        "Keep current-state rules + pointers only",
-        "Re-measure: probe re-sizes on next daemon pass",
+        "Move changelogs, history, and background explanations to a linked document",
+        "Keep only current rules and links here",
+        "Check the size again after the next local scan",
       ];
     case "MEMORY":
       return [
         `Review memory files under ${fileRef}`,
-        "Delete stale or duplicate memories",
-        "Consolidate overlapping facts into concise entries",
-        "Re-measure: probe re-sizes on next daemon pass",
+        "Remove old or duplicate memories",
+        "Combine overlapping facts into concise entries",
+        "Check the size again after the next local scan",
       ];
     case "MCP_SCHEMAS":
       return [
@@ -85,13 +85,13 @@ function titleFor(component: string, tokens: number, target: number): string {
 function leverFor(component: string): string {
   switch (component) {
     case "CLAUDE_MD":
-      return "Move changelog/history prose out of CLAUDE.md; keep current-state + pointers.";
+      return "Move changelogs and history out of CLAUDE.md; keep current rules and links.";
     case "MEMORY":
-      return "Prune stale/duplicate memories; consolidate overlapping facts.";
+      return "Remove old or duplicate memories and combine overlapping facts.";
     case "MCP_SCHEMAS":
       return "Identify rarely-used skills/plugins; extract to on-demand or disable.";
     default:
-      return "Trim always-loaded context source to the per-source target.";
+      return "Shorten this content that is loaded into every conversation.";
   }
 }
 

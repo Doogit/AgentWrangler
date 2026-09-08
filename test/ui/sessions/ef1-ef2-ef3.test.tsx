@@ -95,7 +95,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     expect(screen.getByTestId("turns-to-first-commit").textContent).toBe("—");
   });
 
-  it("renders DEEP ABANDONED chip when deep_abandoned is true", async () => {
+  it("renders the long-session-without-a-commit chip when deep_abandoned is true", async () => {
     const fixture = mockSession("session-deep");
     if (fixture.data === null) throw new Error("fixture must have data");
     fixture.data = {
@@ -108,7 +108,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     render(<SessionDetailPage sessionId="session-deep" onBack={() => {}} />);
 
     await screen.findByText("Session detail");
-    expect(screen.getByTestId("deep-abandoned").textContent).toContain("DEEP ABANDONED");
+    expect(screen.getByTestId("deep-abandoned").textContent).toContain("LONG, NO COMMIT");
   });
 
   it("renders 'No' for deep_abandoned when false", async () => {

@@ -44,13 +44,13 @@ function setupWorkspacesPageMocks() {
 // ---------------------------------------------------------------------------
 
 describe("OutcomeSummaryCard", () => {
-  it("shows N/A and EXPERIMENTAL chip when data is null (token unset)", () => {
+  it("shows N/A and EARLY ESTIMATE chip when data is null (token unset)", () => {
     render(<OutcomeSummaryCard data={null} />);
     expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
-    expect(screen.getByRole("status", { name: "EXPERIMENTAL" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "EARLY ESTIMATE" })).toBeTruthy();
   });
 
-  it("shows success rate and EXPERIMENTAL chip with real data", () => {
+  it("shows success rate and EARLY ESTIMATE chip with real data", () => {
     render(
       <OutcomeSummaryCard
         data={{
@@ -65,7 +65,7 @@ describe("OutcomeSummaryCard", () => {
       />,
     );
     expect(screen.getByText("80.0%")).toBeTruthy();
-    expect(screen.getByRole("status", { name: "EXPERIMENTAL" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "EARLY ESTIMATE" })).toBeTruthy();
   });
 });
 
@@ -74,9 +74,9 @@ describe("OutcomeSummaryCard", () => {
 // ---------------------------------------------------------------------------
 
 describe("WorkspaceOutcomeTable", () => {
-  it("shows EXPERIMENTAL chip on table header", () => {
+  it("shows EARLY ESTIMATE chip on table header", () => {
     render(<WorkspaceOutcomeTable rows={[]} />);
-    expect(screen.getByRole("status", { name: "EXPERIMENTAL" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "EARLY ESTIMATE" })).toBeTruthy();
   });
 
   it("shows empty state banner when rows is null", () => {
@@ -106,7 +106,7 @@ describe("WorkspaceOutcomeTable", () => {
     );
     expect(screen.getByText("MyProject")).toBeTruthy();
     expect(screen.getByText("75.0%")).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Routing proxy" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Standard-model share" })).toBeTruthy();
     expect(screen.getByText("80%")).toBeTruthy();
   });
 
@@ -143,9 +143,9 @@ describe("WorkspaceOutcomeTable", () => {
 // ---------------------------------------------------------------------------
 
 describe("LinkageBanner", () => {
-  it("shows EXPERIMENTAL chip and N/A message when data is null", () => {
+  it("shows EARLY ESTIMATE chip and N/A message when data is null", () => {
     render(<LinkageBanner data={null} />);
-    expect(screen.getByRole("status", { name: "EXPERIMENTAL" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "EARLY ESTIMATE" })).toBeTruthy();
     expect(screen.getByText(/configure a GitHub token/i)).toBeTruthy();
   });
 
@@ -192,7 +192,7 @@ describe("ContextCompositionPanel", () => {
         }}
       />,
     );
-    expect(screen.getByText("Session history + tools")).toBeTruthy();
+    expect(screen.getByText("Session history and tools")).toBeTruthy();
   });
 });
 
@@ -210,14 +210,14 @@ describe("WorkspacesPage — RV1a spend table", () => {
     await waitFor(() => {
       expect(screen.getByRole("columnheader", { name: "Workspace" })).toBeTruthy();
     });
-    expect(screen.getByRole("columnheader", { name: "Spend" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Estimated value" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Share" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Trend" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Ctx/turn" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Cache-write %" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Premium %" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "$/turn" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Success" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Context per turn" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Cache-write share" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "High-cost model use" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Estimated value per turn" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Outcome signal" })).toBeTruthy();
   });
 
   it("renders workspace rows from the workspaces fixture", async () => {

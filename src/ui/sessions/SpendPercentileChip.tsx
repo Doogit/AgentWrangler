@@ -29,8 +29,8 @@ export function SpendPercentileChip({
   return (
     <Chip
       kind="EXACT"
-      label={`top ${topPercent}% by spend`}
-      title={`Ranks at or above ${atOrAbovePct}% of your ${n} sessions in this workspace (trailing ${windowDays} days).`}
+      label={`top ${topPercent}% by estimated value`}
+      title={`This session has estimated value at or above ${atOrAbovePct}% of your ${n} sessions in this workspace over the past ${windowDays} days.`}
     />
   );
 }

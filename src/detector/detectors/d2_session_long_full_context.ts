@@ -133,12 +133,13 @@ export const d2Detector: Detector = {
       scopeKey: `D2|global|${formula.model}`,
       category: "CONTEXT",
       scope_workspace_id: null,
-      lever: "/clear between unrelated tasks; split long work; avoid mid-task /compact.",
+      lever:
+        "Use /clear between unrelated tasks, split long work into separate sessions, and avoid automatic compaction while you are working.",
       target_metric: "avg_context_per_turn",
       modeled_savings_u_per_wk: savingsU,
       modeled_formula: formula,
       evidence: {
-        title: `Shorten sessions: ${n} long-context run${n === 1 ? "" : "s"} this week`,
+        title: `Split ${n} long session${n === 1 ? "" : "s"} this week`,
         qualifying_session_count: qualifying.length,
         qualifying_turn_count: qualifyingTurnCount,
         session_ids: sessionIds,

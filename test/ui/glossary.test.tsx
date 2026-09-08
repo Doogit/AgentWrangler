@@ -14,13 +14,13 @@ import Sidebar from "../../src/ui/nav/Sidebar";
 
 // Verbatim chip labels as rendered elsewhere in the UI (Chip.KIND_LABEL).
 const TIER_CHIP_LABELS = [
-  "EXACT",
-  "LIST_EQUIV",
-  "MODELED",
-  "PROXY",
-  "OBS PROXY ±9% BPE",
-  "DIRECTIONAL",
-  "EXPERIMENTAL",
+  "MEASURED",
+  "ESTIMATED VALUE",
+  "PROJECTED",
+  "ESTIMATE",
+  "TOKEN-BASED ESTIMATE",
+  "TREND ONLY",
+  "EARLY ESTIMATE",
 ];
 
 vi.mock("../../src/ui/api/client", () => ({

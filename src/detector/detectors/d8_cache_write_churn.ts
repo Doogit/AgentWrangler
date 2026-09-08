@@ -182,7 +182,7 @@ export const d8Detector: Detector = {
       const fiveMinCreation = events.reduce((s, e) => s + e.cache_write_5m, 0);
       const regime5m = totalCreation > 0 && fiveMinCreation / totalCreation >= D8_REGIME_5M_SHARE;
       const baseLever =
-        "Use /clear (or resume-from-summary) before idling past the cache TTL, and batch prefix/CLAUDE.md edits to a session boundary so they don't invalidate the warm cache mid-session.";
+        "Before a long break, use /clear or resume from a summary. Make instruction-file changes between sessions so they do not rebuild the cache while you work.";
       const lever = regime5m
         ? `${baseLever} This session's creation is mostly 5m-tier — enable the 1h cache regime (ENABLE_PROMPT_CACHING_1H) where long pauses are unavoidable.`
         : baseLever;
@@ -196,7 +196,7 @@ export const d8Detector: Detector = {
         modeled_savings_u_per_wk: savingsU,
         modeled_formula: formula,
         evidence: {
-          title: `Reduce cache-write churn: ${events.length} re-write${events.length === 1 ? "" : "s"} in session`,
+          title: `Avoid repeated cache rebuilds: ${events.length} after a long pause`,
           session_id: sessionId,
           workspace_id,
           churn_event_count: events.length,

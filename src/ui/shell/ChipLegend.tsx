@@ -16,10 +16,10 @@ export default function ChipLegend() {
         aria-expanded={isOpen}
         onClick={() => setIsOpen((open) => !open)}
       >
-        ℹ what do these chips mean?
+        ℹ How certain is this?
       </button>
       {isOpen && (
-        <section className="chip-legend-panel" id={panelId} aria-label="Chip meanings">
+        <section className="chip-legend-panel" id={panelId} aria-label="What the labels mean">
           <ul className="chip-legend-list">
             {CHIP_KINDS.map((kind) => (
               <li className="chip-legend-item" key={kind}>

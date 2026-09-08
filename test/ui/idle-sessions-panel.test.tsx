@@ -41,8 +41,7 @@ describe("IdleSessionsPanel — liveness unavailable (fallback to transcript-onl
   it("shows the job-description sentence about idle cost", async () => {
     render(<SettingsPage />);
     await screen.findByText(/idle-sidechain/);
-    expect(
-      screen.getByText(/resuming after the prompt cache expires re-writes the whole context/i),
-    ).toBeTruthy();
+    expect(screen.getByText(/Idle sessions use no tokens until they resume/i)).toBeTruthy();
+    expect(screen.getByText(/End only sessions you no longer need/i)).toBeTruthy();
   });
 });

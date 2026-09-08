@@ -74,7 +74,7 @@ describe("UA2 recommendation ordering and scope", () => {
       await waitFor(() =>
         expect(titles(container)).toEqual(["older-high", "newer-low", "unknown"]),
       );
-      expect(container.textContent).toContain("Modeled savings are not additive");
+      expect(container.textContent).toContain("Estimates can overlap; do not add them together.");
       expect(getByLabelText("Sort recommendations").textContent).toContain("Recommended order");
     },
   );
@@ -181,7 +181,8 @@ describe("UA2 recommendation ordering and scope", () => {
     expect(container.textContent).not.toContain("No active recommendations");
     expect(container.querySelector(".recs-summary-count-number")?.textContent).toBe("1");
     expect(container.querySelector(".recs-summary-lever")?.textContent).toContain("Most findings:");
-    fireEvent.click(getByText("WARNING", { selector: "button" }));
+    fireEvent.click(container.querySelector(".recs-toolbar-more summary") as HTMLElement);
+    fireEvent.click(getByText("Warning", { selector: "button" }));
     await waitFor(() => expect(titles(container)).toEqual(["modeled"]));
   });
 
@@ -195,7 +196,8 @@ describe("UA2 recommendation ordering and scope", () => {
     data.adopted = [card("adopted-modeled", { state: "ADOPTED" })];
     const { container, getByRole } = await loaded();
 
-    fireEvent.click(getByRole("button", { name: "WARNING" }));
+    fireEvent.click(container.querySelector(".recs-toolbar-more summary") as HTMLElement);
+    fireEvent.click(getByRole("button", { name: "Warning" }));
     await waitFor(() => expect(window.location.hash).toContain("tier=WARNING"));
 
     fireEvent.click(getByRole("button", { name: /Adopted/ }));

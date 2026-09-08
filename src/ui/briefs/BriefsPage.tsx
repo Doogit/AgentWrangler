@@ -90,7 +90,7 @@ function DeltaLine({
   const arrow = direction === "up" ? "▲" : direction === "down" ? "▼" : "▬";
   const sign = delta.delta > 0 ? "+" : "";
   return (
-    <span className={`brief-tile-delta brief-tile-delta-${direction}`}>
+    <span className="brief-tile-delta brief-tile-delta-flat">
       {arrow} {sign}
       {format(delta.delta)} vs prior week
     </span>
@@ -121,7 +121,7 @@ function AttributionDetails({ brief }: { brief: Brief }) {
   const { cache_mix: cacheMix, hot_sessions: hotSessions } = brief.attribution;
   return (
     <details className="briefs-details">
-      <summary>Attribution &amp; hot sessions</summary>
+      <summary>Usage breakdown and sessions</summary>
       <div className="table-wrap">
         <table>
           <thead>
@@ -136,7 +136,7 @@ function AttributionDetails({ brief }: { brief: Brief }) {
               <td>{formatUsd(brief.overview.cost_usd)}</td>
             </tr>
             <tr>
-              <td>Reconciled turns</td>
+              <td>Turns with confirmed usage</td>
               <td>{formatNumber(brief.overview.turns)}</td>
             </tr>
             <tr>
@@ -291,7 +291,7 @@ export default function BriefsPage() {
       <div className="page-top">
         <div className="page-title">
           <h1>Briefs</h1>
-          <p className="page-sub">This week in one page: verdict, what changed, what to do</p>
+          <p className="page-sub">Your last seven days: token use, changes, and next steps</p>
         </div>
       </div>
 
@@ -335,13 +335,18 @@ export default function BriefsPage() {
             <h2 id="briefs-verdict-heading" className="briefs-verdict-line">
               <strong>{formatUsd(brief.verdict.cost_usd)}</strong>{" "}
               <InfoTip
-                label="What cap-weighted equivalent means"
-                content="Cost weighted the way your usage cap counts it — cache reads count roughly a tenth of fresh tokens. It's the number that actually moves you toward a limit, not raw token cost."
+                label="What list-price estimate means"
+                content="Estimated value at public per-token prices, not your subscription bill or remaining allowance. Check the usage bars on Overview for your current limits."
               >
-                cap-weighted equivalent
+                list-price estimate
               </InfoTip>
               <span className="briefs-verdict-sep"> · </span>
-              {formatNumber(brief.verdict.hot_session_count)} hot sessions
+              <InfoTip
+                label="What hot sessions means"
+                content="Sessions with the highest estimated token value in this selection. The brief lists up to five; this is not a count of wasteful sessions."
+              >
+                {formatNumber(brief.verdict.hot_session_count)} hot sessions
+              </InfoTip>
               <span className="briefs-verdict-sep"> · </span>
               {brief.verdict.peak_friction === null ? (
                 <span className="briefs-friction">no friction signal</span>
@@ -349,7 +354,7 @@ export default function BriefsPage() {
                 <span className={`briefs-friction briefs-friction-${brief.verdict.peak_friction}`}>
                   <InfoTip
                     label="What peak friction means"
-                    content="The single worst per-session friction band across this scope's hot sessions, not an average. It flags whether any one session went badly, which an average would hide."
+                    content="The highest level of errors, failed tests, and interruptions among these sessions. These events can be part of normal work; review the session before deciding what to change."
                   >
                     peak friction
                   </InfoTip>{" "}
@@ -363,7 +368,7 @@ export default function BriefsPage() {
             <span className="brief-tiles-heading">Week-over-week changes</span>
             <InfoTip
               label="What the delta tiles show"
-              content="Change versus the prior 7 days for spend, cache-write share, and hot-session count. A green delta is improvement; a red one is where this week got worse."
+              content="Compared with the previous seven days. Cache-write share is the proportion of cached tokens written rather than reused; lower usage alone does not prove better efficiency, and hot sessions is a capped list count."
             />
           </div>
 
@@ -390,24 +395,69 @@ export default function BriefsPage() {
 
           <section className="card briefs-actions" aria-labelledby="briefs-actions-heading">
             <div className="section-head">
-              <h2 id="briefs-actions-heading">Do these three things</h2>
+              <h2 id="briefs-actions-heading">Top three next steps</h2>
             </div>
             {brief.actions.length === 0 ? (
-              <p className="kpi-off-hint">
-                No active recommendations were returned for this scope.
-              </p>
+              <p className="kpi-off-hint">No suggestions for this selection yet.</p>
             ) : (
               <ol className="briefs-action-list">
                 {brief.actions.map((action) => (
                   <li className="briefs-action" key={action.id}>
                     <div className="briefs-action-main">
-                      <strong>{action.lever}</strong>
-                      <span className="kpi-off-hint">
-                        {action.detector_id} · {action.flavor} · modeled savings{" "}
+                      <strong>{action.title}</strong>
+                      {action.title !== action.lever && <p>{action.lever}</p>}
+                      <p className="brief-action-scope">
+                        <strong>Where:</strong> {scopeLabel(state.workspaces, action.workspace_id)}
+                        {action.file_ref !== null && (
+                          <>
+                            {" "}
+                            · <code>{action.file_ref}</code>
+                          </>
+                        )}
+                      </p>
+                      <p>
+                        {action.session_ids.length > 0
+                          ? `Based on ${action.session_ids.length} affected session${action.session_ids.length === 1 ? "" : "s"}.`
+                          : "No individual sessions are linked to this suggestion."}
+                        {action.tokens_per_turn !== null && (
+                          <>
+                            {" "}
+                            Possible reduction: {formatNumber(action.tokens_per_turn)} context
+                            tokens per turn (text sent to the model).
+                          </>
+                        )}
+                      </p>
+                      {action.session_ids.length > 0 && (
+                        <details>
+                          <summary>View affected sessions</summary>
+                          <ul>
+                            {action.session_ids.map((id) => (
+                              <li key={id}>
+                                <a href={`#/sessions/${encodeURIComponent(id)}`}>{id}</a>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                      <p className="kpi-off-hint">
                         {action.modeled_savings_usd_per_wk === null
-                          ? "unavailable"
-                          : `${formatUsd(action.modeled_savings_usd_per_wk)} / week`}
-                      </span>
+                          ? "No reliable savings estimate is available."
+                          : `Possible reduction: ${formatUsd(action.modeled_savings_usd_per_wk)} / week at list prices. This is an estimate, not achieved savings.`}
+                      </p>
+                      <a href={`#/recommendations?focus=${encodeURIComponent(action.id)}`}>
+                        Review evidence and track this change
+                      </a>
+                      <p>
+                        {action.flavor === "TURNKEY"
+                          ? "Paste this prompt into Claude Code in the workspace above and review the proposed edits."
+                          : "Paste this prompt into Claude Code to review the recorded usage and decide what to change."}
+                      </p>
+                      <textarea
+                        className="prompt-code"
+                        aria-label={`Prompt for ${action.title}`}
+                        readOnly
+                        value={action.prompt}
+                      />
                     </div>
                     <button
                       type="button"

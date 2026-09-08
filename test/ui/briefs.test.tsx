@@ -70,7 +70,7 @@ describe("BriefsPage", () => {
     await waitFor(() => expect(screen.getByRole("option", { name: "Global" })).toBeTruthy());
 
     // Verdict line
-    expect(screen.getByText(/cap-weighted equivalent/)).toBeTruthy();
+    expect(screen.getByText(/list-price estimate/)).toBeTruthy();
     // Three delta tiles
     expect(screen.getByText("Spend equivalent")).toBeTruthy();
     expect(screen.getByText("Cache-write share")).toBeTruthy();
@@ -79,8 +79,8 @@ describe("BriefsPage", () => {
     expect(
       screen.getAllByText("Hot sessions").some((el) => el.className === "brief-tile-label"),
     ).toBe(true);
-    // "Do these three things" section, capped at 3 action rows
-    expect(screen.getByRole("heading", { name: "Do these three things" })).toBeTruthy();
+    // "Top three next steps" section, capped at 3 action rows
+    expect(screen.getByRole("heading", { name: "Top three next steps" })).toBeTruthy();
     expect(screen.queryAllByRole("button", { name: "Copy prompt" }).length).toBeLessThanOrEqual(3);
 
     // Collapsed attribution detail is still in the DOM
@@ -98,5 +98,23 @@ describe("BriefsPage", () => {
     expect(copied).toContain("## Verdict");
     expect(copied).toContain("## Change vs prior 7 days");
     expect(copied).toMatch(/\d/);
+  });
+
+  it("shows the exact prompt beside each copy action and links to its evidence", async () => {
+    const { container } = render(<BriefsPage />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".briefs-action").length).toBeGreaterThan(0),
+    );
+    for (const row of container.querySelectorAll(".briefs-action")) {
+      const preview = row.querySelector("textarea");
+      expect(preview?.readOnly).toBe(true);
+      expect(preview?.value.length).toBeGreaterThan(0);
+      expect(row.textContent).toContain("Where:");
+      expect(row.querySelector('a[href^="#/recommendations?focus="]')).toBeTruthy();
+      const copy = row.querySelector("button");
+      if (!copy || !preview) throw new Error("Missing preview or copy action");
+      fireEvent.click(copy);
+      await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(preview.value));
+    }
   });
 });

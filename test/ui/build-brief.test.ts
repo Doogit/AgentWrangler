@@ -160,6 +160,20 @@ function assertParity(text: string): void {
 }
 
 describe("buildBrief", () => {
+  it("does not present conditional model advice as dollar savings", () => {
+    const brief = buildBrief({
+      scopeLabel: "Global",
+      scopeWorkspaceId: null,
+      overview,
+      hotSessions,
+      cacheTrend,
+      recs: [recommendation({ detector_id: "D4", modeled_savings_u_per_wk: 5_000_000 })],
+    });
+    expect(brief.actions).toHaveLength(1);
+    expect(brief.actions[0]?.modeled_savings_usd_per_wk).toBeNull();
+    expect(briefToMarkdown(brief)).toContain("unavailable");
+  });
+
   it("builds a global attribution brief with deterministic turnkey-first levers", () => {
     const turnkey = recommendation({
       rec_id: "rec-d1",

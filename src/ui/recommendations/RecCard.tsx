@@ -115,11 +115,11 @@ function fmtTokens(n: number): string {
 
 export const DETECTOR_GROUP_LABELS: Record<string, string> = {
   D1: "CLAUDE.md / memory",
-  D2: "Session hygiene",
-  D4: "Model routing",
+  D2: "Long sessions",
+  D4: "Model choice",
   D5: "Limit warning",
-  D6: "Tool-result bloat",
-  D7: "Retry / redundant-read",
+  D6: "Large tool results",
+  D7: "Repeated attempts and reads",
   D8: "Cache misses",
   D9: "Background sessions",
   D10: "Tool catalog",
@@ -127,11 +127,11 @@ export const DETECTOR_GROUP_LABELS: Record<string, string> = {
 
 const CATEGORY_GROUP_FALLBACK: Record<string, string> = {
   CACHE: "Cache misses",
-  CONTEXT: "Session hygiene",
+  CONTEXT: "Long sessions",
   LIMIT: "Limit warning",
-  MODEL: "Model routing",
+  MODEL: "Model choice",
   SESSION_HYGIENE: "Background sessions",
-  TOOLING: "Tool-result bloat",
+  TOOLING: "Large tool results",
 };
 
 function groupLabel(rec: RecommendationCard): string {
@@ -228,7 +228,7 @@ function confidenceTier(rec: RecommendationCard): ConfidenceTier {
     return {
       label: "WARNING",
       className: "rec-confidence-tier--warning",
-      tooltip: "Alert, rate-limit headroom burn",
+      tooltip: "Warning about how quickly your remaining allowance is being used",
     };
   }
   if (kind === "ADVISORY" || rec.detector_id === "D4") {
@@ -242,20 +242,20 @@ function confidenceTier(rec: RecommendationCard): ConfidenceTier {
     return {
       label: "DIRECTIONAL",
       className: "rec-confidence-tier--directional",
-      tooltip: "Directional signal only",
+      tooltip: "Possible pattern; savings have not been measured",
     };
   }
   if (rec.modeled_savings_u_per_wk !== null && rec.detector_id !== "D4") {
     return {
       label: "MODELED SAVINGS",
       className: "rec-confidence-tier--modeled",
-      tooltip: "Modeled dollar savings from formula with unvalidated assumptions",
+      tooltip: "Possible savings calculated from assumptions that have not been verified",
     };
   }
   return {
     label: "DIRECTIONAL",
     className: "rec-confidence-tier--directional",
-    tooltip: "Directional signal only",
+    tooltip: "Possible pattern; savings have not been measured",
   };
 }
 
@@ -292,10 +292,10 @@ function unvalidatedAssumptionNote(rec: RecommendationCard): string | null {
 }
 
 const FAMILY_RANK_RATIONALE: Record<string, string> = {
-  D8: "Cache misses have about 10× more impact than memory trims because each miss re-writes the full context at full cache-write cost",
-  D2: "Long, high-context sessions compound token use across every turn, so session hygiene ranks near the top",
-  D4: "Model routing only helps when your Opus or all-models cap is actually binding, so it follows the direct waste sources",
-  D9: "Background session estimates are directional — useful fan-out and idle work aren't yet separable — so they rank below direct waste sources",
+  D8: "Cache misses can require the model to rewrite saved context",
+  D2: "Long sessions send accumulated context with each request, so they are worth reviewing early",
+  D4: "Changing models may help if your Opus or all-models limit fills first",
+  D9: "Background work can be useful; check what the agents were doing before ending sessions",
   D1: "Cached reads cost less than fresh writes, so trimming always-loaded context has less impact than fixing cache misses",
 };
 
@@ -335,8 +335,8 @@ function observedFacts(rec: RecommendationCard): string[] {
       const cacheReadExposureBasis = evidenceString(rec, "cache_read_exposure_spend_basis");
       return [
         count === null
-          ? "Multiple long, high-context sessions crossed the session-hygiene threshold."
-          : `${count.toLocaleString()} long, high-context session${count === 1 ? "" : "s"} crossed the session-hygiene threshold.`,
+          ? "Multiple long, high-context sessions crossed the threshold for long sessions."
+          : `${count.toLocaleString()} long, high-context session${count === 1 ? "" : "s"} crossed the threshold for long sessions.`,
         turnThreshold === null || contextThreshold === null
           ? null
           : `The detector looked for at least ${turnThreshold.toLocaleString()} turns averaging ${fmtTokens(contextThreshold)} context tokens.`,
@@ -360,9 +360,9 @@ function observedFacts(rec: RecommendationCard): string[] {
       const fraction = evidenceNumber(rec, "mismatch_fraction");
       return [
         mismatch === null || total === null
-          ? "Some Opus turns matched the high-context, low-output routing heuristic."
-          : `${mismatch.toLocaleString()} of ${total.toLocaleString()} weekly Opus turns${fraction === null ? "" : ` (${fmtPercent(fraction)})`} matched the high-context, low-output heuristic.`,
-        "Transcripts cannot reveal which usage cap is binding; check /usage before changing model routing.",
+          ? "Some Opus turns matched the pattern of large input and short responses."
+          : `${mismatch.toLocaleString()} of ${total.toLocaleString()} weekly Opus turns${fraction === null ? "" : ` (${fmtPercent(fraction)})`} matched the pattern of large input and short responses.`,
+        "Session records cannot show which limit fills first. Check /usage in Claude Code before changing models.",
       ];
     }
     case "D6": {
@@ -379,14 +379,16 @@ function observedFacts(rec: RecommendationCard): string[] {
           : `${bytes.toLocaleString()} measured tool-result bytes${share === null ? "." : `; after estimating bytes as tokens, the detector puts that output at about ${fmtPercent(share)} of this session${sessionCap === null ? " context." : `'s ${fmtTokens(sessionCap)} cap-weighted context.`}`}`,
         attributedTool === null
           ? "Attribution is session-level: this measurement cannot yet name which tool produced the excess output."
-          : `Tool-class attribution: ${attributedTool}.`,
+          : `Tool identified: ${attributedTool}.`,
         attributedBytes === null
           ? null
-          : `Attributed result bytes: ${attributedBytes.toLocaleString()}.`,
-        carryTurns === null ? null : `Carry turns: ${carryTurns.toLocaleString()}.`,
+          : `Output size in bytes: ${attributedBytes.toLocaleString()}.`,
+        carryTurns === null
+          ? null
+          : `Later turns carrying this output: ${carryTurns.toLocaleString()}.`,
         carryExposure === null
           ? null
-          : `Directional carry exposure: ${fmtTokens(carryExposure)} tokens.`,
+          : `Estimated tokens carried into later turns: ${fmtTokens(carryExposure)} tokens.`,
       ].filter((fact): fact is string => fact !== null);
     }
     case "D7": {
@@ -395,13 +397,13 @@ function observedFacts(rec: RecommendationCard): string[] {
       const denominator = evidenceNumber(rec, "owner_turn_metadata_denominator_event_count");
       return [
         "This detector crossed its configured threshold; raw measurements are available in developer diagnostics.",
-        coverage === null ? null : `Owner-turn metadata coverage: ${fmtPercent(coverage)}.`,
-        covered === null
+        coverage === null
           ? null
-          : `Owner-turn metadata covered events: ${covered.toLocaleString()}.`,
+          : `Tool events linked to a model response: ${fmtPercent(coverage)}.`,
+        covered === null ? null : `Linked tool events: ${covered.toLocaleString()}.`,
         denominator === null
           ? null
-          : `Owner-turn metadata denominator: ${denominator.toLocaleString()} in-window events.`,
+          : `Total tool events checked: ${denominator.toLocaleString()} in-window events.`,
       ].filter((fact): fact is string => fact !== null);
     }
     case "D9": {
@@ -414,8 +416,8 @@ function observedFacts(rec: RecommendationCard): string[] {
           ? "Background and sidechain work crossed the directional usage threshold."
           : `Background and sidechain work used ${fmtPercent(share)} of cap-weighted tokens${capTokens === null ? "." : ` (${fmtTokens(capTokens)})`}${turns === null ? "." : ` across ${turns.toLocaleString()} turns.`}`,
         linkage === null
-          ? "Much fan-out may be justified, so review before cutting it."
-          : "Parent-child linkage is heuristic, and much fan-out may be justified; review before cutting it.",
+          ? "Parallel agents may be doing useful work; review their tasks before ending them."
+          : "Links between a session and its background agents are inferred. Review their tasks before ending them.",
       ];
     }
     case "D1": {
@@ -443,7 +445,7 @@ function observedFacts(rec: RecommendationCard): string[] {
       return [
         catalog === null || target === null
           ? "The tool, plugin, and skill catalog exceeded its configured context target."
-          : `The inventory probe estimated ${fmtTokens(catalog)} catalog tokens against a ${fmtTokens(target)} target${delta === null ? "." : `, or ${fmtTokens(delta)} tokens above target.`}`,
+          : `The tool inventory scan estimated ${fmtTokens(catalog)} catalog tokens against a ${fmtTokens(target)} target${delta === null ? "." : `, or ${fmtTokens(delta)} tokens above target.`}`,
         `${sources === null ? "This is a global catalog estimate" : `The global inventory contains ${sources.toLocaleString()} catalog source${sources === 1 ? "" : "s"}`}${turns === null ? "." : `; the weekly projection models repeated reads across ${turns.toLocaleString()} turn${turns === 1 ? "" : "s"}.`}`,
         effectiveCatalogState === null
           ? null
@@ -469,13 +471,13 @@ function impactCaveat(rec: RecommendationCard): string {
       return `Projection only — it assumes a ${fraction === null ? "partial" : fmtPercent(fraction)} reduction in the observed cache-read load.`;
     }
     case "D4":
-      return "Conditional advisory — no dollar estimate is shown because routing only helps when the all-models or Opus cap is binding.";
+      return "Changing models may help if your all-models or Opus limit fills first. Check /usage in Claude Code before changing; no savings estimate is shown.";
     case "D6":
-      return "Directional signal only — bytes are converted with an unvalidated 4 B/token heuristic; this is structural exposure, not an avoidable-token or USD savings estimate.";
+      return "Rough estimate: text size is converted at four bytes per token. Large output is not necessarily waste; check whether the task needed it.";
     case "D9":
-      return "Directional signal only — no dollar estimate is shown because useful fan-out and avoidable background work are not yet separable.";
+      return "Background work may be useful. We cannot yet separate necessary parallel work from avoidable work, so no savings estimate is shown.";
     case "D7":
-      return "Directional exposure only — no dollar estimate is shown because structural retry signals do not prove how much work was avoidable.";
+      return "Repeated attempts do not prove waste. Check whether each retry made progress; no savings estimate is shown.";
     case "D1":
       return "Projection only — steady cache reads are priced below fresh writes, and the first turn after editing the cached prefix can cost more.";
     case "D10": {
@@ -498,13 +500,13 @@ function successMeasure(rec: RecommendationCard): string {
     case "D6":
       return "Re-run the detector on later sessions: tool-result bytes and share should fall without more failed tool calls, retries, or missing context.";
     case "D9":
-      return "Re-check after 7 days: background/sidechain share should fall after justified fan-out is preserved and idle work is removed.";
+      return "Check again after 7 days: background agents should use fewer tokens while still completing useful work.";
     case "D1":
-      return "Run the next inventory probe and compare the always-loaded memory size, then confirm average context per turn falls without lost guidance.";
+      return "After the next file scan, compare the size of instructions loaded in every session, then confirm average context per turn falls without lost guidance.";
     case "D10": {
       const catalog = evidenceNumber(rec, "catalog_tokens");
       const target = evidenceNumber(rec, "catalog_target_tokens");
-      return `Run the next inventory probe: the tool, plugin, and skill catalog estimate should move${catalog === null ? "" : ` from ${fmtTokens(catalog)}`}${target === null ? " below its target" : ` toward ${fmtTokens(target)}`} while required tools remain available.`;
+      return `After the next tool inventory scan: the tool, plugin, and skill catalog estimate should move${catalog === null ? "" : ` from ${fmtTokens(catalog)}`}${target === null ? " below its target" : ` toward ${fmtTokens(target)}`} while required tools remain available.`;
     }
     default:
       return "Re-run the detector after 7 days and compare its target signal with this window.";
@@ -521,7 +523,7 @@ function stepDisplay(step: BoundedStep): string {
     case "route_model":
       return `Route ${step.from} → ${step.to}`;
     case "session_boundary":
-      return "Insert session boundary (/clear)";
+      return "Start a fresh session with /clear between tasks";
     case "generic":
       return step.description;
   }
@@ -1097,9 +1099,9 @@ function SingleRecCard({
       {/* Flagship banner for the #1 ranked card */}
       {!grouped && isFlagship && (
         <div className="rec-flagship-banner">
-          <span className="rec-flagship-badge">HIGHEST-LEVERAGE</span>
+          <span className="rec-flagship-badge">CHECK FIRST</span>
           <span className="rec-flagship-rationale">
-            Cache misses have ~10× the impact of memory trims.
+            Reusing saved context can reduce repeated token use.
           </span>
         </div>
       )}
@@ -1126,7 +1128,7 @@ function SingleRecCard({
             <span className="rec-chip-row" aria-label="Recommendation claim indicators">
               <InfoTip
                 label="What the claim chips mean"
-                content="How the number was derived — directly measured (EXACT) or estimated (PROXY/OBS PROXY). Weight a recommendation by how solid its claim is."
+                content="These labels distinguish recorded measurements from estimates. A recorded measurement does not prove that a suggestion will save tokens."
               />
               <span
                 className={`rec-confidence-tier ${tier.className}`}
@@ -1170,8 +1172,8 @@ function SingleRecCard({
               always visible in collapsed state so the user sees the framing before acting. */}
           {!grouped && isD1 && (
             <p className="rec-d1-secondary-lever">
-              This is the smallest lever — the one everyone blames. Cache misses (D8) have ~10× more
-              impact on the same session.
+              Review the measured file size before editing. Keep instructions the project still
+              needs.
             </p>
           )}
         </div>
@@ -1332,7 +1334,7 @@ function SingleRecCard({
           <p className="rec-actions-hint">
             {experimental && canOpenTerminal
               ? "Open in Claude Code launches your terminal in this workspace with the prompt loaded — you review and drive every edit."
-              : "Applying is manual — copy the prompt and run it in your local Claude Code CLI."}
+              : "Copy the prompt into Claude Code in this workspace, then review the proposed changes."}
           </p>
         )}
         {pendingAction !== null && pendingTimeoutId !== null && (
@@ -1424,6 +1426,14 @@ function SingleRecCard({
                 ? "Couldn't start the local Claude Code CLI — use Copy prompt instead."
                 : "The assisted apply did not complete — try again or use Copy prompt instead."}
             </p>
+            {promptArtifact !== null && (
+              <textarea
+                className="prompt-code"
+                aria-label="Retry prompt"
+                readOnly
+                value={promptArtifact.text}
+              />
+            )}
             <div className="rec-actions-secondary">
               <button
                 type="button"
@@ -1462,7 +1472,13 @@ function SingleRecCard({
           )}
 
           <div className="rec-section">
-            <h4 className="rec-section-label">What we observed</h4>
+            <h4 className="rec-section-label">
+              What we observed{" "}
+              <InfoTip
+                label="Understanding these measurements"
+                content="Context is the text sent to the model with a request. Cache reads reuse saved text; cache writes save it again. Cap-weighted tokens estimate allowance use using different weights for these operations; they do not report your actual remaining limit. A turn is one model response."
+              />
+            </h4>
             <ul className="rec-observations">
               {visibleObservationFacts.map((fact) => (
                 <li key={fact}>{fact}</li>
@@ -1471,7 +1487,7 @@ function SingleRecCard({
           </div>
 
           <div className="rec-section rec-modeled">
-            <h4 className="rec-section-label">Expected impact</h4>
+            <h4 className="rec-section-label">Possible reduction</h4>
             {hasVisibleSavings && (
               <div className="rec-savings-value">
                 {fmtUsd(rec.modeled_savings_u_per_wk as number)}/wk <Chip kind="MODELED" />
@@ -1485,8 +1501,9 @@ function SingleRecCard({
           {/* D1 backfire caveat: editing the cached prefix triggers a full cache-write next turn */}
           {isD1 && (
             <p className="rec-caveat-d1">
-              Warning: batch this edit to a /clear or session boundary — editing the cached prefix
-              forces one full-price cache WRITE next turn, momentarily increasing consumption.
+              Make this edit between tasks or after /clear. Changing instructions already in the
+              session can increase token use on the next message because saved context must be
+              rewritten.
             </p>
           )}
 
@@ -1712,18 +1729,15 @@ function GroupedRecCard({
       )}
       {!isMinorItems && isFlagship && (
         <div className="rec-flagship-banner">
-          <span className="rec-flagship-badge">HIGHEST-LEVERAGE</span>
+          <span className="rec-flagship-badge">CHECK FIRST</span>
           <span className="rec-flagship-rationale">
-            Cache misses have ~10× the impact of memory trims.
+            Reusing saved context can reduce repeated token use.
           </span>
         </div>
       )}
       <div className="rec-group-header">
         <div className="rec-header-row">
           {!isMinorItems && <span className="rec-rank-badge">#{rank}</span>}
-          <span className="rec-group-detector" title={group.detector_id}>
-            {DETECTOR_GROUP_LABELS[group.detector_id] ?? group.label}
-          </span>
           <h3 className="rec-title">{group.label}</h3>
           <span className="rec-group-count">
             {group.recs.length} recommendation{group.recs.length === 1 ? "" : "s"}
@@ -1744,7 +1758,7 @@ function GroupedRecCard({
           <p className="rec-actions-hint">
             {canDryRun
               ? "Open in Claude Code (experimental) launches your terminal in the workspace with the prompt loaded — you review every edit."
-              : "Applying is manual — copy the prompt and run it in your local Claude Code CLI."}
+              : "Copy the prompt into Claude Code in this workspace, then review the proposed changes."}
           </p>
         )}
         {!isMinorItems && route === "hook" && (
@@ -1839,8 +1853,7 @@ function GroupedRecCard({
         {!isMinorItems && generatedSnippet2 && <SnippetBlock snippet={generatedSnippet2} />}
         {group.detector_id === "D1" && (
           <p className="rec-d1-secondary-lever">
-            This is the smallest lever — the one everyone blames. Cache misses (D8) have ~10× more
-            impact on the same session.
+            Review the measured file size before editing. Keep instructions the project still needs.
           </p>
         )}
       </div>

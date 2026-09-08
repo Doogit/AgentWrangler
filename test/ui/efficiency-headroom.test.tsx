@@ -5,7 +5,7 @@
  *   - null headroom_pct renders the honest empty state (no NaN / ∞).
  *   - A known fixture renders the expected percentage.
  *   - No "$X wasted" / "$X saved" headline (INT-5 guard).
- *   - Framed as "Modeled headroom" / "modeled ceiling".
+ *   - Framed as "Possible improvement" / "early upper estimate".
  */
 
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -69,14 +69,14 @@ describe("HeadroomSummary — known fixture", () => {
     expect(text).not.toContain("300%");
   });
 
-  it("frames output as 'Modeled headroom' — never a dollar-headline (INT-5)", async () => {
+  it("frames output as 'Possible improvement' — never a dollar-headline (INT-5)", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("Modeled headroom");
+    expect(text).toContain("Possible improvement");
     // INT-5: never a bare $X wasted / $X saved headline
     expect(text.toLowerCase()).not.toMatch(/\$[\d.]+\s*wasted/);
     expect(text.toLowerCase()).not.toMatch(/\$[\d.]+\s*saved/);
@@ -118,7 +118,7 @@ describe("HeadroomSummary — null headroom_pct", () => {
     const summaryEl = container.querySelector("[data-testid='headroom-summary']");
     const summaryText = summaryEl?.textContent ?? "";
     // The headroom row must render without crashing
-    expect(summaryText).toContain("Modeled headroom");
+    expect(summaryText).toContain("Possible improvement");
     // pctDisplay for null case renders the empty-state, not a numeric percentage
     expect(summaryText).not.toMatch(/\d+%/);
     expect(summaryText).toContain("not enough data to estimate");

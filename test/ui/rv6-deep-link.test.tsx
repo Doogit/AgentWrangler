@@ -3,7 +3,7 @@
  *
  * Covers both ends of the deep link:
  *   - VerdictBand: inline "Copy fix prompt" copies the SAME artifact as the
- *     rec card's Copy-prompt action, and "Open rec →" targets
+ *     rec card's Copy-prompt action, and "Review suggestion →" targets
  *     #/recommendations?focus=<rec_id>.
  *   - RecommendationsPage: arriving with focus=<rec_id> scrolls to, highlights,
  *     and auto-expands the target card (grouped + standalone); a stale focus
@@ -94,7 +94,7 @@ describe("VerdictBand — RV6 deep link", () => {
     expect(writeText).toHaveBeenCalledWith(expected.text);
   });
 
-  it("Open rec → targets #/recommendations?focus=<rec_id>", () => {
+  it("Review suggestion → targets #/recommendations?focus=<rec_id>", () => {
     const rec = makeD1Rec();
     const { getByRole } = render(
       <VerdictBand
@@ -105,7 +105,7 @@ describe("VerdictBand — RV6 deep link", () => {
         topRecommendation={rec}
       />,
     );
-    const link = getByRole("link", { name: "Open rec →" });
+    const link = getByRole("link", { name: "Review suggestion →" });
     expect(link.getAttribute("href")).toBe(
       `#/recommendations?focus=${encodeURIComponent(rec.rec_id)}`,
     );

@@ -184,8 +184,8 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
     <div className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
       <h2 style={{ margin: "0 0 14px", fontSize: 15 }}>Configuration</h2>
       <p className="settings-hint">
-        Estimates your weekly usage cap from recent activity so burn forecasts have a real ceiling
-        to project against.
+        Estimates your weekly token allowance from recent usage, so the dashboard can forecast when
+        you may reach it.
       </p>
       <div className="settings-field">
         {/* Primary: calibrate from live oauth/usage — the common path */}
@@ -194,7 +194,7 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
           className="settings-calibrate-primary-btn"
           onClick={handleCalibrate}
           disabled={calibrating}
-          title="Derive the weekly token limit from your current oauth/usage utilization"
+          title="Estimate the weekly token limit from Claude Code's reported usage percentage"
         >
           {calibrating
             ? "Calibrating…"
@@ -203,8 +203,8 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
               : "Calibrate from usage"}
         </button>
         <p className="settings-calibrate-desc">
-          Derives your weekly limit from Claude Code utilization — auto-saves on success. No manual
-          entry needed in the common case.
+          Uses Claude Code's reported usage percentage to estimate your weekly limit. Saves the
+          estimate automatically when successful.
         </p>
 
         {/* Calibration result: shown after a successful calibrate */}
@@ -744,8 +744,9 @@ function GithubTokenStatusPanel() {
     <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
       <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Outcomes sync</h2>
       <p className="settings-hint">
-        Cross-checks sessions against your git history to tell finished work from abandoned, feeding
-        the Success metric. Optional: requires GitHub CLI (gh) on PATH and a read-only GitHub token.
+        Compares sessions with your git history to distinguish finished work from abandoned work. It
+        is optional and needs the GitHub command-line tool (<code>gh</code>) available to the daemon
+        plus a read-only GitHub token.
       </p>
       {status === null && <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>}
       {status?.configured && (
@@ -778,6 +779,8 @@ function ContextBudgetHookPanel() {
   }, []);
 
   const installed = config?.installed ?? false;
+  const installPrompt = config === null ? null : buildHookInstallPrompt(config);
+  const uninstallPrompt = buildHookUninstallPrompt();
 
   async function handleCopy(text: string, kind: "install" | "uninstall") {
     try {
@@ -847,8 +850,8 @@ function ContextBudgetHookPanel() {
         )}
       </div>
       <p style={{ color: "var(--muted)", fontSize: 12, margin: "6px 0 14px" }}>
-        The copied prompt installs three context, loop, and burn hooks. Direct install adds the
-        dangerous-command guard, which can ask or deny, and the PreCompact checkpoint hook.
+        Hooks give Claude Code local reminders about context size, repeated failures, and spend. The
+        direct install also adds a dangerous-command check and a checkpoint before compaction.
       </p>
       {config !== null && (
         <>
@@ -970,9 +973,7 @@ function ContextBudgetHookPanel() {
           <button
             type="button"
             className="settings-save-btn"
-            onClick={() =>
-              config !== null && void handleCopy(buildHookInstallPrompt(config), "install")
-            }
+            onClick={() => installPrompt !== null && void handleCopy(installPrompt, "install")}
             disabled={config === null}
           >
             {copyFeedback === "install" ? "Copied!" : "Copy install prompt"}
@@ -985,12 +986,31 @@ function ContextBudgetHookPanel() {
           >
             {busy ? "Installing…" : "Install directly — writes ~/.claude/settings.json for you"}
           </button>
+          <p className="settings-hint" style={{ margin: "10px 0 6px" }}>
+            Install prompt — copy this exact text into Claude Code if you prefer to review the
+            change there.
+          </p>
+          <textarea
+            aria-label="Install prompt text"
+            className="settings-textarea"
+            readOnly
+            rows={8}
+            value={installPrompt ?? "Loading the current hook settings…"}
+            style={{
+              minHeight: 150,
+              resize: "vertical",
+              border: "1px solid var(--line)",
+              background: "var(--bg)",
+              fontFamily: "monospace",
+              fontSize: 12,
+            }}
+          />
         </div>
         <div className="fb5-action-group">
           <button
             type="button"
             className="settings-cancel-btn"
-            onClick={() => void handleCopy(buildHookUninstallPrompt(), "uninstall")}
+            onClick={() => void handleCopy(uninstallPrompt, "uninstall")}
           >
             {copyFeedback === "uninstall" ? "Copied!" : "Copy uninstall prompt"}
           </button>
@@ -1002,6 +1022,25 @@ function ContextBudgetHookPanel() {
           >
             {busy ? "Uninstalling…" : "Uninstall directly"}
           </button>
+          <p className="settings-hint" style={{ margin: "10px 0 6px" }}>
+            Uninstall prompt — copy this exact text to remove only AgentWrangler&apos;s copied
+            hooks.
+          </p>
+          <textarea
+            aria-label="Uninstall prompt text"
+            className="settings-textarea"
+            readOnly
+            rows={6}
+            value={uninstallPrompt}
+            style={{
+              minHeight: 120,
+              resize: "vertical",
+              border: "1px solid var(--line)",
+              background: "var(--bg)",
+              fontFamily: "monospace",
+              fontSize: 12,
+            }}
+          />
         </div>
       </div>
       <p className="fb5-takes-effect">Takes effect immediately, no restart.</p>
@@ -1087,8 +1126,8 @@ function IdleSessionsPanel() {
     <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
       <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Idle background sessions</h2>
       <p style={{ color: "var(--muted)", fontSize: 12, margin: "0 0 12px" }}>
-        Idle sessions cost nothing while idle; resuming after the prompt cache expires re-writes the
-        whole context at full price, and live background sessions can wake and spend.
+        Idle sessions use no tokens until they resume. A resumed session may need to rewrite expired
+        saved context. End only sessions you no longer need.
       </p>
 
       {/* CLI unavailable: banner + transcript-only fallback (no End actions) */}
@@ -1126,7 +1165,9 @@ function IdleSessionsPanel() {
                       <th>Kind</th>
                       <th>Status</th>
                       <th>Idle min</th>
-                      <th>Cap-ctx held</th>
+                      <th title="Tokens currently held in the session context">
+                        Context held (tokens)
+                      </th>
                       <th />
                     </tr>
                   </thead>
@@ -1213,7 +1254,7 @@ function IdleSessionsPanel() {
               <strong>Session:</strong> {confirmSingle.name || confirmSingle.session_id}
             </p>
             <p style={{ color: "var(--soft)", fontSize: 13, margin: "0 0 8px" }}>
-              <strong>PID:</strong> {confirmSingle.pid}
+              <strong>Process ID (PID):</strong> {confirmSingle.pid}
             </p>
             <p style={{ color: "var(--soft)", fontSize: 13, margin: "0 0 14px" }}>
               <strong>Working dir:</strong>{" "}
@@ -1254,7 +1295,8 @@ function IdleSessionsPanel() {
             <ul style={{ margin: "0 0 14px", paddingLeft: 18, fontSize: 13 }}>
               {confirmBulk.map((a) => (
                 <li key={a.session_id} style={{ color: "var(--soft)", marginBottom: 4 }}>
-                  PID {a.pid} — <code style={{ fontFamily: "monospace" }}>{a.cwd}</code>
+                  Process ID (PID) {a.pid} —{" "}
+                  <code style={{ fontFamily: "monospace" }}>{a.cwd}</code>
                 </li>
               ))}
             </ul>
@@ -1411,6 +1453,15 @@ function GettingStartedCard() {
   );
 }
 
+const settingsNavigation = [
+  ["Configuration", "configuration"],
+  ["Workspaces", "workspaces"],
+  ["In-session guards", "in-session-guards"],
+  ["Idle sessions", "idle-sessions"],
+  ["Outcomes sync", "outcomes-sync"],
+  ["Advanced", "advanced"],
+] as const;
+
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
@@ -1419,6 +1470,8 @@ export default function SettingsPage() {
   const experimental = useExperimentalActions();
   const [state, setState] = useState<LoadState<ApiResponse<Settings>>>({ status: "loading" });
   const [reports, setReports] = useState<Report[]>([]);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedDetailsRef = useRef<HTMLDetailsElement>(null);
 
   const doLoad = useCallback(() => {
     setState({ status: "loading" });
@@ -1447,15 +1500,22 @@ export default function SettingsPage() {
     const navigateToSection = () => {
       const section = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("section");
       const targets: Record<string, string> = {
+        configuration: "settings-configuration",
         "scan-roots": "scan-roots",
         calibration: "limit-tokens",
+        workspaces: "settings-workspaces",
         "outcomes-sync": "settings-outcomes-sync",
         "in-session-guards": "settings-in-session-guards",
         "idle-sessions": "settings-idle-sessions",
+        advanced: "settings-advanced",
         "parser-health": "settings-parser-health",
       };
       const id = section === null ? undefined : targets[section];
       if (id === undefined) return;
+      if (section === "advanced" || section === "parser-health") {
+        advancedDetailsRef.current?.setAttribute("open", "");
+        setAdvancedOpen(true);
+      }
       const target = document.getElementById(id);
       target?.scrollIntoView?.({ block: "start" });
       target?.focus({ preventScroll: true });
@@ -1470,7 +1530,9 @@ export default function SettingsPage() {
       <div className="page-top">
         <div className="page-title">
           <h1>Settings</h1>
-          <p className="page-sub">Daemon config · workspace mappings · parser health</p>
+          <p className="page-sub">
+            Usage limits, monitored folders, session warnings, and diagnostics
+          </p>
         </div>
       </div>
 
@@ -1493,6 +1555,21 @@ export default function SettingsPage() {
 
       {settings !== null && (
         <>
+          <nav
+            aria-label="Settings sections"
+            style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}
+          >
+            {settingsNavigation.map(([label, section]) => (
+              <a
+                key={section}
+                className="settings-cancel-btn"
+                href={`#/settings?section=${section}`}
+                style={{ textDecoration: "none" }}
+              >
+                {label}
+              </a>
+            ))}
+          </nav>
           <div
             style={{
               color: "var(--muted)",
@@ -1501,14 +1578,16 @@ export default function SettingsPage() {
               fontFamily: "monospace",
             }}
           >
-            DB: {settings.db_path} · port {settings.port}
+            Local database: {settings.db_path} · port {settings.port}
           </div>
           {(settings.scan_roots.length === 0 || settings.parser_health.files_seen === 0) && (
             <GettingStartedCard />
           )}
-          <ConfigForm settings={settings} onSaved={handleUpdated} />
-          <BytesCalibrationSection settings={settings} onSaved={handleUpdated} />
-          <OAuthStatusPanel />
+          <div id="settings-configuration" tabIndex={-1}>
+            <ConfigForm settings={settings} onSaved={handleUpdated} />
+            <BytesCalibrationSection settings={settings} onSaved={handleUpdated} />
+            <OAuthStatusPanel />
+          </div>
           <div id="settings-outcomes-sync" tabIndex={-1}>
             <GithubTokenStatusPanel />
           </div>
@@ -1518,33 +1597,49 @@ export default function SettingsPage() {
           <div id="settings-idle-sessions" tabIndex={-1}>
             <IdleSessionsPanel />
           </div>
-          <WorkspaceMappings mappings={settings.workspace_mappings} onSaved={handleUpdated} />
-          <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
-            <h2 style={{ margin: "0 0 14px", fontSize: 15 }}>Experimental actions</h2>
-            <p className="settings-hint">
-              Turns on methods still under validation; their numbers show an EXP chip and should be
-              read as directional.
-            </p>
-            <label>
-              <input
-                type="checkbox"
-                checked={experimental}
-                onChange={(e) => setExperimentalActions(e.target.checked)}
-              />{" "}
-              Experimental actions
-            </label>
-            <p>
-              Off by default. When on, shows the experimental Apply/dry-run controls on
-              recommendation cards. Tracking requires a completed action; Dismiss remains available.
-            </p>
-          </section>
-          <div id="settings-parser-health" tabIndex={-1}>
-            <ParserHealthPanel health={settings.parser_health} />
-            <ParseFailuresPanel rows={settings.quarantine_rows} />
+          <div id="settings-workspaces" tabIndex={-1}>
+            <WorkspaceMappings mappings={settings.workspace_mappings} onSaved={handleUpdated} />
           </div>
-          <AnchorsPanel />
-          <WeeklyReportsPanel reports={reports} />
-          <DbReset dbPath={settings.db_path} onReset={handleUpdated} />
+          <div id="settings-advanced" tabIndex={-1}>
+            <details
+              ref={advancedDetailsRef}
+              open={advancedOpen}
+              onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+            >
+              <summary>Advanced and diagnostics</summary>
+              <p className="settings-hint" style={{ marginTop: 10 }}>
+                Use these details to troubleshoot local ingestion or enable features still being
+                evaluated.
+              </p>
+              <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
+                <h2 style={{ margin: "0 0 14px", fontSize: 15 }}>Experimental actions</h2>
+                <p className="settings-hint">
+                  Turns on methods still under validation; their numbers show an EXP chip and should
+                  be read as directional.
+                </p>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={experimental}
+                    onChange={(e) => setExperimentalActions(e.target.checked)}
+                  />{" "}
+                  Experimental actions
+                </label>
+                <p>
+                  Off by default. When on, shows the experimental Apply/dry-run controls on
+                  recommendation cards. Tracking requires a completed action; Dismiss remains
+                  available.
+                </p>
+              </section>
+              <div id="settings-parser-health" tabIndex={-1}>
+                <ParserHealthPanel health={settings.parser_health} />
+                <ParseFailuresPanel rows={settings.quarantine_rows} />
+              </div>
+              <AnchorsPanel />
+              <WeeklyReportsPanel reports={reports} />
+              <DbReset dbPath={settings.db_path} onReset={handleUpdated} />
+            </details>
+          </div>
         </>
       )}
     </div>

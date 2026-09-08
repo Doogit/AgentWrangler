@@ -124,7 +124,7 @@ describe("SessionDetailPage", () => {
     expect(screen.getByTestId("rc-refline").getAttribute("data-y")).toBe("160000");
     expect(
       screen.getByText(
-        "Context per turn · amber dots = cache write event (potential miss) · red line = 80% of 200K window",
+        "Context for each turn · amber dots show a cache write · red line marks 80% of the 200K context window",
       ),
     ).toBeTruthy();
   });
@@ -193,7 +193,7 @@ describe("SessionDetailPage", () => {
       window_days: 90,
     });
     render(<SessionDetailPage sessionId="session-demo" onBack={() => {}} />);
-    const chip = await screen.findByText("top 8% by spend"); // (1 - 0.92) → 8%
+    const chip = await screen.findByText("top 8% by estimated value"); // (1 - 0.92) → 8%
     expect(chip.getAttribute("title")).toContain("40 sessions");
     expect(chip.getAttribute("title")).toContain("90 days");
   });

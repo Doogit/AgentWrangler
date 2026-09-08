@@ -97,7 +97,7 @@ describe("R4a cost-per-success cells on WorkspaceDetailPage", () => {
     expect(cell.textContent).toBe("— (no merged PRs yet)");
     expect(screen.getByTestId("r4a-merged-count").textContent).toBe("0");
     const summary = screen.getByTestId("r4a-summary");
-    expect(summary.textContent).toContain("No merged PRs linked in this window");
+    expect(summary.textContent).toContain("No merged pull requests are linked in this period");
     // Null honesty: never a misleading zero-dollar or NaN figure.
     expect(cell.textContent).not.toContain("$0.00");
     expect(cell.textContent).not.toContain("NaN");

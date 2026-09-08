@@ -91,7 +91,7 @@ export const d9Detector: Detector = {
         modeled_savings_u_per_wk: null,
         modeled_formula: d9Formula(sidechainCap, D9_UNPRODUCTIVE_FRACTION),
         evidence: {
-          title: `Review background fan-out: ${Math.round(share * 100)}% cap-weighted sidechain`,
+          title: `Review background-agent work: ${Math.round(share * 100)}% of estimated limit use`,
           workspace_id: row.workspace_id,
           sidechain_cap_weighted_tokens: sidechainCap,
           total_cap_weighted_tokens: totalCap,

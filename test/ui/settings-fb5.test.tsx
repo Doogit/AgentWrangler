@@ -17,6 +17,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import { mockSettings } from "../../src/ui/api/fixtures";
 import SettingsPage from "../../src/ui/settings/SettingsPage";
+import {
+  buildHookInstallPrompt,
+  buildHookUninstallPrompt,
+} from "../../src/ui/settings/install-prompt";
 
 vi.mock("../../src/ui/api/client");
 
@@ -53,6 +57,26 @@ beforeEach(() => {
   });
   Object.assign(navigator, {
     clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
+});
+
+describe("Settings prompt code boxes", () => {
+  it("shows the exact install and uninstall prompts in visible code boxes", async () => {
+    render(<SettingsPage />);
+
+    const installPrompt = await screen.findByLabelText("Install prompt text");
+    const uninstallPrompt = screen.getByLabelText("Uninstall prompt text");
+
+    expect(installPrompt.tagName).toBe("TEXTAREA");
+    expect((installPrompt as HTMLTextAreaElement).readOnly).toBe(true);
+    await waitFor(() => {
+      expect((installPrompt as HTMLTextAreaElement).value).toBe(
+        buildHookInstallPrompt(BASE_CONFIG),
+      );
+    });
+    expect(uninstallPrompt.tagName).toBe("TEXTAREA");
+    expect((uninstallPrompt as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((uninstallPrompt as HTMLTextAreaElement).value).toBe(buildHookUninstallPrompt());
   });
 });
 

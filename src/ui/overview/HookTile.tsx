@@ -18,10 +18,10 @@ export default function HookTile({ hookConfig, isLoading }: Props) {
   return (
     <div className="card" data-testid="hook-tile" style={{ padding: "14px 16px" }}>
       <div style={{ marginBottom: 10, fontWeight: 700, fontSize: 13, color: "var(--soft)" }}>
-        CONTEXT-BUDGET HOOK{" "}
+        IN-SESSION WARNINGS{" "}
         <InfoTip
-          label="What the context-budget hook does"
-          content="A local hook that warns you in-session as context fills. Install it from Settings if the tile shows it's off."
+          label="What in-session warnings do"
+          content="An optional local helper that warns before a conversation grows large enough to be automatically condensed. Set it up in Settings."
         />
       </div>
 
@@ -35,7 +35,7 @@ export default function HookTile({ hookConfig, isLoading }: Props) {
 
       {!isLoading && hookConfig === null && (
         <div className="kpi-off-hint" style={{ fontSize: 12 }}>
-          Hook status unavailable.
+          Warning status is unavailable.
         </div>
       )}
 
@@ -59,7 +59,7 @@ export default function HookTile({ hookConfig, isLoading }: Props) {
             <span aria-hidden="true">✓</span> Installed
           </div>
           <div style={{ fontSize: 12, color: "var(--soft)", lineHeight: 1.5 }}>
-            Context-budget hook active. Loop-guard also monitors excessive tool-call cycles.
+            Warnings are on. A retry guard also watches for repeated tool-call cycles.
           </div>
         </div>
       )}
@@ -74,7 +74,7 @@ export default function HookTile({ hookConfig, isLoading }: Props) {
               marginBottom: 10,
             }}
           >
-            Install the context-budget hook to warn as the context window fills.
+            Set up warnings before a conversation reaches its context limit.
           </div>
           <a
             href="#/settings"

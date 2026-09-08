@@ -6,6 +6,7 @@ import {
   type PromptArtifactFlavor,
   buildPromptArtifact,
 } from "../recommendations/prompt-templates";
+import { sessionIdsForRecommendation } from "../recommendations/rec-sessions";
 import { type FrictionBand, frictionBand } from "../sessions/FrictionCell";
 
 const MICRO_USD_PER_USD = 1_000_000;
@@ -79,6 +80,11 @@ export interface BriefLever {
   id: string;
   detector_id: string;
   lever: string;
+  title: string;
+  workspace_id: string | null;
+  session_ids: string[];
+  file_ref: string | null;
+  tokens_per_turn: number | null;
   flavor: PromptArtifactFlavor;
   modeled_savings_usd_per_wk: number | null;
   prompt: string;
@@ -217,9 +223,19 @@ export function buildBrief(input: BriefInput): Brief {
         id: rec.rec_id,
         detector_id: rec.detector_id,
         lever: rec.lever,
+        title: rec.title ?? rec.lever,
+        workspace_id: rec.scope_workspace_id,
+        session_ids: sessionIdsForRecommendation(rec),
+        file_ref: rec.file_ref,
+        tokens_per_turn:
+          typeof rec.evidence.delta_context_tokens === "number" &&
+          Number.isFinite(rec.evidence.delta_context_tokens) &&
+          rec.evidence.delta_context_tokens > 0
+            ? rec.evidence.delta_context_tokens
+            : null,
         flavor: artifact.flavor,
         modeled_savings_usd_per_wk:
-          rec.modeled_savings_u_per_wk === null
+          rec.modeled_savings_u_per_wk === null || rec.detector_id === "D4"
             ? null
             : microUsdToUsd(rec.modeled_savings_u_per_wk),
         prompt: artifact.text,
@@ -327,7 +343,7 @@ export function briefToMarkdown(brief: Brief): string {
     lines.push(`- Lever: ${action.lever}`);
     lines.push(`- Mode: ${action.flavor}`);
     lines.push(
-      `- Modeled savings USD/week: ${action.modeled_savings_usd_per_wk === null ? "0" : numberText(action.modeled_savings_usd_per_wk)}`,
+      `- Modeled savings USD/week: ${action.modeled_savings_usd_per_wk === null ? "unavailable" : numberText(action.modeled_savings_usd_per_wk)}`,
     );
     lines.push("- Prompt artifact:");
     lines.push(action.prompt);
