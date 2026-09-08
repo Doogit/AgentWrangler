@@ -1331,27 +1331,39 @@ export function mockWorkspaceOutcomes(): ApiResponse<WorkspaceOutcomeSummary[]> 
 }
 
 export function mockContextComposition(workspaceId: string): ApiResponse<ContextComposition> {
+  // Both context averages include provisional turns over seven days. The demo
+  // has no provisional turns, so its observed count also matches summary.turns.
+  const summary = mockWorkspaces({ preset: "7d" });
+  const workspace = summary.data?.items.find((row) => row.workspace_id === workspaceId);
+  const observedContext = workspace?.avg_context_per_turn ?? null;
   const alwaysLoaded = 18_000;
-  const residual = 72_000;
+  const residual = observedContext === null ? 0 : Math.max(observedContext - alwaysLoaded, 0);
+  const total = observedContext === null ? 0 : alwaysLoaded + residual;
+  const share = (tokens: number): number | null => (total > 0 ? tokens / total : null);
   const data: ContextComposition = {
     workspace_id: workspaceId,
-    observed_context_tokens: alwaysLoaded + residual,
-    observed_turns: 42,
+    observed_context_tokens: observedContext,
+    observed_turns: workspace?.turns ?? 0,
     inventory_rows: 2,
     rows: [
-      { key: "always_loaded", label: "always loaded", tokens: alwaysLoaded, share: 0.2 },
+      {
+        key: "always_loaded",
+        label: "always loaded",
+        tokens: alwaysLoaded,
+        share: share(alwaysLoaded),
+      },
       {
         key: "session_residual",
         label: "session history + tool outputs (not itemized in v1)",
         tokens: residual,
-        share: 0.8,
+        share: share(residual),
       },
     ],
   };
   return {
     data,
     meta: {
-      ...baseMeta(windowFor("7d"), data.observed_turns),
+      ...baseMeta(summary.meta.window, data.observed_turns),
       claim_kind: "OBS_PROXY",
       drilldown_ids: { workspace_id: workspaceId },
       qualification: {
