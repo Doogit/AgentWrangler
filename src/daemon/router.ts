@@ -342,7 +342,7 @@ export function handleApiRequest(
       return;
     }
 
-    // GET /api/efficiency-headroom (BM2 modeled savings vs trailing-window spend)
+    // GET /api/efficiency-headroom (individual weekly estimates; separate selected-window spend)
     if (method === "GET" && pathname === "/api/efficiency-headroom") {
       const { from, to } = resolveWindow(parseWindowFilter(url));
       sendJson(res, 200, getEfficiencyHeadroom(_db, { from, to }));

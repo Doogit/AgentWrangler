@@ -131,9 +131,9 @@ export interface ResponseMeta {
   /**
    * Version string for the metric definition in use.
    * Any denominator/window/methodology change must bump this.
-   * Phase-1a: always "observe-1".
+   * Legacy metrics use "observe-1"; ESF1 cohort/interpretation contracts use "esf-1".
    */
-  metric_definition_version: "observe-1";
+  metric_definition_version: "observe-1" | "esf-1";
   /**
    * The strongest honesty claim that applies to the primary value in `data`.
    * The UI renders this as the visible chip (LIST_EQUIV, PROXY, etc.).

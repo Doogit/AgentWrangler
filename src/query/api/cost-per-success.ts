@@ -16,6 +16,10 @@ export interface CostPerSuccess {
   commit_session_count: number;
   cost_per_commit_session_u: number | null;
   linkage_coverage_pct: number | null;
+  /** Unique linked sessions in the terminal-date merged-PR cohort. */
+  unique_linked_session_count?: number;
+  /** Of those unique sessions, count linked to more than one merged PR. */
+  shared_linked_session_count?: number;
   n: number;
   window: { from: string; to: string };
 }
@@ -27,6 +31,8 @@ interface CostPerSuccessRow {
   commit_session_count: number;
   cost_per_commit_session_u: number | null;
   linkage_coverage_pct: number | null;
+  unique_linked_session_count?: number;
+  shared_linked_session_count?: number;
 }
 
 /**
@@ -46,6 +52,7 @@ export function getCostPerSuccess(
       : [
           from,
           to,
+          workspaceId,
           workspaceId,
           from,
           to,
@@ -78,6 +85,14 @@ export function getCostPerSuccess(
            JOIN merged_work_items mwi ON mwi.work_item_id = swl.work_item_id
           WHERE 1 = 1${sessionFilter}
        ),
+       merged_session_links AS (
+         SELECT swl.session_id, COUNT(DISTINCT swl.work_item_id) AS merged_pr_links
+           FROM session_work_links swl
+           JOIN merged_work_items mwi ON mwi.work_item_id = swl.work_item_id
+           JOIN sessions s ON s.session_id = swl.session_id
+          WHERE 1 = 1${sessionFilter}
+          GROUP BY swl.session_id
+       ),
        in_window_sessions AS (
          SELECT s.session_id, s.cost_equiv_u
            FROM sessions s
@@ -96,6 +111,8 @@ export function getCostPerSuccess(
        SELECT
          (SELECT COUNT(*) FROM merged_work_items) AS merged_pr_count,
          (SELECT COUNT(*) FROM closed_unmerged_work_items) AS closed_unmerged_count,
+         (SELECT COUNT(*) FROM merged_session_links) AS unique_linked_session_count,
+         (SELECT COUNT(*) FROM merged_session_links WHERE merged_pr_links > 1) AS shared_linked_session_count,
          CASE WHEN (SELECT COUNT(*) FROM merged_work_items) = 0 THEN NULL
               ELSE (SELECT COALESCE(SUM(cost_equiv_u), 0) FROM merged_session_costs) * 1.0
                    / (SELECT COUNT(*) FROM merged_work_items)
@@ -126,13 +143,14 @@ export function getCostPerSuccess(
 
   return buildResponse(data, {
     claim_kind: "OBS_PROXY",
+    metric_definition_version: "esf-1",
     n: data.merged_pr_count,
     window: { from, to },
     qualification: {
       provisional_excluded: false,
       unpriced_turns: 0,
       claim_kinds_count: 1,
-      note: "Directional (OBS_PROXY): survivorship bias (heavy-spend sessions that never open a PR are invisible); reviewer-dependence (merge is a human decision, not a quality guarantee); linkage-coverage cap (only linkage_coverage_pct% of in-window sessions are linked to a PR, so unlinked spend is excluded). cost_per_merged_pr_u uses lifecycle attribution: each merged PR carries the full cost of every linked session whenever it ran, so narrowing the window changes the PR population, not the per-PR cost.",
+      note: "Directional (OBS_PROXY): Unique linked-session cost / merged PRs. The terminal-date PR cohort counts each linked session once, even when it links to multiple merged PRs; shared sessions are coverage, not per-PR allocation. Full linked-session lifecycle cost is used, while linkage_coverage_pct is a separate session-start coverage observation. Unknown pricing is not free. Survivorship bias and reviewer dependence remain.",
     },
     ...(workspaceId === null ? {} : { drilldown_ids: { workspace_id: workspaceId } }),
   });

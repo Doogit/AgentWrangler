@@ -390,10 +390,10 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
           <div className="card" style={{ marginBottom: 13 }} data-testid="ef1-abandoned-spend">
             <div className="section-head">
               <h2>
-                Estimated value in sessions without commits{" "}
+                Reconciled no-commit activity{" "}
                 <InfoTip
-                  label="Estimated value in sessions without commits"
-                  content="Splits estimated value from sessions without a commit into long sessions with at least 10 user turns and early sessions with fewer than 10. A long session without a commit can show more effort without a recorded change."
+                  label="Reconciled no-commit activity"
+                  content="Splits reconciled Bash, Edit, Write, and NotebookEdit activity without an observed commit into long sessions with at least 10 user turns and early sessions with fewer than 10. It is activity without a recorded commit, not an abandonment finding; LIVE sessions remain in total spend but are excluded from this cohort."
                 />
               </h2>
               <div className="chips">
@@ -410,13 +410,13 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 color: "var(--text-muted)",
               }}
             >
-              <dt>Long, no commit (10+ user turns)</dt>
+              <dt>Long no-commit activity (10+ user turns)</dt>
               <dd style={{ margin: 0 }} data-testid="deep-abandoned-spend">
                 {workspace.deep_abandoned_spend_u !== undefined
                   ? fmtUsd(workspace.deep_abandoned_spend_u)
                   : "—"}
               </dd>
-              <dt>Early, no commit (under 10 user turns)</dt>
+              <dt>Early no-commit activity (under 10 user turns)</dt>
               <dd style={{ margin: 0 }} data-testid="early-abandoned-spend">
                 {workspace.early_abandoned_spend_u !== undefined
                   ? fmtUsd(workspace.early_abandoned_spend_u)
@@ -430,10 +430,10 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
       <div className="card" style={{ marginBottom: 13 }} data-testid="ef2-closure-proxy">
         <div className="section-head">
           <h2>
-            What happened after sessions without commits{" "}
+            No later workspace session within 48h{" "}
             <InfoTip
-              label="What happened after sessions without commits"
-              content="An early signal about whether later work continued. Resolved means no later session in this workspace started within 48 hours; unresolved means one did. Pending means 48 hours has not passed. A later session can be unrelated work."
+              label="No later workspace session within 48h"
+              content="This is a workspace-history, as-of-time observation for reconciled no-commit sessions. It is independent of the selected date range. No later workspace session within 48 hours does not establish task resolution; a later session can be unrelated work. Pending means 48 hours has not passed."
             />
           </h2>
           <div className="chips">
@@ -457,8 +457,9 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 <span style={{ color: "var(--text-muted)" }}>No no-commit sessions observed.</span>
               ) : (
                 <span>
-                  {closureProxy.resolved_share !== null
-                    ? `${closureProxy.resolved_count} of ${closureProxy.resolved_count + closureProxy.unresolved_count} no-commit sessions saw no 48h re-open (resolved share: ${Math.round(closureProxy.resolved_share * 100)}%)`
+                  {(closureProxy.no_later_workspace_session_share ??
+                    closureProxy.resolved_share) !== null
+                    ? `${closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count} of ${(closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count) + (closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count)} reconciled no-commit sessions had no later workspace session within 48h (${Math.round((closureProxy.no_later_workspace_session_share ?? closureProxy.resolved_share ?? 0) * 100)}%)`
                     : `${closureProxy.no_commit_session_count} no-commit sessions — all PENDING (48h window not elapsed)`}
                 </span>
               )}
@@ -473,13 +474,13 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 color: "var(--text-muted)",
               }}
             >
-              <dt>Resolved</dt>
+              <dt>No later workspace session</dt>
               <dd style={{ margin: 0 }} data-testid="closure-resolved">
-                {closureProxy.resolved_count}
+                {closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count}
               </dd>
-              <dt>Unresolved</dt>
+              <dt>Later workspace session</dt>
               <dd style={{ margin: 0 }} data-testid="closure-unresolved">
-                {closureProxy.unresolved_count}
+                {closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count}
               </dd>
               <dt>Pending</dt>
               <dd style={{ margin: 0 }} data-testid="closure-pending">
@@ -487,8 +488,8 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
               </dd>
             </dl>
             <p className="kpi-fn" style={{ marginTop: 8, marginBottom: 0 }}>
-              Re-opens can be unrelated work; burst-working operators will false-flag as unresolved.
-              PENDING sessions excluded from the resolved-share denominator.
+              A later session can be unrelated work; burst-working operators can false-flag this
+              observation. PENDING sessions are excluded from the observation denominator.
             </p>
           </div>
         )}
@@ -498,10 +499,10 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
       <div className="card" style={{ marginBottom: 13 }} data-testid="r4a-cost-per-success">
         <div className="section-head">
           <h2>
-            Estimated value per delivered outcome{" "}
+            Unique linked-session cost per merged PR{" "}
             <InfoTip
-              label="Estimated value per delivered outcome"
-              content="Estimated token value per completed item. Each merged pull request includes the full value of its linked sessions, whenever they ran; changing the period changes which pull requests are included. Unlinked sessions are excluded from that measure. Value per commit session instead includes sessions started in this period that made a commit, whether linked or not. A merge is a reviewer decision, not proof of quality."
+              label="Unique linked-session cost per merged PR"
+              content="The terminal-date merged PR cohort counts each linked session once, even if it links to multiple merged PRs. Shared sessions are reported as coverage and are never allocated across PRs. Full linked-session lifecycle cost differs from the separate session-start linkage coverage observation. A merge is a reviewer decision, not proof of quality."
             />
           </h2>
           <div className="chips">
@@ -534,7 +535,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                   {costPerSuccess.cost_per_merged_pr_u !== null
                     ? fmtUsd(costPerSuccess.cost_per_merged_pr_u)
                     : "—"}{" "}
-                  per merged PR (modeled list-equivalent, linked-session lifecycle cost).
+                  per merged PR (unique linked-session lifecycle cost).
                 </span>
               )}
             </div>
@@ -548,7 +549,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 color: "var(--text-muted)",
               }}
             >
-              <dt>Est. value per merged pull request</dt>
+              <dt>Unique linked-session cost / merged PRs</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-cost-per-merged-pr">
                 {costPerSuccess.cost_per_merged_pr_u !== null
                   ? fmtUsd(costPerSuccess.cost_per_merged_pr_u)
@@ -557,6 +558,14 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
               <dt>Merged pull requests</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-merged-count">
                 {costPerSuccess.merged_pr_count}
+              </dd>
+              <dt>Unique linked sessions</dt>
+              <dd style={{ margin: 0 }} data-testid="r4a-unique-linked-session-count">
+                {costPerSuccess.unique_linked_session_count ?? "— unavailable"}
+              </dd>
+              <dt>Shared across merged PRs</dt>
+              <dd style={{ margin: 0 }} data-testid="r4a-shared-linked-session-count">
+                {costPerSuccess.shared_linked_session_count ?? "— unavailable"}
               </dd>
               <dt>Closed unmerged</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-closed-count">
@@ -585,7 +594,8 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 : "Linkage coverage is unavailable, so the linked-only view cannot be bounded. "}
               Survivorship: heavy-spend sessions that never open a PR are invisible. Merge is a
               reviewer's decision, not a quality guarantee. Full session cost is attributed to the
-              PR it linked (lifecycle attribution).
+              PR cohort once (lifecycle attribution); shared sessions are coverage rather than
+              allocation.
             </p>
           </div>
         )}

@@ -23,11 +23,13 @@ import type { ApiResponse } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
 
 export interface EfficiencyHeadroom {
+  /** Individual open modeled opportunities. They must never be summed as an attainable ceiling. */
+  opportunities?: Array<{ rec_id: string; modeled_savings_u_per_wk: number }>;
   /** Σ modeled_savings_u_per_wk over open (PROPOSED|ADOPTED) recs with non-null savings, in µUSD/wk. */
   headroom_u_per_wk: number;
   /** Trailing-window Σ turns.cost_equiv_u (LIST_EQUIV), in µUSD. */
   actual_u_per_wk: number;
-  /** headroom_u_per_wk / actual_u_per_wk; null on zero spend or when open recs carry no savings. */
+  /** Always null: modeled opportunities cannot form a combined efficiency percentage. */
   headroom_pct: number | null;
   /** Open recs contributing a non-null savings figure. */
   open_rec_count: number;
@@ -43,6 +45,11 @@ interface HeadroomRow {
 
 interface SpendRow {
   actual_u: number;
+}
+
+interface OpportunityRow {
+  rec_id: string;
+  modeled_savings_u_per_wk: number;
 }
 
 /**
@@ -74,22 +81,23 @@ export function getEfficiencyHeadroom(
     )
     .get(from, to) as SpendRow;
 
+  const opportunities = db
+    .prepare(
+      `SELECT rec_id, modeled_savings_u_per_wk
+         FROM recommendations
+        WHERE state IN ('PROPOSED', 'ADOPTED') AND modeled_savings_u_per_wk IS NOT NULL
+        ORDER BY rec_id`,
+    )
+    .all() as OpportunityRow[];
   const headroom_u_per_wk = recs.sum_u ?? 0;
   const actual_u_per_wk = spend.actual_u;
-  const openRecsExist = recs.open_total > 0;
 
-  // Null when: no spend (avoid /0 → ∞/NaN), or open recs exist but none carries a
-  // savings figure (an all-null modeled set is not a defensible ceiling).
-  let headroom_pct: number | null;
-  if (actual_u_per_wk === 0) {
-    headroom_pct = null;
-  } else if (openRecsExist && recs.with_savings === 0) {
-    headroom_pct = null;
-  } else {
-    headroom_pct = headroom_u_per_wk / actual_u_per_wk;
-  }
+  // Individual recommendation models overlap and their weekly horizon differs from
+  // the trailing spend window, so a combined percentage would be misleading.
+  const headroom_pct: number | null = null;
 
   const data: EfficiencyHeadroom = {
+    opportunities,
     headroom_u_per_wk,
     actual_u_per_wk,
     headroom_pct,
@@ -100,13 +108,14 @@ export function getEfficiencyHeadroom(
 
   return buildResponse(data, {
     claim_kind: "EXPERIMENTAL",
+    metric_definition_version: "esf-1",
     n: recs.with_savings,
     window: { from, to },
     qualification: {
       provisional_excluded: true,
       unpriced_turns: 0,
       claim_kinds_count: 1,
-      note: "Modeled headroom — if every open recommendation were applied; built from unvalidated per-detector fractions.",
+      note: "Individual modeled weekly opportunities are not summed: recommendations can overlap and their weekly horizon differs from the trailing spend window.",
     },
   });
 }

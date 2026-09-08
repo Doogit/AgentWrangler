@@ -302,10 +302,7 @@ function HeadroomSummary() {
   if (data === null) return null;
 
   const caveat = state.value.meta.qualification.note;
-  const pctDisplay =
-    data.headroom_pct !== null
-      ? `${data.headroom_pct > 1 ? ">100" : (data.headroom_pct * 100).toFixed(0)}% of trailing spend (~${fmtUsdPerWkHeadroom(data.headroom_u_per_wk)})`
-      : "—";
+  const opportunities = data.opportunities;
 
   return (
     <div className="headroom-summary ledger-row" data-testid="headroom-summary">
@@ -313,12 +310,23 @@ function HeadroomSummary() {
         Possible improvement <InfoTip label="What possible improvement means" content={caveat} />
       </span>
       <span className="ledger-val">
-        {pctDisplay !== "—" ? (
+        {opportunities !== undefined && opportunities.length > 0 ? (
           <>
-            {pctDisplay} <Chip kind="EXPERIMENTAL" label="EARLY UPPER ESTIMATE" />
+            {opportunities.map((opportunity) => (
+              <span key={opportunity.rec_id} className="kpi-off-hint">
+                {opportunity.rec_id}: {fmtUsdPerWkHeadroom(
+                  opportunity.modeled_savings_u_per_wk,
+                )}{" "}
+              </span>
+            ))}{" "}
+            <Chip kind="EXPERIMENTAL" label="INDIVIDUAL MODELED OPPORTUNITIES" />
           </>
         ) : (
-          <span className="kpi-off-hint">not enough data to estimate</span>
+          <span className="kpi-off-hint">
+            {opportunities === undefined
+              ? "individual opportunity coverage unavailable"
+              : "no modeled opportunities are open"}
+          </span>
         )}
         {data.open_rec_count > 0 && (
           <span className="kpi-off-hint">

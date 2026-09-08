@@ -24,6 +24,12 @@ export interface DeliveryMetrics {
   spend_per_commit_session_u: number | null;
   abandoned_spend_u: number;
   abandoned_spend_share: number | null;
+  /** ESF1 name for the legacy abandoned fields; this is observed activity, not abandonment. */
+  no_commit_activity_session_count: number;
+  no_commit_activity_spend_u: number;
+  no_commit_activity_spend_share: number | null;
+  /** LIVE sessions remain in total spend, but are outside the reconciled activity cohort. */
+  live_session_excluded_from_no_commit_activity_count: number;
   from: string;
   to: string;
   workspace_id: string | null;
@@ -36,6 +42,10 @@ interface DeliveryMetricsRow {
   spend_per_commit_session_u: number | null;
   abandoned_spend_u: number;
   abandoned_spend_share: number | null;
+  no_commit_activity_session_count: number;
+  no_commit_activity_spend_u: number;
+  no_commit_activity_spend_share: number | null;
+  live_session_excluded_from_no_commit_activity_count: number;
 }
 
 /**
@@ -80,8 +90,20 @@ export function getDeliveryMetrics(db: Db, opts: DeliveryQueryOpts): ApiResponse
                     FROM tool_events te
                    WHERE te.session_id = iws.session_id
                      AND te.commit_sha IS NOT NULL
-                ) AS is_abandoned_session
+                ) AND s.state = 'RECONCILED' AS is_abandoned_session,
+                s.state = 'LIVE'
+                  AND EXISTS (
+                    SELECT 1 FROM tool_events te
+                     WHERE te.session_id = iws.session_id
+                       AND te.tool_name IN ('Bash', 'Edit', 'Write', 'NotebookEdit')
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tool_events te
+                     WHERE te.session_id = iws.session_id
+                       AND te.commit_sha IS NOT NULL
+                  ) AS is_live_session
            FROM in_window_sessions iws
+           JOIN sessions s USING (session_id)
        ),
        session_spend AS (
          SELECT session_id,
@@ -103,7 +125,16 @@ export function getDeliveryMetrics(db: Db, opts: DeliveryQueryOpts): ApiResponse
               CASE WHEN COALESCE(SUM(ss.spend_u), 0) = 0 THEN NULL
                    ELSE SUM(CASE WHEN sf.is_abandoned_session THEN ss.spend_u ELSE 0 END) * 1.0
                         / SUM(ss.spend_u)
-              END AS abandoned_spend_share
+              END AS abandoned_spend_share,
+              COALESCE(SUM(sf.is_abandoned_session), 0) AS no_commit_activity_session_count,
+              COALESCE(SUM(CASE WHEN sf.is_abandoned_session THEN ss.spend_u ELSE 0 END), 0)
+                AS no_commit_activity_spend_u,
+              CASE WHEN COALESCE(SUM(ss.spend_u), 0) = 0 THEN NULL
+                   ELSE SUM(CASE WHEN sf.is_abandoned_session THEN ss.spend_u ELSE 0 END) * 1.0
+                        / SUM(ss.spend_u)
+              END AS no_commit_activity_spend_share,
+              COALESCE(SUM(CASE WHEN sf.is_live_session THEN 1 ELSE 0 END), 0)
+                AS live_session_excluded_from_no_commit_activity_count
          FROM session_flags sf
          JOIN session_spend ss USING (session_id)`,
     )
@@ -118,13 +149,14 @@ export function getDeliveryMetrics(db: Db, opts: DeliveryQueryOpts): ApiResponse
 
   return buildResponse(data, {
     claim_kind: "OBS_PROXY",
+    metric_definition_version: "esf-1",
     n: data.commit_session_count,
     window: { from: opts.from, to: opts.to },
     qualification: {
       provisional_excluded: true,
       unpriced_turns: 0,
       claim_kinds_count: 1,
-      note: "Commit SHA presence is an observed delivery proxy.",
+      note: "Commit SHA presence is an observed delivery proxy. No-commit activity means RECONCILED Bash/Edit/Write/NotebookEdit activity without an observed commit; LIVE sessions remain in total spend but are excluded from that activity cohort. Legacy abandoned_* fields are compatibility aliases, not an abandonment finding.",
     },
     ...(opts.workspaceId === null ? {} : { drilldown_ids: { workspace_id: opts.workspaceId } }),
   });

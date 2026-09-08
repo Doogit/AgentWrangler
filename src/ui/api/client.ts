@@ -61,6 +61,7 @@ import {
   mockGithubTokenStatus,
   mockGlobalOverview,
   mockHeadroomTrend,
+  mockHookConfigResponse,
   mockHotSessions,
   mockLedger,
   mockLinkageRate,
@@ -397,6 +398,7 @@ export async function saveSettings(update: SettingsUpdate): Promise<ApiResponse<
 
 /** Read the runtime thresholds for the context-budget hook. */
 export async function fetchHookConfig(): Promise<ApiResponse<HookConfigResponse>> {
+  if (USE_MOCK) return Promise.resolve(mockHookConfigResponse(false));
   const res = await daemonFetch("/api/hook-config");
   if (!res.ok) throw new Error(`/api/hook-config returned ${res.status}`);
   return res.json() as Promise<ApiResponse<HookConfigResponse>>;
@@ -838,7 +840,7 @@ export async function fetchPractices(): Promise<PracticesResult> {
 }
 
 /**
- * Fetch the BM2 efficiency headroom ratio (modeled ceiling over open recs).
+ * Fetch individual modeled opportunities; no combined efficiency ratio.
  * Endpoint: GET /api/efficiency-headroom
  * Returns an enveloped ApiResponse<EfficiencyHeadroom>.
  */
@@ -850,7 +852,7 @@ export async function fetchEfficiencyHeadroom(): Promise<ApiResponse<EfficiencyH
 }
 
 /**
- * Fetch the EF2 closure proxy for a workspace.
+ * Fetch workspace-history follow-up observations as of now, independent of the spend filter.
  * Endpoint: GET /api/workspaces/:id/closure-proxy
  * Returns an enveloped ApiResponse<ClosureProxy>.
  */

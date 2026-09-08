@@ -1,9 +1,8 @@
 /**
  * test/query/efficiency-headroom.test.ts — BM2 efficiency headroom.
  *
- * Behavioral tests over a fixture DB: the ratio sums modeled savings across open
- * recs (PROPOSED|ADOPTED, non-null) over trailing-window spend; DISMISSED is
- * excluded; zero-spend and all-null render as null (never NaN/∞).
+ * Behavioral tests retain individual open recommendation models; the aggregate
+ * percentage is always null because the opportunities can overlap.
  */
 
 import type Database from "better-sqlite3";
@@ -64,7 +63,7 @@ function compute() {
   return getEfficiencyHeadroom(db, { from: FROM, to: TO }).data;
 }
 
-it("computes the exact pct from open recs over window spend; DISMISSED excluded", () => {
+it("returns individual open opportunities and no combined percentage", () => {
   insRec("PROPOSED", 2_000_000); // counts
   insRec("ADOPTED", null); // open but null savings — not summed, not counted
   insRec("DISMISSED", 5_000_000); // excluded entirely
@@ -73,8 +72,9 @@ it("computes the exact pct from open recs over window spend; DISMISSED excluded"
   const r = compute();
   expect(r?.headroom_u_per_wk).toBe(2_000_000);
   expect(r?.actual_u_per_wk).toBe(10_000_000);
-  expect(r?.headroom_pct).toBeCloseTo(0.2, 10);
+  expect(r?.headroom_pct).toBeNull();
   expect(r?.open_rec_count).toBe(1);
+  expect(r?.opportunities).toEqual([{ rec_id: "rec-0", modeled_savings_u_per_wk: 2_000_000 }]);
 });
 
 it("sums PROPOSED and ADOPTED savings together", () => {
@@ -84,7 +84,11 @@ it("sums PROPOSED and ADOPTED savings together", () => {
   const r = compute();
   expect(r?.headroom_u_per_wk).toBe(4_000_000);
   expect(r?.open_rec_count).toBe(2);
-  expect(r?.headroom_pct).toBeCloseTo(0.5, 10);
+  expect(r?.headroom_pct).toBeNull();
+  expect(r?.opportunities).toEqual([
+    { rec_id: "rec-0", modeled_savings_u_per_wk: 1_500_000 },
+    { rec_id: "rec-1", modeled_savings_u_per_wk: 2_500_000 },
+  ]);
 });
 
 it("excludes MEASURED_NO_EFFECT / DISMISSED from the ceiling", () => {
@@ -94,7 +98,7 @@ it("excludes MEASURED_NO_EFFECT / DISMISSED from the ceiling", () => {
   const r = compute();
   expect(r?.headroom_u_per_wk).toBe(0);
   expect(r?.open_rec_count).toBe(0);
-  expect(r?.headroom_pct).toBe(0); // nothing open → 0% headroom, not null
+  expect(r?.headroom_pct).toBeNull();
 });
 
 it("returns null pct on zero spend (no NaN/∞)", () => {
@@ -132,5 +136,5 @@ it("ignores spend outside the window", () => {
   ).run(WS);
   const r = compute();
   expect(r?.actual_u_per_wk).toBe(4_000_000);
-  expect(r?.headroom_pct).toBeCloseTo(0.25, 10);
+  expect(r?.headroom_pct).toBeNull();
 });

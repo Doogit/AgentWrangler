@@ -14,6 +14,8 @@ interface CostPerSuccessContract {
   commit_session_count: number;
   cost_per_commit_session_u: number | null;
   linkage_coverage_pct: number | null;
+  unique_linked_session_count?: number;
+  shared_linked_session_count?: number;
   n: number;
   window: { from: string; to: string };
 }
@@ -199,6 +201,8 @@ describe("getCostPerSuccess", () => {
     // Numerator counts the session once: 1000 / 2 = 500, NOT 2000 / 2 = 1000.
     expect(result.merged_pr_count).toBe(2);
     expect(result.cost_per_merged_pr_u).toBe(500);
+    expect(result.unique_linked_session_count).toBe(1);
+    expect(result.shared_linked_session_count).toBe(1);
   });
 
   it("does not count cross-workspace links toward workspace-scoped coverage", () => {
