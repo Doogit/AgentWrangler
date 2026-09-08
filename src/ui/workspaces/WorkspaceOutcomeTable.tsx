@@ -37,7 +37,7 @@ export default function WorkspaceOutcomeTable({ rows, workspaceSpendById }: Prop
   return (
     <div className="card" style={{ marginBottom: 13 }}>
       <div className="section-head">
-        <h2>Workspace Outcomes</h2>
+        <h2>Workspace outcomes</h2>
         <div className="chips">
           <Chip kind="EXPERIMENTAL" />
         </div>
@@ -56,16 +56,18 @@ export default function WorkspaceOutcomeTable({ rows, workspaceSpendById }: Prop
             <thead>
               <tr>
                 <th>Workspace</th>
-                <th>$/turn</th>
+                <th>Est. value / turn</th>
                 <th title="100 minus premium-model (Opus/Fable) share across non-sidechain, non-provisional turns">
-                  Routing proxy
+                  Standard-model share
                 </th>
-                <th>Total PRs</th>
-                <th>In Progress</th>
-                <th>Success</th>
-                <th>Failure</th>
-                <th>Success Rate</th>
-                <th>Linkage Rate</th>
+                <th>Pull requests</th>
+                <th>Open</th>
+                <th>Successful outcome</th>
+                <th>Needs follow-up</th>
+                <th>Successful-outcome signal</th>
+                <th title="Completed sessions with at least one Bash tool event are eligible.">
+                  Eligible sessions linked
+                </th>
               </tr>
             </thead>
             <tbody>

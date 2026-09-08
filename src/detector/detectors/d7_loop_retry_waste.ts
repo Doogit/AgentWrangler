@@ -391,7 +391,7 @@ export const d7Detector: Detector = {
             "cap-weighted exposure of turns owning repeat-excess events; not an avoidable-token or USD savings estimate",
         },
         evidence: {
-          title: `Break retry loops: ${flaggedTurns.size} flagged turn${flaggedTurns.size === 1 ? "" : "s"} in session`,
+          title: `Stop repeated attempts: ${flaggedTurns.size} affected turn${flaggedTurns.size === 1 ? "" : "s"} in this session`,
           session_id: sessionId,
           workspace_id: session.workspaceId,
           loop_flagged_event_count: flaggedEventIds.size,

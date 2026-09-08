@@ -36,6 +36,13 @@ export interface ToolbarParams {
 
 const TIER_LABELS: TierFilter[] = ["WARNING", "MODELED SAVINGS", "ADVISORY", "DIRECTIONAL"];
 
+const TIER_DISPLAY_LABEL: Record<TierFilter, string> = {
+  WARNING: "Warning",
+  "MODELED SAVINGS": "Estimated value",
+  ADVISORY: "Suggestion",
+  DIRECTIONAL: "Trend only",
+};
+
 const LIFECYCLE_LABELS: Array<{ value: LifecycleState; label: string }> = [
   { value: "proposed", label: "Proposed" },
   { value: "adopted", label: "Adopted" },
@@ -140,6 +147,15 @@ interface RecsToolbarProps {
 
 export default function RecsToolbar({ view, params }: RecsToolbarProps) {
   const counts = countVisible(view, params);
+  const moreFilterState = [
+    params.tier === null ? null : TIER_DISPLAY_LABEL[params.tier],
+    params.group === "detector" ? null : "by workspace",
+    params.sort === "confidence"
+      ? null
+      : params.sort === "savings"
+        ? "by estimated value"
+        : "newest",
+  ].filter((value): value is string => value !== null);
 
   function toggle(key: string, value: string, currentValue: string | null) {
     setToolbarParam(key, currentValue === value ? null : value);
@@ -158,7 +174,7 @@ export default function RecsToolbar({ view, params }: RecsToolbarProps) {
       {/* Lifecycle chips — use fieldset/legend for semantic grouping */}
       <fieldset className="recs-toolbar-group recs-toolbar-group--lifecycle">
         <legend className="recs-toolbar-legend">
-          Lifecycle{" "}
+          Status{" "}
           <InfoTip
             label="What the lifecycle chips mean"
             content="Where this recommendation is in your workflow — freshly surfaced, already acted on, or dismissed. Use it to avoid re-doing work you've handled."
@@ -183,68 +199,73 @@ export default function RecsToolbar({ view, params }: RecsToolbarProps) {
       </fieldset>
 
       {/* Confidence-tier chips — only relevant for proposed view */}
-      {(params.state === null || params.state === "proposed") && (
-        <fieldset className="recs-toolbar-group recs-toolbar-group--tier">
-          <legend className="recs-toolbar-legend">
-            Confidence tier{" "}
-            <InfoTip
-              label="What the tier chips mean"
-              content="How strong the evidence is: WARNING and MODELED SAVINGS are grounded in your data, ADVISORY and DIRECTIONAL are softer signals. Act on the top tiers first."
-            />
-          </legend>
-          {TIER_LABELS.map((tierLabel) => {
-            const active = params.tier === tierLabel;
-            return (
-              <button
-                key={tierLabel}
-                type="button"
-                className={`recs-chip recs-chip--tier${active ? " recs-chip--active" : ""}`}
-                aria-pressed={active}
-                data-toolbar-tier={tierLabel}
-                onClick={() => toggle("tier", tierLabel, params.tier)}
-              >
-                {tierLabel}
-              </button>
-            );
-          })}
-        </fieldset>
-      )}
+      <details className="recs-toolbar-more">
+        <summary>
+          More filters{moreFilterState.length > 0 ? `: ${moreFilterState.join(", ")}` : ""}
+        </summary>
+        {(params.state === null || params.state === "proposed") && (
+          <fieldset className="recs-toolbar-group recs-toolbar-group--tier">
+            <legend className="recs-toolbar-legend">
+              Suggestion type{" "}
+              <InfoTip
+                label="What the evidence filters mean"
+                content="Warnings flag usage that crossed a threshold. Estimated value shows possible savings, suggestions offer conditional advice, and trends show patterns without a savings estimate."
+              />
+            </legend>
+            {TIER_LABELS.map((tierLabel) => {
+              const active = params.tier === tierLabel;
+              return (
+                <button
+                  key={tierLabel}
+                  type="button"
+                  className={`recs-chip recs-chip--tier${active ? " recs-chip--active" : ""}`}
+                  aria-pressed={active}
+                  data-toolbar-tier={tierLabel}
+                  onClick={() => toggle("tier", tierLabel, params.tier)}
+                >
+                  {TIER_DISPLAY_LABEL[tierLabel]}
+                </button>
+              );
+            })}
+          </fieldset>
+        )}
 
-      <div className="recs-toolbar-row">
-        {/* Group-by */}
-        <label className="recs-toolbar-label">
-          Group by
-          <select
-            className="recs-toolbar-select"
-            value={params.group}
-            aria-label="Group recommendations by"
-            onChange={(e) =>
-              setToolbarParam("group", e.target.value === "workspace" ? "workspace" : null)
-            }
-          >
-            <option value="detector">Detector family</option>
-            <option value="workspace">Workspace</option>
-          </select>
-        </label>
+        <div className="recs-toolbar-row">
+          {/* Group-by */}
+          <label className="recs-toolbar-label">
+            Group by
+            <select
+              className="recs-toolbar-select"
+              value={params.group}
+              aria-label="Group recommendations by"
+              onChange={(e) =>
+                setToolbarParam("group", e.target.value === "workspace" ? "workspace" : null)
+              }
+            >
+              <option value="detector">Recommendation type</option>
+              <option value="workspace">Workspace</option>
+            </select>
+          </label>
 
-        {/* Sort */}
-        <label className="recs-toolbar-label">
-          Sort
-          <select
-            className="recs-toolbar-select"
-            value={params.sort}
-            aria-label="Sort recommendations"
-            onChange={(e) => {
-              const v = e.target.value;
-              setToolbarParam("sort", v === "confidence" ? null : v);
-            }}
-          >
-            <option value="confidence">Recommended order</option>
-            <option value="savings">Modeled $/wk (within family)</option>
-            <option value="newest">Newest</option>
-          </select>
-        </label>
-      </div>
+          {/* Sort */}
+          <label className="recs-toolbar-label">
+            Sort
+            <select
+              className="recs-toolbar-select"
+              value={params.sort}
+              aria-label="Sort recommendations"
+              onChange={(e) => {
+                const v = e.target.value;
+                setToolbarParam("sort", v === "confidence" ? null : v);
+              }}
+            >
+              <option value="confidence">Recommended order</option>
+              <option value="savings">Estimated weekly value</option>
+              <option value="newest">Newest</option>
+            </select>
+          </label>
+        </div>
+      </details>
     </div>
   );
 }

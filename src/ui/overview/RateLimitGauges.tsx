@@ -95,10 +95,10 @@ export default function RateLimitGauges({ burnStatus, isLoading }: Props) {
   return (
     <div className="card" data-testid="rate-limit-gauges" style={{ padding: "14px 16px" }}>
       <div style={{ marginBottom: 10, fontWeight: 700, fontSize: 13, color: "var(--soft)" }}>
-        RATE LIMITS{" "}
+        CLAUDE USAGE LIMITS{" "}
         <InfoTip
-          label="What the rate-limit gauges show"
-          content="Share of your Claude usage window already consumed, green under 60% and red past 85%. Watch the 7-day bar to avoid a mid-week cutoff."
+          label="What these usage bars show"
+          content="How much of each Claude usage period you have used. Check the 7-day bar before starting work that can wait, so you do not run out before it resets."
         />
       </div>
 
@@ -112,7 +112,7 @@ export default function RateLimitGauges({ burnStatus, isLoading }: Props) {
 
       {!isLoading && burnStatus === null && (
         <div className="kpi-off-hint" style={{ fontSize: 12 }}>
-          <div>Rate-limit data unavailable.</div>
+          <div>Current Claude usage is unavailable.</div>
           <a href="#/settings" style={{ color: "var(--teal)" }} data-testid="gauges-calibrate-link">
             Calibrate from usage in Settings →
           </a>
@@ -123,10 +123,10 @@ export default function RateLimitGauges({ burnStatus, isLoading }: Props) {
         <div style={{ fontSize: 12.5, color: "var(--soft)" }}>
           <span>Signed out — </span>
           <a href="#/settings" style={{ color: "var(--teal)" }}>
-            configure OAuth in Settings
+            Set up usage tracking in Settings
           </a>
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-            {burnStatus.reason ?? "Re-login to Claude Code to enable live rate-limit tracking."}
+            {burnStatus.reason ?? "Sign in to Claude Code to see current usage."}
           </div>
         </div>
       )}

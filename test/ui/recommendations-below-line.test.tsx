@@ -99,7 +99,7 @@ describe("RecommendationsPage below-the-line summary", () => {
     // Most findings line
     expect(header?.textContent).toContain("Most findings:");
     // Non-additive honesty note
-    expect(header?.textContent).toContain("Modeled savings are not additive.");
+    expect(header?.textContent).toContain("Estimates can overlap; do not add them together.");
     // Trio counts present
     expect(header?.querySelector(".recs-summary-trio")).not.toBeNull();
     // No dollar figure in the header (INT-5)

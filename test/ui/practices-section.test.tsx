@@ -49,16 +49,16 @@ describe("PracticesSection — row rendering", () => {
     });
   });
 
-  it("renders status chips for each row (PASS / ATTENTION / NO DATA)", async () => {
+  it("renders status chips for each row (ON TRACK / REVIEW / NO DATA)", async () => {
     vi.mocked(client.fetchPractices).mockResolvedValue(mockPractices());
     const { container } = render(<PracticesSection />);
     await waitFor(() => {
       expect(container.querySelector(".practice-row")).not.toBeNull();
     });
-    // At least one PASS, one ATTENTION, one NO DATA
+    // At least one ON TRACK, one REVIEW, one NO DATA.
     const text = container.textContent ?? "";
-    expect(text).toContain("PASS");
-    expect(text).toContain("ATTENTION");
+    expect(text).toContain("ON TRACK");
+    expect(text).toContain("REVIEW");
     expect(text).toContain("NO DATA");
   });
 

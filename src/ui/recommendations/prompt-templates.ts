@@ -345,10 +345,10 @@ export function generateAutocompactSnippet(rec: RecommendationCard): GeneratedSn
   return {
     language: "jsonc",
     caption:
-      "Suggested settings.json env — earlier autocompact (community-derived heuristic, 60–75% band — unverified)",
+      "Suggested settings.json env — earlier autocompact (community suggestion to summarize context at 60–75% full; not verified by Anthropic)",
     text: joinLines([
       "// ~/.claude/settings.json — trigger autocompact earlier to cap context growth.",
-      "// CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75 is a community-derived heuristic (60–75% band) — unverified by Anthropic.",
+      "// CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75 is a community suggestion (60–75% full), not verified by Anthropic.",
       '{\n  "env": {\n    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75"\n  }\n}',
     ]),
   };

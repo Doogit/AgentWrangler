@@ -106,7 +106,7 @@ describe("listRecommendations", () => {
     expect(d2.modeled_formula.inputs.reduction_fraction).toBe(0.33);
     expect(Array.isArray(d2.evidence.session_ids)).toBe(true);
     // title-from-evidence: D2 emits title in evidence; toCard() surfaces it.
-    expect(d2.title).toBe("Shorten sessions: 3 long-context runs this week");
+    expect(d2.title).toBe("Split 3 long sessions this week");
 
     expect(view.active_groups).toHaveLength(1);
     expect(view.active_groups[0]).toMatchObject({

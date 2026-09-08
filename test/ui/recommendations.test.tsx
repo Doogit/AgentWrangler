@@ -8,7 +8,7 @@
  * footnote. Client is mocked (no daemon).
  */
 
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import {
@@ -67,7 +67,7 @@ describe("RecommendationsPage — states", () => {
     // Page-level EXPERIMENTAL chip present.
     expect(container.querySelector(".chip-experimental")).not.toBeNull();
     expect(container.querySelector(".chip-experimental")?.getAttribute("title")).toContain(
-      "directional evidence",
+      "method that is still being checked",
     );
     expect(container.textContent ?? "").not.toContain("Cache misses have ~10×");
 
@@ -86,7 +86,7 @@ describe("RecommendationsPage — states", () => {
     expect(text).toContain("Why this is ranked here");
     expect(text).toContain("What we observed");
     expect(text).toContain("4 long, high-context sessions");
-    expect(text).toContain("Expected impact");
+    expect(text).toContain("Possible reduction");
     expect(text).toContain("How to measure success");
 
     const diagnostics = container.querySelector<HTMLDetailsElement>("details.rec-diagnostics");
@@ -189,13 +189,18 @@ describe("RecommendationsPage — states", () => {
     );
     expect(
       tiers.some(
-        (tier) => tier.title === "Modeled dollar savings from formula with unvalidated assumptions",
+        (tier) =>
+          tier.title === "Possible savings calculated from assumptions that have not been verified",
       ),
     ).toBe(true);
     expect(tiers.some((tier) => tier.title === "Conditional advice, no dollar estimate")).toBe(
       true,
     );
-    expect(tiers.some((tier) => tier.title === "Alert, rate-limit headroom burn")).toBe(true);
+    expect(
+      tiers.some(
+        (tier) => tier.title === "Warning about how quickly your remaining allowance is being used",
+      ),
+    ).toBe(true);
 
     for (const expandBtn of container.querySelectorAll<HTMLButtonElement>(
       "button.rec-expand-btn[aria-expanded='false']",
@@ -320,7 +325,7 @@ describe("RecommendationsPage — states", () => {
     expect(remainingSummary?.textContent).toContain("1 affected session");
     expect(remainingSummary?.textContent).toContain("$0.75/wk modeled across this group");
     expect(remainingSummary?.textContent).not.toContain("$1.25");
-    expect(container.querySelector(".rec-minor-items-card .rec-group-detector")?.textContent).toBe(
+    expect(container.querySelector(".rec-minor-items-card .rec-title")?.textContent).toBe(
       "Minor items",
     );
   });
@@ -353,7 +358,7 @@ describe("RecommendationsPage — states", () => {
     await waitFor(() => expect(container.querySelector(".rec-adopted-row")).not.toBeNull());
 
     expect(container.querySelector(".rec-adopted-row .rec-badge")?.textContent).toBe(
-      "Session hygiene",
+      "Long sessions",
     );
     expect(container.querySelector(".rec-dismissed-row .rec-badge")?.textContent).toBe(
       "Cache misses",
@@ -393,7 +398,7 @@ describe("RecommendationsPage — states", () => {
     fireEvent.click(expandBtn);
 
     const text = container.querySelector(".rec-details")?.textContent ?? "";
-    expect(text).toContain("Directional exposure only");
+    expect(text).toContain("Repeated attempts do not prove waste");
     expect(text).not.toContain("Modeled projection");
   });
 
@@ -448,7 +453,7 @@ describe("RecommendationsPage — states", () => {
     );
     expect(text).toContain("cannot yet name which tool");
     expect(text).toContain(
-      "Directional signal only — bytes are converted with an unvalidated 4 B/token heuristic; this is structural exposure, not an avoidable-token or USD savings estimate.",
+      "Rough estimate: text size is converted at four bytes per token. Large output is not necessarily waste; check whether the task needed it.",
     );
     expect(text).toContain("tool-result bytes and share should fall");
   });
@@ -486,14 +491,14 @@ describe("RecommendationsPage — states", () => {
     fireEvent.click(expandBtn);
 
     const text = container.querySelector(".rec-details")?.textContent ?? "";
-    expect(text).toContain("inventory probe estimated 55K catalog tokens against a 40K target");
+    expect(text).toContain("tool inventory scan estimated 55K catalog tokens against a 40K target");
     expect(text).not.toContain("catalog measured");
     expect(text).toContain("15K tokens above target");
     expect(text).toContain("global inventory contains 3 catalog sources");
     expect(text).toContain("weekly projection models repeated reads across 10 turns");
     expect(text).toContain("catalog threshold is unvalidated");
     expect(text).toContain("not measured or achieved savings");
-    expect(text).toContain("next inventory probe");
+    expect(text).toContain("next tool inventory scan");
     expect(text).toContain(
       "tool, plugin, and skill catalog estimate should move from 55K toward 40K",
     );
@@ -548,7 +553,7 @@ describe("RecommendationsPage — states", () => {
 
     const observations = container.querySelector(".rec-observations")?.textContent ?? "";
     expect(observations).toContain(
-      "4 long, high-context sessions crossed the session-hygiene threshold.",
+      "4 long, high-context sessions crossed the threshold for long sessions.",
     );
     expect(observations).toContain(
       "The detector looked for at least 150 turns averaging 180K context tokens.",
@@ -640,13 +645,13 @@ describe("RecommendationsPage — states", () => {
     expect(diagnostics).toContain("Cause facet — session reopen: UNOBSERVABLE.");
     expect(diagnostics).toContain("Cause facet — prefix/config change: UNOBSERVABLE.");
     expect(diagnostics).toContain("Cause facet — dynamic content: UNOBSERVABLE.");
-    expect(observations).toContain("Tool-class attribution: Bash.");
-    expect(observations).toContain("Owner-turn metadata coverage: 80%.");
-    expect(diagnostics).toContain("Attributed result bytes: 48,000.");
-    expect(diagnostics).toContain("Carry turns: 3.");
-    expect(diagnostics).toContain("Directional carry exposure: 13K tokens.");
-    expect(diagnostics).toContain("Owner-turn metadata covered events: 4.");
-    expect(diagnostics).toContain("Owner-turn metadata denominator: 5 in-window events.");
+    expect(observations).toContain("Tool identified: Bash.");
+    expect(observations).toContain("Tool events linked to a model response: 80%.");
+    expect(diagnostics).toContain("Output size in bytes: 48,000.");
+    expect(diagnostics).toContain("Later turns carrying this output: 3.");
+    expect(diagnostics).toContain("Estimated tokens carried into later turns: 13K tokens.");
+    expect(diagnostics).toContain("Linked tool events: 4.");
+    expect(diagnostics).toContain("Total tool events checked: 5 in-window events.");
     expect(diagnostics).toContain("Effective catalog state: alwaysLoad.");
     expect(diagnostics).toContain("Always-load count: 2.");
     for (const details of container.querySelectorAll<HTMLDetailsElement>(
@@ -722,12 +727,12 @@ describe("RecommendationsPage — states", () => {
       .join(" ");
     expect(text).not.toContain("Cause facet —");
     expect(text).not.toContain("Tool-class attribution:");
-    expect(text).not.toContain("Attributed result bytes:");
-    expect(text).not.toContain("Carry turns:");
-    expect(text).not.toContain("Directional carry exposure:");
+    expect(text).not.toContain("Output size in bytes:");
+    expect(text).not.toContain("Later turns carrying this output:");
+    expect(text).not.toContain("Estimated tokens carried into later turns:");
     expect(text).not.toContain("Owner-turn metadata coverage:");
-    expect(text).not.toContain("Owner-turn metadata covered events:");
-    expect(text).not.toContain("Owner-turn metadata denominator:");
+    expect(text).not.toContain("Linked tool events:");
+    expect(text).not.toContain("Total tool events checked:");
     expect(text).not.toContain("Effective catalog state:");
     expect(text).not.toContain("Always-load count:");
   });
@@ -768,7 +773,7 @@ describe("RecommendationsPage — states", () => {
       .join(" ");
     expect(text).toContain("Tool-result output crossed the session-level bloat threshold");
     expect(text).toContain(
-      "Directional signal only — bytes are converted with an unvalidated 4 B/token heuristic; this is structural exposure, not an avoidable-token or USD savings estimate.",
+      "Rough estimate: text size is converted at four bytes per token. Large output is not necessarily waste; check whether the task needed it.",
     );
     expect(text).toContain(
       "tool, plugin, and skill catalog exceeded its configured context target",
@@ -806,12 +811,15 @@ describe("RecommendationsPage — states", () => {
     const { container } = render(<RecommendationsPage />);
 
     await waitFor(() => {
-      expect(container.textContent ?? "").toContain("not a simple dollar sort");
+      expect(screen.getByRole("button", { name: "How suggestions are ordered" })).toBeTruthy();
     });
 
     const text = container.textContent ?? "";
-    expect(text).toContain("Recommended order preserves that policy.");
-    expect(text).toContain("reorder only within a detector family");
+    fireEvent.click(screen.getByRole("button", { name: "How suggestions are ordered" }));
+    expect(screen.getByRole("tooltip").textContent).toContain("fixed category order");
+    expect(screen.getByRole("tooltip").textContent).toContain(
+      "estimated savings sorts within each category",
+    );
     expect(text).not.toContain("ranked by impact, highest first");
     expect(text).not.toContain("leverage class");
     expect(text).not.toContain("detector families follow");
@@ -859,7 +867,7 @@ describe("RecommendationsPage — states", () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => {
-      expect(container.textContent ?? "").toMatch(/never counted as achieved/i);
+      expect(container.textContent ?? "").toMatch(/kept separate from the results/i);
     });
     expect(container.textContent ?? "").not.toContain("FR-REC-103");
     expect(container.querySelector("[title='FR-REC-103']")).not.toBeNull();
@@ -989,7 +997,7 @@ describe("RecommendationsPage — toolbar controls (RV5)", () => {
     });
 
     // The standing honesty footnote must always be present regardless of filter state
-    expect(container.textContent ?? "").toContain("never counted as achieved");
+    expect(container.textContent ?? "").toContain("kept separate from the results");
     expect(container.querySelector("[title='FR-REC-103']")).not.toBeNull();
   });
 
@@ -999,6 +1007,8 @@ describe("RecommendationsPage — toolbar controls (RV5)", () => {
     await waitFor(() => {
       expect(container.querySelector(".recs-toolbar")).not.toBeNull();
     });
-    expect(container.textContent ?? "").toContain("Modeled savings are not additive");
+    expect(container.textContent ?? "").toContain(
+      "Estimates can overlap; do not add them together",
+    );
   });
 });

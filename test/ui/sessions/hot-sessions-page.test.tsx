@@ -83,7 +83,7 @@ describe("HotSessionsPage self-percentile chip (BM3)", () => {
       }),
     );
     render(<HotSessionsPage onSelectSession={vi.fn()} />);
-    const chip = await screen.findByText("top 5% by spend");
+    const chip = await screen.findByText("top 5% by estimated value");
     expect(chip.getAttribute("title")).toContain("30 sessions");
   });
 });

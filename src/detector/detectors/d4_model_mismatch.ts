@@ -291,7 +291,7 @@ export const d4Detector: Detector = {
           ? {
               withheld: true,
               withheld_reason: `Sonnet weekly cap is the binding constraint (Sonnet util ${bindingSonnet.utilization} >= all-models ${perModelSnapshot.seven_day_util}) — routing Opus->Sonnet would worsen it`,
-              title: `[withheld] Route Opus→Sonnet: ${mismatchPct}% of turns are high-context low-output`,
+              title: `Model change is not recommended: ${mismatchPct}% of Opus turns have large context and little output`,
             }
           : perModelSnapshot && sonnetEntries && sonnetEntries.length > 0
             ? { cap_attribution: "all_models_or_opus_binds" }
@@ -303,7 +303,7 @@ export const d4Detector: Detector = {
         scope_workspace_id: workspace_id,
         // Advisory gate (W0.3): which cap binds is NOT inferable from JSONL. Conditional lever.
         lever:
-          "If your all-models / Opus / 5h cap is the one binding — check /usage — these high-context low-output Opus turns are Sonnet-movable. This does NOT help, and can hurt, if your Sonnet-specific weekly cap is the binding constraint.",
+          "Check /usage first. If your overall, Opus, or 5-hour limit is filling, these large-context Opus turns with little output may be suitable for Sonnet. Do not switch if your Sonnet weekly limit is the one filling.",
         target_metric: "model_mix_opus_fraction",
         // Advisory gate: suppress the crisp $/wk headline until live /usage cap-attribution exists.
         modeled_savings_u_per_wk: null,
@@ -313,7 +313,7 @@ export const d4Detector: Detector = {
           formula,
         ),
         evidence: {
-          title: `Route Opus→Sonnet: ${mismatchPct}% of turns are high-context low-output`,
+          title: `Review model choice: ${mismatchPct}% of Opus turns have large context and little output`,
           workspace_id,
           total_opus_turns_per_week: totalOpus,
           mismatch_turns_per_week: mismatchCount,

@@ -373,8 +373,8 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
         {outcomeState.status === "ok" && workspaceOutcome === null && (
           <EmptyState
             headline="No outcome data"
-            why="No linked work items are available for this workspace."
-            whatWillAppear="Success rate, linkage rate, and PR outcomes will appear after linked work is observed."
+            why="No pull requests are linked to sessions in this workspace."
+            whatWillAppear="Outcome signals and pull-request status will appear after linked work is observed."
           />
         )}
         {outcomeState.status === "ok" && workspaceOutcome !== null && (
@@ -390,10 +390,10 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
           <div className="card" style={{ marginBottom: 13 }} data-testid="ef1-abandoned-spend">
             <div className="section-head">
               <h2>
-                Abandoned spend split{" "}
+                Estimated value in sessions without commits{" "}
                 <InfoTip
-                  label="EF1 — abandoned spend split"
-                  content="Breaks the RV9a abandoned spend into deep sessions (≥10 user turns, no commit) vs early (< 10 user turns). Deep-abandoned sessions represent more invested effort that did not reach a commit outcome. OBS_PROXY tier."
+                  label="Estimated value in sessions without commits"
+                  content="Splits estimated value from sessions without a commit into long sessions with at least 10 user turns and early sessions with fewer than 10. A long session without a commit can show more effort without a recorded change."
                 />
               </h2>
               <div className="chips">
@@ -410,13 +410,13 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 color: "var(--text-muted)",
               }}
             >
-              <dt>Deep abandoned (≥10 user turns)</dt>
+              <dt>Long, no commit (10+ user turns)</dt>
               <dd style={{ margin: 0 }} data-testid="deep-abandoned-spend">
                 {workspace.deep_abandoned_spend_u !== undefined
                   ? fmtUsd(workspace.deep_abandoned_spend_u)
                   : "—"}
               </dd>
-              <dt>Early abandoned (&lt;10 user turns)</dt>
+              <dt>Early, no commit (under 10 user turns)</dt>
               <dd style={{ margin: 0 }} data-testid="early-abandoned-spend">
                 {workspace.early_abandoned_spend_u !== undefined
                   ? fmtUsd(workspace.early_abandoned_spend_u)
@@ -430,10 +430,10 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
       <div className="card" style={{ marginBottom: 13 }} data-testid="ef2-closure-proxy">
         <div className="section-head">
           <h2>
-            No-commit closure proxy{" "}
+            What happened after sessions without commits{" "}
             <InfoTip
-              label="EF2 — closure proxy"
-              content="Directional proxy for whether no-commit sessions were closed by follow-up work. RESOLVED = no follow-up session in the same workspace within 48h (the work stayed closed). UNRESOLVED = a follow-up session started within 48h (the work likely continued). PENDING = the 48h window has not elapsed yet. A re-open can be unrelated work; burst-working operators will false-flag as UNRESOLVED."
+              label="What happened after sessions without commits"
+              content="An early signal about whether later work continued. Resolved means no later session in this workspace started within 48 hours; unresolved means one did. Pending means 48 hours has not passed. A later session can be unrelated work."
             />
           </h2>
           <div className="chips">
@@ -498,10 +498,10 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
       <div className="card" style={{ marginBottom: 13 }} data-testid="r4a-cost-per-success">
         <div className="section-head">
           <h2>
-            Cost per delivered outcome{" "}
+            Estimated value per delivered outcome{" "}
             <InfoTip
-              label="R4a — cost per delivered outcome"
-              content="Directional lifecycle proxy: modeled spend divided by delivered work. Cost per merged PR sums the full cost of every session linked to a merged PR (lifecycle attribution — a session's whole cost lands on the PR it linked, whenever it ran). Cost per commit-session is per session that made a commit, not per commit. Four caveats bound trust: survivorship (heavy-spend sessions that never open a PR are invisible), reviewer-dependence (merge is a human decision, not a quality guarantee), linkage-coverage cap (only linked spend counts), and lifecycle-attribution (narrowing the window changes the PR population, not the per-PR cost)."
+              label="Estimated value per delivered outcome"
+              content="Estimated token value per completed item. Each merged pull request includes the full value of its linked sessions, whenever they ran; changing the period changes which pull requests are included. Unlinked sessions are excluded from that measure. Value per commit session instead includes sessions started in this period that made a commit, whether linked or not. A merge is a reviewer decision, not proof of quality."
             />
           </h2>
           <div className="chips">
@@ -524,7 +524,8 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
             <div data-testid="r4a-summary" style={{ marginBottom: 8 }}>
               {costPerSuccess.merged_pr_count === 0 ? (
                 <span style={{ color: "var(--text-muted)" }}>
-                  No merged PRs linked in this window — cost per merged PR is not yet defined.
+                  No merged pull requests are linked in this period, so the value per merged pull
+                  request is unavailable.
                 </span>
               ) : (
                 <span>
@@ -547,13 +548,13 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 color: "var(--text-muted)",
               }}
             >
-              <dt>Cost per merged PR</dt>
+              <dt>Est. value per merged pull request</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-cost-per-merged-pr">
                 {costPerSuccess.cost_per_merged_pr_u !== null
                   ? fmtUsd(costPerSuccess.cost_per_merged_pr_u)
                   : "— (no merged PRs yet)"}
               </dd>
-              <dt>Merged PRs</dt>
+              <dt>Merged pull requests</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-merged-count">
                 {costPerSuccess.merged_pr_count}
               </dd>
@@ -561,17 +562,17 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
               <dd style={{ margin: 0 }} data-testid="r4a-closed-count">
                 {costPerSuccess.closed_unmerged_count}
               </dd>
-              <dt>Cost per commit-session</dt>
+              <dt>Est. value per commit session</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-cost-per-commit-session">
                 {costPerSuccess.cost_per_commit_session_u !== null
                   ? fmtUsd(costPerSuccess.cost_per_commit_session_u)
                   : "— (no commit-sessions yet)"}
               </dd>
-              <dt>Commit-sessions</dt>
+              <dt>Commit sessions</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-commit-session-count">
                 {costPerSuccess.commit_session_count}
               </dd>
-              <dt>Linkage coverage</dt>
+              <dt>In-window sessions linked to pull requests</dt>
               <dd style={{ margin: 0 }} data-testid="r4a-linkage-coverage">
                 {costPerSuccess.linkage_coverage_pct !== null
                   ? `${Math.round(costPerSuccess.linkage_coverage_pct)}%`

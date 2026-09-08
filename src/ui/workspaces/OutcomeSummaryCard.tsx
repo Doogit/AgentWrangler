@@ -20,11 +20,13 @@ function fmtPct(v: number | null): string {
 export default function OutcomeSummaryCard({ data }: Props) {
   return (
     <div className="kpi card">
-      <div className="kpi-label">SUCCESS RATE</div>
+      <div className="kpi-label">OUTCOME SIGNAL</div>
       {data === null ? (
         <>
           <div className="kpi-off">N/A</div>
-          <div className="kpi-off-hint">GitHub token not configured or no linked work items.</div>
+          <div className="kpi-off-hint">
+            Add a GitHub token, then link sessions to pull requests.
+          </div>
         </>
       ) : (
         <>
@@ -38,7 +40,12 @@ export default function OutcomeSummaryCard({ data }: Props) {
               ⚠ {data.no_ci_success_n} success(es) with no CI
             </div>
           )}
-          <div className="kpi-fn">linkage rate: {fmtPct(data.linkage_rate)}</div>
+          <div
+            className="kpi-fn"
+            title="Completed sessions with at least one Bash tool event are eligible."
+          >
+            eligible sessions linked to pull requests: {fmtPct(data.linkage_rate)}
+          </div>
         </>
       )}
       <div className="chips">

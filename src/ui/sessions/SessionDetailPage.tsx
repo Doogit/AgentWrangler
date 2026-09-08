@@ -75,10 +75,10 @@ function labelWorkspace(session: SessionSummary & WorkspaceLabelInput): string {
 function claimChip(turn: TurnRow) {
   if (turn.provisional) return <Chip kind="LIVE" label="LIVE" />;
   if (turn.cost_claim === "LIST_EQUIV_STALE") {
-    return <Chip kind="LIST_EQUIV_STALE" label={turn.cost_claim} />;
+    return <Chip kind="LIST_EQUIV_STALE" />;
   }
   if (turn.cost_claim === "LIST_EQUIV") {
-    return <Chip kind="LIST_EQUIV" label={turn.cost_claim} />;
+    return <Chip kind="LIST_EQUIV" />;
   }
   return <span>{turn.cost_claim}</span>;
 }
@@ -196,7 +196,7 @@ function CostDriversPanel({ drivers }: { drivers: SessionDrivers }) {
           Cost drivers{" "}
           <InfoTip
             label="What the cost-drivers panel shows"
-            content="Breaks this session's modeled cost into where the tokens went — context re-reads, cache writes, and model choice. The largest slice is your best lever."
+            content="Shows where this session's estimated value came from: context sent again, cache writes, and model choice. Start with the largest item."
           />
         </h2>
         <div className="chips">
@@ -211,7 +211,7 @@ function CostDriversPanel({ drivers }: { drivers: SessionDrivers }) {
       </div>
       <div style={{ padding: "12px 16px 8px" }}>
         <p className="kpi-fn" style={{ margin: "0 0 8px" }}>
-          Per-driver figures are observed proxies — never summed.
+          Each figure is a separate signal. Do not add them together.
         </p>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)" }}>
@@ -309,7 +309,7 @@ export function ContextGrowthChart({
           Context per turn{" "}
           <InfoTip
             label="What the context-growth chart shows"
-            content="Context size per turn over the session; every turn re-reads the whole thing, so a rising line means rising cost. A steep climb is a cue to /clear or split the task."
+            content="Context size for each turn. Context is sent again each turn, so a rising line can increase estimated value. A steep climb can be a reason to use /clear or split the task."
           />
         </h2>
         <div className="chips">
@@ -376,7 +376,7 @@ export function ContextGrowthChart({
         </ComposedChart>
       </ResponsiveContainer>
       <p className="kpi-fn" style={{ margin: "0 16px 12px" }}>
-        {`Context per turn · amber dots = cache write event (potential miss) · red line = 80% of 200K window${compactionNote}`}
+        {`Context for each turn · amber dots show a cache write · red line marks 80% of the 200K context window${compactionNote}`}
       </p>
     </div>
   );
@@ -558,7 +558,7 @@ export default function SessionDetailPage({
       <div style={{ display: "flex", justifyContent: "flex-end", padding: "0 0 4px" }}>
         <InfoTip
           label="What these KPIs summarize"
-          content="The session's headline numbers — turns, modeled cost, context, and outcome — at a glance. Open the panels below to see what drove each one."
+          content="A quick view of turns, estimated value, context, and outcome. Open the sections below to understand each one."
         />
       </div>
       <div className="session-kpis">
@@ -567,7 +567,7 @@ export default function SessionDetailPage({
           <b>{tokens(session.turn_count)}</b>
         </div>
         <div>
-          <span>Session cost</span>
+          <span>Estimated value</span>
           <b>{usd(session.cost_equiv_u)}</b>
         </div>
         <div>
@@ -588,10 +588,10 @@ export default function SessionDetailPage({
         </div>
         <div>
           <span>
-            Turns to first commit{" "}
+            Turns through first commit{" "}
             <InfoTip
-              label="EF1 — turns to first commit"
-              content="Count of non-sidechain turns (is_sidechain=0) up to and including the first commit turn. Null when no commit occurred in the session. OBS_PROXY tier."
+              label="Turns through first commit"
+              content="The number of main-conversation turns through the first commit. Empty when this session made no commit. This counts turns, not the quality of the result."
             />
           </span>
           <b data-testid="turns-to-first-commit">
@@ -604,15 +604,15 @@ export default function SessionDetailPage({
         </div>
         <div>
           <span>
-            Deep abandoned{" "}
+            Long session without a commit{" "}
             <InfoTip
-              label="EF1 — deep abandoned"
-              content="True when: ≥10 user turns, no commit, and state is RECONCILED. A deep-abandoned session consumed significant effort without a commit outcome. OBS_PROXY tier."
+              label="Long session without a commit"
+              content="Shown when a completed session has at least 10 user turns and no commit. It can indicate significant effort without a recorded change."
             />
           </span>
           <b data-testid="deep-abandoned">
             {session.deep_abandoned === true ? (
-              <Chip kind="ATTENTION" label="DEEP ABANDONED" />
+              <Chip kind="ATTENTION" label="LONG, NO COMMIT" />
             ) : (
               "No"
             )}
@@ -631,7 +631,7 @@ export default function SessionDetailPage({
             Friction signals{" "}
             <InfoTip
               label="What the friction band means"
-              content="A coarse low/medium/high rating of how much this session stalled on errors, retries, and dead ends — not a precision score. The components below show what drove it."
+              content="A low, elevated, or high signal based on errors, test failures, context compactions, interrupts, and user-message share. It is a guide, not an exact score. The details below show why."
             />
           </h2>
           <div className="chips">
@@ -641,7 +641,7 @@ export default function SessionDetailPage({
         <div style={{ padding: "8px 16px 12px" }}>
           <InfoTip
             label="What the friction components are"
-            content="The observed signals that set the band: error rate, retries, and abandoned turns. A single dominant component tells you what to fix first."
+            content="The signals behind this rating include errors, test failures, context compactions, interrupts, and user-message share. Open the rating details to see the thresholds."
           />
           <FrictionCell
             counts={{
@@ -705,8 +705,8 @@ export default function SessionDetailPage({
                   <th>Cache read</th>
                   <th>Cache write</th>
                   <th>Context</th>
-                  <th>Cost</th>
-                  <th>Claim</th>
+                  <th>Estimated value</th>
+                  <th>How it is estimated</th>
                 </tr>
               </thead>
               <tbody>

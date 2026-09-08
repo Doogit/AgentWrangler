@@ -79,19 +79,19 @@ export function frictionBand(c: FrictionCounts): FrictionBand {
 // ---------------------------------------------------------------------------
 
 export const FRICTION_TOOLTIP = [
-  "Friction signals — directional band, not a precision score.",
+  "Friction is a signal, not an exact score.",
   "",
   "Thresholds (any component triggers the band):",
   `  API errors: ELEVATED ≥ ${THRESHOLDS.api_errors.elevated}, HIGH ≥ ${THRESHOLDS.api_errors.high}`,
-  `  Tool errors (exit_class=ERROR): ELEVATED ≥ ${THRESHOLDS.tool_errors.elevated}, HIGH ≥ ${THRESHOLDS.tool_errors.high}`,
-  `  Test fails (exit_class=TEST_FAIL): ELEVATED ≥ ${THRESHOLDS.test_fails.elevated}, HIGH ≥ ${THRESHOLDS.test_fails.high}`,
+  `  Tool errors: ELEVATED ≥ ${THRESHOLDS.tool_errors.elevated}, HIGH ≥ ${THRESHOLDS.tool_errors.high}`,
+  `  Test failures: ELEVATED ≥ ${THRESHOLDS.test_fails.elevated}, HIGH ≥ ${THRESHOLDS.test_fails.high}`,
   `  Compactions: ELEVATED ≥ ${THRESHOLDS.compactions.elevated}, HIGH ≥ ${THRESHOLDS.compactions.high}`,
-  `  Interrupts: ELEVATED ≥ ${THRESHOLDS.interrupts.elevated}, HIGH ≥ ${THRESHOLDS.interrupts.high} (no reliable corpus marker — always 0)`,
-  `  Re-prompt density (user turns / total turns): ELEVATED ≥ ${THRESHOLDS.reprompt.elevated * 100}%, HIGH ≥ ${THRESHOLDS.reprompt.high * 100}%`,
+  `  Interrupts: ELEVATED ≥ ${THRESHOLDS.interrupts.elevated}, HIGH ≥ ${THRESHOLDS.interrupts.high} (not currently recorded, so always 0)`,
+  `  User-message share (user turns / total turns): ELEVATED ≥ ${THRESHOLDS.reprompt.elevated * 100}%, HIGH ≥ ${THRESHOLDS.reprompt.high * 100}%`,
   "",
-  `EF3 gap aggregates: median/p90 inter-user-turn gap (s); long gap = gap > ${LONG_GAP_THRESHOLD_S}s. Shown when gap_n ≥ 2; "—" otherwise.`,
+  `Time between user messages: middle value and 90th-percentile value in seconds; a long gap is over ${LONG_GAP_THRESHOLD_S}s. Shown after at least two gaps.`,
   "",
-  "Loop events (D7 signal): not shown here — visible in Cost Drivers panel when D7 fires.",
+  "Repeated-loop events appear in Cost drivers when detected.",
 ].join("\n");
 
 // ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ export function FrictionCell({
     if (counts.test_fail_count > 0) parts.push(`fail ${counts.test_fail_count}`);
     if (counts.compaction_count > 0) parts.push(`compact ${counts.compaction_count}`);
     if (counts.interrupt_count > 0) parts.push(`intr ${counts.interrupt_count}`);
-    if (Math.round(density * 100) > 0) parts.push(`reprompt ${Math.round(density * 100)}%`);
+    if (Math.round(density * 100) > 0) parts.push(`user messages ${Math.round(density * 100)}%`);
     if (hasGaps && (counts.long_gap_count ?? 0) > 0)
       parts.push(`long-gap ${counts.long_gap_count ?? 0}`);
 
@@ -213,13 +213,13 @@ export function FrictionCell({
         <dd style={{ margin: 0 }}>{counts.compaction_count}</dd>
         <dt>Interrupts</dt>
         <dd style={{ margin: 0 }}>{counts.interrupt_count}</dd>
-        <dt>Re-prompt density</dt>
+        <dt>User-message share</dt>
         <dd style={{ margin: 0 }}>{Math.round(density * 100)}%</dd>
         <dt>Gap median</dt>
         <dd style={{ margin: 0 }} data-testid="gap-median">
           {gapMedianFmt}
         </dd>
-        <dt>Gap p90</dt>
+        <dt>Longer gap (90th percentile)</dt>
         <dd style={{ margin: 0 }} data-testid="gap-p90">
           {gapP90Fmt}
         </dd>

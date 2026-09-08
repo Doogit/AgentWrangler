@@ -18,9 +18,9 @@ describe("Chip", () => {
     const { container } = render(<Chip kind="LIST_EQUIV" />);
     const el = container.querySelector(".chip-list-equiv");
     expect(el).not.toBeNull();
-    expect(el?.textContent).toBe("LIST_EQUIV");
+    expect(el?.textContent).toBe("ESTIMATED VALUE");
     expect(el?.getAttribute("role")).toBe("status");
-    expect(el?.getAttribute("aria-label")).toBe("LIST_EQUIV");
+    expect(el?.getAttribute("aria-label")).toBe("ESTIMATED VALUE");
   });
 
   it("renders OBS_PROXY with chip-obs-proxy class (distinct from LIST_EQUIV)", () => {
@@ -28,7 +28,7 @@ describe("Chip", () => {
     const el = container.querySelector(".chip-obs-proxy");
     expect(el).not.toBeNull();
     // Label includes BPE note — not empty, satisfies WCAG color-not-only-signal
-    expect(el?.textContent).toContain("OBS PROXY");
+    expect(el?.textContent).toContain("TOKEN-BASED ESTIMATE");
     // Confirm it does NOT have the LIST_EQUIV class
     expect(container.querySelector(".chip-list-equiv")).toBeNull();
   });
@@ -37,7 +37,7 @@ describe("Chip", () => {
     const { container } = render(<Chip kind="PROXY" />);
     const el = container.querySelector(".chip-proxy");
     expect(el).not.toBeNull();
-    expect(el?.textContent).toBe("PROXY");
+    expect(el?.textContent).toBe("ESTIMATE");
     expect(container.querySelector(".chip-list-equiv")).toBeNull();
     expect(container.querySelector(".chip-obs-proxy")).toBeNull();
   });
@@ -66,7 +66,7 @@ describe("Chip", () => {
   it("renders N_A with chip-na class", () => {
     const { container } = render(<Chip kind="N_A" />);
     expect(container.querySelector(".chip-na")).not.toBeNull();
-    expect(container.querySelector(".chip")?.textContent).toBe("N/A");
+    expect(container.querySelector(".chip")?.textContent).toBe("NO DATA");
   });
 
   it("renders LIVE with chip-live class", () => {
@@ -78,7 +78,7 @@ describe("Chip", () => {
     const { container } = render(<Chip kind="MODELED" />);
     const el = container.querySelector(".chip-modeled");
     expect(el).not.toBeNull();
-    expect(el?.textContent).toBe("MODELED");
+    expect(el?.textContent).toBe("PROJECTED");
     // Distinct from the page-level EXPERIMENTAL chip.
     expect(container.querySelector(".chip-experimental")).toBeNull();
   });

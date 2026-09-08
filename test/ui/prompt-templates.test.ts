@@ -372,9 +372,9 @@ describe("generateAutocompactSnippet (RI8/R12)", () => {
       const result = generateAutocompactSnippet(card({ detector_id: detector }));
       expect(result).not.toBeNull();
       expect(result?.text).toContain('"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75"');
-      expect(result?.caption).toContain("community-derived heuristic");
-      expect(result?.caption).toContain("unverified");
-      expect(result?.text).toContain("unverified by Anthropic");
+      expect(result?.caption).toContain("community suggestion");
+      expect(result?.caption).toContain("not verified by Anthropic");
+      expect(result?.text).toContain("not verified by Anthropic");
     }
   });
 

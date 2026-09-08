@@ -75,7 +75,7 @@ export default function AnchorsPanel() {
       style={{ padding: "18px 20px", marginBottom: 16 }}
       aria-label="Benchmark anchors"
     >
-      <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Benchmark anchors</h2>
+      <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Published benchmarks</h2>
 
       {/* Mandatory caveat — adjacent to anchors, always rendered */}
       <p
@@ -90,7 +90,7 @@ export default function AnchorsPanel() {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Average */}
         <div className="settings-health-row" aria-label="benchmark avg per day">
-          <span className="settings-health-label">Avg/day (enterprise API-billed)</span>
+          <span className="settings-health-label">Average daily API bill (enterprise)</span>
           <span className="settings-health-value">${DAILY_AVG_USD.daily_usd}/day</span>
           <span className="section-meta">
             Source:{" "}
@@ -108,7 +108,7 @@ export default function AnchorsPanel() {
 
         {/* P90 */}
         <div className="settings-health-row" aria-label="benchmark p90 per day">
-          <span className="settings-health-label">p90/day (enterprise API-billed)</span>
+          <span className="settings-health-label">90th-percentile daily API bill (enterprise)</span>
           <span className="settings-health-value">${DAILY_P90_USD.daily_usd}/day</span>
           <span className="section-meta">
             Source:{" "}
@@ -126,14 +126,16 @@ export default function AnchorsPanel() {
 
         {/* Cap impact claim */}
         <div className="settings-health-row" aria-label="cap impact claim">
-          <span className="settings-health-label">Hit rate-limit cap</span>
+          <span className="settings-health-label">Reached a usage limit</span>
           <span className="settings-health-value">{CAP_IMPACT_CLAIM.claim}</span>
           <span className="section-meta">{CAP_IMPACT_CLAIM.source}</span>
         </div>
 
         {/* Own $/active-day */}
         <div className="settings-health-row" aria-label="own cost per active day">
-          <span className="settings-health-label">Your $/active-day (30d)</span>
+          <span className="settings-health-label">
+            Your estimated value per active day (30 days)
+          </span>
           <span className="settings-health-value" aria-label="own active day cost value">
             {ownUsd === "loading"
               ? "…"

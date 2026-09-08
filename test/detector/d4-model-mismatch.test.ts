@@ -157,7 +157,7 @@ describe("D4 per-model cap attribution", () => {
     // Reason must reflect the actual observed utilization numbers, not a static string.
     expect(evidence.withheld_reason).toMatch(/0\.72/);
     expect(String(evidence.withheld_reason)).toMatch(/\d+(\.\d+)?/);
-    expect(evidence.title).toMatch(/^\[withheld\] /);
+    expect(evidence.title).toMatch(/^Model change is not recommended:/);
     // Withheld recs never carry a crisp savings headline.
     expect(r.modeled_savings_u_per_wk).toBeNull();
   });

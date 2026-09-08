@@ -146,11 +146,11 @@ describe("WorkspaceDetailPage", () => {
     });
   });
 
-  it("shows EXPERIMENTAL chip on the Outcomes section", async () => {
+  it("shows EARLY ESTIMATE chip on the Outcomes section", async () => {
     render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
     await waitFor(() => {
-      // There should be at least one EXPERIMENTAL chip in the outcomes section
-      expect(screen.getAllByRole("status", { name: "EXPERIMENTAL" }).length).toBeGreaterThan(0);
+      // There should be at least one EARLY ESTIMATE chip in the outcomes section.
+      expect(screen.getAllByRole("status", { name: "EARLY ESTIMATE" }).length).toBeGreaterThan(0);
     });
   });
 

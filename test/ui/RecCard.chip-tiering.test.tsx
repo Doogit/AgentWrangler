@@ -41,7 +41,7 @@ describe("RecCard chip tiering", () => {
 
     expect(chipRow.querySelectorAll(".rec-confidence-tier, .chip")).toHaveLength(2);
     expect(chipRow.textContent).toContain("MODELED SAVINGS");
-    expect(chipRow.textContent).toContain("EXPERIMENTAL");
+    expect(chipRow.textContent).toContain("EARLY ESTIMATE");
     expect(chipRow.textContent).not.toContain("LIST_EQUIV · modeled USD");
 
     const expander = getByRole("button", { name: "+2" });
