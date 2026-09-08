@@ -301,7 +301,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       cost_share: orbitSpend / total,
       has_live: false,
       usd_per_turn: orbitSpend / MICRO / (orbitTurns ?? 1),
-      avg_context_per_turn: 149_452,
+      avg_context_per_turn: ua11WorkspaceContextMean("ws-1", preset),
       cache_write_pct: 0.12,
       opus_pct: 0.67,
       premium_pct: 0.71,
@@ -1105,6 +1105,17 @@ function ua11SessionContextTokens(session: SessionSummary): number {
   );
 }
 
+function ua11WorkspaceContextMean(workspaceId: string, preset: Ua11Preset): number {
+  const sessions = selectedUa11Days(preset)
+    .flatMap(ua11DailySessions)
+    .filter((session) => session.workspace_id === workspaceId);
+  const turns = sessions.reduce((sum, session) => sum + session.turn_count, 0);
+  const context = sessions.reduce(
+    (sum, session) => sum + ua11SessionContextTokens(session) * session.turn_count,
+    0,
+  );
+  return turns === 0 ? 0 : Math.round(context / turns);
+}
 function ua11D2QualifyingSessions(): SessionSummary[] {
   return selectedUa11Days("7d")
     .flatMap(ua11DailySessions)

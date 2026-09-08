@@ -194,30 +194,33 @@ describe("UA11 fixture matrix", () => {
     expect(directDetail.cost_equiv_u).toBeLessThanOrEqual(workspace.cost_equiv_u);
   });
 
-  it("derives workspace context means and D2 evidence from canonical session timelines", () => {
-    const workspaces = mockWorkspaces({ preset: "7d" }).data?.items ?? [];
-    const recommendations = mockRecommendations().data;
-    const d2 = recommendations?.active.find((card) => card.detector_id === "D2");
-    const evidence = d2?.evidence as { session_ids?: string[] } | undefined;
-    const d2Ids = evidence?.session_ids ?? [];
+  it.each(["24h", "7d", "30d"] as const)(
+    "derives %s workspace context means and D2 evidence from canonical session timelines",
+    (preset) => {
+      const workspaces = mockWorkspaces({ preset }).data?.items ?? [];
+      const recommendations = mockRecommendations().data;
+      const d2 = recommendations?.active.find((card) => card.detector_id === "D2");
+      const evidence = d2?.evidence as { session_ids?: string[] } | undefined;
+      const d2Ids = evidence?.session_ids ?? [];
 
-    expect(d2Ids).toHaveLength(3);
-    for (const workspace of workspaces) {
-      const sessions =
-        mockWorkspaceSessions(workspace.workspace_id, { preset: "7d" }).data?.items ?? [];
-      const totalTurns = sessions.reduce((sum, session) => sum + session.turn_count, 0);
-      const weightedContext = sessions.reduce((sum, session) => {
-        const context = mockTurnTimeline(session.session_id).data?.items[0]?.context_tokens ?? 0;
-        return sum + context * session.turn_count;
-      }, 0);
-      expect(weightedContext / totalTurns).toBeCloseTo(workspace.avg_context_per_turn ?? 0, 0);
-    }
-    for (const sessionId of d2Ids) {
-      const session = mockSession(sessionId).data;
-      expect(session?.turn_count).toBeGreaterThan(150);
-      expect(mockTurnTimeline(sessionId).data?.items[0]?.context_tokens).toBe(220_000);
-    }
-  });
+      expect(d2Ids).toHaveLength(3);
+      for (const workspace of workspaces) {
+        const sessions =
+          mockWorkspaceSessions(workspace.workspace_id, { preset }).data?.items ?? [];
+        const totalTurns = sessions.reduce((sum, session) => sum + session.turn_count, 0);
+        const weightedContext = sessions.reduce((sum, session) => {
+          const context = mockTurnTimeline(session.session_id).data?.items[0]?.context_tokens ?? 0;
+          return sum + context * session.turn_count;
+        }, 0);
+        expect(weightedContext / totalTurns).toBeCloseTo(workspace.avg_context_per_turn ?? 0, 0);
+      }
+      for (const sessionId of d2Ids) {
+        const session = mockSession(sessionId).data;
+        expect(session?.turn_count).toBeGreaterThan(150);
+        expect(mockTurnTimeline(sessionId).data?.items[0]?.context_tokens).toBe(220_000);
+      }
+    },
+  );
 
   it("renders pending measurement, unfavorable NO_EFFECT, INCONCLUSIVE, and warning-class states", async () => {
     vi.mocked(client.fetchLedger).mockResolvedValue(mockLedger());
