@@ -132,7 +132,7 @@ export const d10Detector: Detector = {
     );
     const refs = rows.map((row) => row.file_ref);
     const evidence: Record<string, unknown> = {
-      title: `Review always-loaded tools: ${Math.round(catalogTokens / 1000)}K tokens`,
+      title: `Review tool catalog: ${Math.round(catalogTokens / 1000)}K estimated tokens`,
       component: "MCP_SCHEMAS",
       file_ref: refs.length === 1 ? refs[0] : null,
       file_refs: refs,
@@ -158,7 +158,7 @@ export const d10Detector: Detector = {
       scopeKey: "D10|global|MCP_SCHEMAS",
       category: "TOOLING",
       scope_workspace_id: null,
-      lever: "Too many tools and helpers are loaded into every conversation",
+      lever: "The tool catalog exceeds its size target; actual loaded context is not measured",
       target_metric: "catalog_context_tokens",
       // R11 is required before catalog size can become a freed-headroom claim.
       modeled_savings_u_per_wk: null,

@@ -25,7 +25,8 @@ export default function OutcomeSummaryCard({ data }: Props) {
         <>
           <div className="kpi-off">N/A</div>
           <div className="kpi-off-hint">
-            Add a GitHub token, then link sessions to pull requests.
+            Configure a GitHub token and workspace repository mapping in Settings. Eligible sessions
+            are linked to pull requests automatically when matching evidence is available.
           </div>
         </>
       ) : (

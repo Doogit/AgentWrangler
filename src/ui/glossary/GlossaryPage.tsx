@@ -105,9 +105,10 @@ const SECTIONS: Section[] = [
     title: "Friction band",
     body: (
       <p>
-        A low, medium, or high indication of how often a session hit errors, retries, or dead ends.
-        Peak friction marks the worst session in this scope, so one difficult session is not hidden
-        by an average.
+        A low, elevated, or high signal based on error and failed-test counts, compactions, recorded
+        interruptions, and the share of user messages. Repeated loops are a separate signal. Peak
+        friction is the highest band among the sessions being summarized, not an average or proof of
+        wasted work.
       </p>
     ),
   },
