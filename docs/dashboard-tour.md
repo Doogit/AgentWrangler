@@ -10,6 +10,24 @@ glossary — sidebar → **"How to read this dashboard."**
   (SEC-101). Regenerate against `npx vite --mode test`.
 -->
 
+## Choose a workflow
+
+- **Where did the tokens go?** Start with [Workspaces](#workspaces), then [Sessions](#sessions).
+- **What can I change, and did it help?** Follow the [worked recommendation example](getting-started.md#example-trim-always-loaded-context), then inspect [Recommendations](#recommendations).
+- **What do the numbers mean?** Use the [glossary](#glossary-how-to-read-this-dashboard).
+- **Why is my dashboard empty?** Check [first launch and scan state](getting-started.md#first-launch).
+
+<details>
+<summary>Earlier animated synthetic dashboard preview (optional)</summary>
+
+![Animated tour of the synthetic dashboard](assets/dashboard.gif)
+
+</details>
+
+The refreshed static screenshots below show the current interface without animation. The older
+animation may differ. Sample values illustrate the views; some fixture panels are independent
+examples. Measurement claims must come from your selected window and ledger evidence.
+
 ## Overview
 
 *Where your tokens go · burn forecast · live sessions.*
@@ -30,7 +48,7 @@ glossary — sidebar → **"How to read this dashboard."**
 - **Top workspaces** — spend, share, live-now indicator, $/turn, and each workspace's top
   waste source.
 - Date presets: **24h / 7d / 30d**. A first-run onboarding card tracks daemon → first ingest →
-  first recommendation, with nudges for the three activation steps.
+  scan completion. An empty history or completed scan without recommendations is valid; optional setup is not required.
 
 A standing caveat banner keeps the economics honest: dollar figures are list-price
 equivalents — subscription plans are not billed this way; tokens drive rate limits.
@@ -91,9 +109,11 @@ The detector families:
 | Tool catalog | Heavy MCP tool definitions loaded every turn |
 
 Cards carry a confidence tier (**WARNING / ADVISORY / DIRECTIONAL / MODELED SAVINGS**), a
-scope badge (global vs. workspace-scoped), and per-card actions: **Adopt** (with undo),
+scope badge (global vs. workspace-scoped), and per-card actions: **Track this change** after
+the required action evidence and confirmation, **Acknowledge** for unmeasured warnings,
 **Dismiss/snooze**, **Install hook**, **Copy snippet**, **Copy prompt**, or **Open in Claude
-Code**. Below the cards: a published-best-practices scorecard, the **impact ledger** ("Adopted
+Code**. Tracking records a baseline; it does not prove effectiveness and has no post-track undo.
+Below the cards: a published-best-practices scorecard, the **impact ledger** ("Adopted
 changes — measured effect"), the dismissed cool-down list, and a detector-coverage strip.
 
 The standing rule: *modeled savings are never counted as achieved; only verified measured

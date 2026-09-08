@@ -57,11 +57,10 @@ describe("RecommendationsPage — states", () => {
     await waitFor(() => {
       const headline = container.querySelector(".rec-headline-text");
       expect(headline).not.toBeNull();
-      expect(headline?.textContent ?? "").not.toContain("$874.17/wk");
+      expect(headline?.textContent ?? "").toContain("Directional — no modeled savings");
     });
 
-    // Collapsed cards retain only the confidence tier and claim chip; modeled
-    // context remains available through the inline chip expander.
+    // Collapsed directional cards retain only the confidence tier and claim chip.
     const chipRow = container.querySelector(".rec-chip-row");
     expect(chipRow?.querySelector(".chip-modeled")).toBeNull();
     expect(chipRow?.querySelector(".chip-list-equiv")).toBeNull();
@@ -75,22 +74,13 @@ describe("RecommendationsPage — states", () => {
     // Card is collapsed by default — formula detail NOT yet visible.
     expect(container.textContent ?? "").not.toContain("reduction_fraction");
 
-    // Expand the card.
-    const chipExpander = container.querySelector<HTMLButtonElement>("button[data-chip-expander]");
-    if (!chipExpander) throw new Error("chip expander not found");
-    fireEvent.click(chipExpander);
-    expect(chipRow?.querySelector(".chip-modeled")).not.toBeNull();
-    expect(chipRow?.querySelector(".chip-list-equiv")?.getAttribute("title")).toContain(
-      "modeled USD equivalent",
-    );
-
     const expandBtn = container.querySelector<HTMLButtonElement>(
       "button.rec-expand-btn[aria-expanded='false']",
     );
     if (!expandBtn) throw new Error("expand button not found");
     fireEvent.click(expandBtn);
 
-    expect(container.querySelector(".rec-modeled")?.textContent ?? "").toContain("$874.17/wk");
+    expect(container.querySelector(".rec-modeled")?.textContent ?? "").not.toMatch(/\$\d/);
 
     const text = container.textContent ?? "";
     expect(text).toContain("Why this is ranked here");
@@ -135,6 +125,8 @@ describe("RecommendationsPage — states", () => {
       rec_id: "rec-D1-tier",
       detector_id: "D1",
       title: "D1 memory trim",
+      modeled_savings_u_per_wk: 2_000_000,
+      modeled_formula: { ...base.modeled_formula, kind: "MODELED", inputs: {} },
       evidence: { source_target: 80_000, component: "CLAUDE.md" },
     };
     const d4 = {

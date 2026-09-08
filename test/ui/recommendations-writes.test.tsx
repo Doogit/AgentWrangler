@@ -3,7 +3,7 @@
  * the undo UI, while RecommendationsPage obtains a fresh token and persists it.
  */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import {
@@ -54,7 +54,9 @@ async function loaded() {
     expect(screen.getByRole("button", { name: "Show guided prompt" })).toBeTruthy(),
   );
   fireEvent.click(screen.getByRole("button", { name: "Show guided prompt" }));
-  fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+  // The shared scenario also has a D1 copy action. Exercise the D2 card whose
+  // guided prompt we opened, keeping the other family present on the page.
+  fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Copy prompt" }));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "I completed the change" })).toBeTruthy(),
   );
@@ -63,8 +65,16 @@ async function loaded() {
   return result;
 }
 
+function lifecycleCard(): HTMLElement {
+  const card = screen
+    .getByRole("button", { name: "Hide guided prompt" })
+    .closest<HTMLElement>(".rec-card");
+  if (!card) throw new Error("missing guided recommendation card");
+  return card;
+}
+
 async function commit(action: "Track this change" | "Dismiss") {
-  fireEvent.click(screen.getByRole("button", { name: action }));
+  fireEvent.click(within(lifecycleCard()).getByRole("button", { name: action }));
   const pending = action === "Track this change" ? "Adopt" : action;
   expect(screen.getAllByText(`${pending} pending \u2014 Undo`).length).toBeGreaterThan(0);
   await act(async () => {
@@ -273,8 +283,8 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     await loaded();
     vi.useFakeTimers();
 
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Dismiss" }));
+    fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Dismiss" }));
     expect(screen.getAllByText("Dismiss pending \u2014 Undo").length).toBeGreaterThan(0);
     await act(async () => {
       vi.advanceTimersByTime(5_000);
@@ -283,7 +293,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     expect(screen.getByText("Saving change\u2026")).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Dismiss" }));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     finishPost?.(response(200));
     await settle();

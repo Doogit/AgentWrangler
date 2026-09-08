@@ -45,6 +45,42 @@ An onboarding checklist on the Overview tab starts with reading an ingested sess
 history with no recommendations can still complete onboarding. Calibration, GitHub outcomes,
 and guard installation are optional follow-up steps.
 
+## Example: trim always-loaded context
+
+Use this recipe only when a **CLAUDE.md / memory (D1)** recommendation identifies a source
+file and has an action you can inspect. It is a worked workflow, not a promised dollar saving.
+If you have no matching recommendation, use session inspection now and return after more history.
+
+1. Open Recommendations, expand the family, and choose **Show details** on the source-backed
+   instance. Check the named component, measured tokens, target, and caveat. Cached context
+   is relatively cheap; this may be a smaller opportunity than repeated cache writes.
+2. Choose **Copy prompt** inside that instance's expanded details, read it, and apply the proposed edit in your normal workspace
+   workflow. For example, move a long task-specific checklist out of always-loaded instructions
+   and reference it when needed. Preserve rules your project still needs; review the actual diff.
+   Copying a prompt does not apply it. The family-level prompt is a preview; copying it does
+   not enable tracking for an individual instance. Experimental assisted actions have their own confirmation.
+3. After the edit is complete, choose **I completed the change** when offered, then
+   **Track this change**. This records an available pre-change baseline and starts tracking;
+   it does not edit files or independently verify your manual attestation. Missing baseline
+   history can prevent a useful comparison. While the save is pending, wait for its result;
+   pending is not saved. A failed save is not a tracked change; read the error and use **Retry**
+   after resolving it. Tracking has no untrack or post-track rollback in this version.
+4. Continue normal work and keep the change applied during the observation window. Open the
+   **Impact ledger** on Recommendations to inspect progress. The standard window is 14 days;
+   the first five minutes cannot establish an effect. Editing a cached prefix can initially
+   cause a full-price cache write, so an immediate dollar comparison is misleading.
+5. Read the final verdict with its sample counts and raw delta. **EFFECTIVE** means the
+   supported signal improved enough under its measurement rule. **NO_EFFECT** also covers
+   an unfavorable raw delta; it is not proof of savings. **INCONCLUSIVE** means the evidence
+   was insufficient for a verdict. An observed change is not a causal experiment or a refund.
+
+Other cards have different contracts. A D5 calibration warning uses **Acknowledge** and appears
+as **Acknowledged — not measured**; it has no measurement countdown. Installing a guard,
+copying a prompt, tracking a completed change, and measuring an effect are separate actions.
+
+For a quick first visit, follow [Your first five minutes](../README.md#your-first-five-minutes).
+For the rest of the interface, use the [Dashboard tour](dashboard-tour.md).
+
 ## Optional setup
 
 ### GitHub outcomes sync

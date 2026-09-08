@@ -108,10 +108,10 @@ describe("OverviewPage — three distinct states", () => {
 
     const { container } = render(<OverviewPage />);
 
-    // Fixture spend = $5,042.23 — must appear in the DOM
+    // The verdict trend and spend card share the UA11 $7.79 selected window.
     await waitFor(() => {
       const matches = container.querySelectorAll("*");
-      const found = Array.from(matches).some((el) => el.textContent?.includes("$5,042.23"));
+      const found = Array.from(matches).some((el) => el.textContent?.includes("$7.79"));
       expect(found).toBe(true);
     });
     // No error banner
@@ -500,10 +500,10 @@ describe("OverviewPage WorkspaceTable", () => {
 
     const { container } = render(<OverviewPage />);
 
-    // orbit-api cost from fixture = $1,800.00
+    // orbit-api cost from the coherent fixture = $2.60.
     await waitFor(() => {
       const found = Array.from(container.querySelectorAll("td")).some(
-        (td) => td.textContent?.trim() === "$1,800.00",
+        (td) => td.textContent?.trim() === "$2.60",
       );
       expect(found).toBe(true);
     });

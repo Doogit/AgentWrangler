@@ -387,6 +387,40 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     });
     expect(recState("rec-D1-settling")).toBe("MEASURING"); // window still open → stays
   });
+
+  it("carries an adopted baseline through the 14-day pass into the ledger API", () => {
+    const adoptedMs = T0;
+    seedD1Rec("rec-D1-ledger-cycle", 1_000, adoptedMs);
+
+    // The first pass opens measurement after the settling window, while the
+    // deadline remains 14 days from the injected adoption time.
+    runMeasurementPass(db, new Date(adoptedMs + MIN_SETTLING_DAYS * MS_PER_DAY), {
+      force: true,
+    });
+    expect(recState("rec-D1-ledger-cycle")).toBe("MEASURING");
+
+    insertHistoryRow({
+      workspaceId: "ws-alpha",
+      component: "CLAUDE_MD",
+      fileRef: "/fake/CLAUDE.md",
+      hash: "hash-ledger-follow-up",
+      tokens: 600,
+      observedAtMs: adoptedMs + MS_PER_DAY,
+    });
+    runMeasurementPass(db, new Date(adoptedMs + (AFTER_WINDOW_DAYS + 1) * MS_PER_DAY), {
+      force: true,
+    });
+
+    const entry = listLedger().data?.entries.find((row) => row.rec_id === "rec-D1-ledger-cycle");
+    expect(entry).toMatchObject({ state: "MEASURED_EFFECTIVE" });
+    expect(entry?.effects).toEqual([
+      expect.objectContaining({
+        before_value: 1_000,
+        after_value: 600,
+        verdict: "EFFECTIVE",
+      }),
+    ]);
+  });
 });
 
 describe("W4 measurement pass — D1 threshold boundaries (§7c)", () => {

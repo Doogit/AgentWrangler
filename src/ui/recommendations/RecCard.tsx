@@ -1273,7 +1273,7 @@ function SingleRecCard({
             </a>
           </div>
         )}
-        {!grouped && route === "copy" && promptArtifact !== null && (
+        {(!grouped || expanded) && route === "copy" && promptArtifact !== null && (
           <div className="rec-prompt-artifact" data-flavor={promptArtifact.flavor}>
             <label className="rec-section-label" htmlFor={promptArtifactId}>
               Copy prompt
@@ -1304,7 +1304,7 @@ function SingleRecCard({
           </div>
         )}
         {!grouped && generatedSnippet2 && <SnippetBlock snippet={generatedSnippet2} />}
-        {!grouped && rec.detector_id !== "D5" && actionEvidence === "manual" && !manualAttested && (
+        {rec.detector_id !== "D5" && actionEvidence === "manual" && !manualAttested && (
           <div className="rec-tracking-gate">
             <p>
               A copied prompt or launched terminal is not proof of a change. Confirm only after you
@@ -1319,8 +1319,7 @@ function SingleRecCard({
             </button>
           </div>
         )}
-        {!grouped &&
-          rec.detector_id !== "D5" &&
+        {rec.detector_id !== "D5" &&
           actionEvidence !== "none" &&
           (actionEvidence === "supported" || manualAttested) &&
           !isAdopted && (
@@ -1817,6 +1816,10 @@ function GroupedRecCard({
               {artifactCopied ? "Copied ✓" : "Copy prompt"}
             </button>
             <span className="rec-prompt-scope-caption">{scopePromptCaption(representative)}</span>
+            <p className="rec-actions-hint">
+              This previews the first recommendation. To track a change, expand that
+              recommendation's details, copy its prompt, complete the change, then confirm it there.
+            </p>
           </div>
         )}
         {!isMinorItems && generatedSnippet && (

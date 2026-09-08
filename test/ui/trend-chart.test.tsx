@@ -106,16 +106,22 @@ describe("TrendChart — three distinct UI states", () => {
     expect(container.querySelector(".chip-list-equiv")).not.toBeNull();
   });
 
-  it("renders bounded adoption marker labels on the trend charts", async () => {
+  it("renders bounded adoption markers on all charts with multiple sessions per date", async () => {
     const trendResponse = mockTrends({ preset: "7d" });
     if (!trendResponse.data) throw new Error("fixture must have data");
+    // Repeated date categories must share a coordinate, rather than becoming
+    // numeric indexes that cannot resolve a date-based reference line.
+    const sessionDates = trendResponse.data.sessions.map((session) =>
+      session.first_turn_at.slice(0, 10),
+    );
+    expect(new Set(sessionDates).size).toBeLessThan(sessionDates.length);
     trendResponse.data.adoption_markers = [
       {
         rec_id: "rec-marker-test",
         detector_id: "D8",
         lever: "Adopt cache cleanup",
-        adopted_at: "2026-08-24T09:00:00.000Z",
-        bucket: "2026-08-24",
+        adopted_at: "2026-08-20T09:00:00.000Z",
+        bucket: "2026-08-20",
       },
     ];
 
@@ -124,6 +130,11 @@ describe("TrendChart — three distinct UI states", () => {
     await waitFor(() =>
       expect(container.querySelectorAll(".recharts-reference-line-line")).toHaveLength(3),
     );
+    expect(
+      screen
+        .getByText("Session cost over time · each dot = one reconciled session")
+        .parentElement?.querySelectorAll(".recharts-reference-line-line"),
+    ).toHaveLength(1);
     expect(screen.getAllByText("Adopt cache cleanup").length).toBeGreaterThanOrEqual(3);
   });
 
@@ -136,8 +147,8 @@ describe("TrendChart — three distinct UI states", () => {
         rec_id: "rec-long-marker-test",
         detector_id: "D8",
         lever: fullLabel,
-        adopted_at: "2026-08-24T09:00:00.000Z",
-        bucket: "2026-08-24",
+        adopted_at: "2026-08-20T09:00:00.000Z",
+        bucket: "2026-08-20",
       },
     ];
 
@@ -158,10 +169,16 @@ describe("TrendChart — three distinct UI states", () => {
   it("sorts session scatter points by their source date", () => {
     const trendResponse = mockTrends({ preset: "7d" });
     if (!trendResponse.data) throw new Error("fixture must have data");
-    const sessions = [...trendResponse.data.sessions].reverse();
+    const sessions = ["2026-08-18", "2026-08-16", "2026-08-17"].map((date) => {
+      const session = trendResponse.data?.sessions.find((row) =>
+        row.first_turn_at.startsWith(date),
+      );
+      if (!session) throw new Error("missing dated session fixture");
+      return session;
+    });
     const points = buildSessionScatterData({ ...trendResponse.data, sessions });
 
-    expect(points.map((point) => point.x)).toEqual(["2026-08-17", "2026-08-18", "2026-08-19"]);
+    expect(points.map((point) => point.x)).toEqual(["2026-08-16", "2026-08-17", "2026-08-18"]);
   });
 
   it("thins x-axis ticks only after the chart has more than eight points", () => {
@@ -207,8 +224,8 @@ describe("TrendChart — empty data shapes", () => {
           rec_id: "rec-marker-only",
           detector_id: "D8",
           lever: "Adopt cache cleanup",
-          adopted_at: "2026-08-24T09:00:00.000Z",
-          bucket: "2026-08-24",
+          adopted_at: "2026-08-20T09:00:00.000Z",
+          bucket: "2026-08-20",
         },
       ],
     };

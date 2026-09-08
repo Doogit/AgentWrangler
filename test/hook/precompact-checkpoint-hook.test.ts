@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   enforceRetention,
@@ -70,6 +70,38 @@ describe("writeCheckpoint", () => {
     writeCheckpoint(transcript, "s", out);
     expect(fs.readdirSync(out)).toHaveLength(2);
   });
+
+  it("retries an exclusive-copy collision without replacing a checkpoint", () => {
+    const dir = tmpDir();
+    const transcript = path.join(dir, "src.jsonl");
+    fs.writeFileSync(transcript, "new checkpoint");
+    const out = path.join(dir, "out");
+    const copy = fs.copyFileSync;
+    const copySpy = vi
+      .spyOn(fs, "copyFileSync")
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      })
+      .mockImplementation(copy);
+
+    const dest = writeCheckpoint(transcript, "s", out);
+
+    expect(dest).not.toBeNull();
+    expect(copySpy).toHaveBeenCalledTimes(2);
+    expect(fs.readFileSync(dest as string, "utf8")).toBe("new checkpoint");
+  });
+
+  it("returns null after bounded exclusive-copy collisions", () => {
+    const dir = tmpDir();
+    const transcript = path.join(dir, "src.jsonl");
+    fs.writeFileSync(transcript, "x");
+    const copySpy = vi.spyOn(fs, "copyFileSync").mockImplementation(() => {
+      throw Object.assign(new Error("exists"), { code: "EEXIST" });
+    });
+
+    expect(writeCheckpoint(transcript, "s", path.join(dir, "out"))).toBeNull();
+    expect(copySpy).toHaveBeenCalledTimes(16);
+  });
 });
 
 describe("enforceRetention", () => {
@@ -119,6 +151,18 @@ describe("enforceRetention", () => {
     enforceRetention(dir, 20, 4);
 
     expect(fs.readdirSync(dir)).toEqual([newest]);
+  });
+
+  it("recognizes both legacy and collision-resistant snapshot names for retention", () => {
+    const dir = tmpDir();
+    const legacy = "s-2026-01-01T00-00-00-000Z-000001.jsonl";
+    const collisionResistant = "s-2026-01-02T00-00-00-000Z-000001-aabbccddeeff.jsonl";
+    fs.writeFileSync(path.join(dir, legacy), "old");
+    fs.writeFileSync(path.join(dir, collisionResistant), "new");
+
+    enforceRetention(dir, 1, Number.MAX_SAFE_INTEGER);
+
+    expect(fs.readdirSync(dir)).toEqual([collisionResistant]);
   });
 
   it("leaves malformed jsonl files outside the checkpoint retention set", () => {
@@ -214,6 +258,35 @@ describe("precompact hook end-to-end (spawned)", () => {
     const files = fs.readdirSync(out);
     expect(files).toHaveLength(1);
     expect(files[0]).toContain("session_xyz");
+  });
+
+  it("keeps distinct contents from two fresh hook processes at the same session and millisecond", () => {
+    const dir = tmpDir();
+    const out = path.join(dir, "checkpoints");
+    const sessionId = "same-session";
+    const now = "2026-09-07T12:34:56.789Z";
+    const sources = ["first process\n", "second process\n"].map((content, index) => {
+      const source = path.join(dir, `source-${index}.jsonl`);
+      fs.writeFileSync(source, content);
+      return source;
+    });
+    const hookUrl = pathToFileURL(HOOK_PATH).href;
+
+    for (const source of sources) {
+      const script = `import { writeCheckpoint } from ${JSON.stringify(hookUrl)};
+const dest = writeCheckpoint(${JSON.stringify(source)}, ${JSON.stringify(sessionId)}, ${JSON.stringify(out)}, new Date(${JSON.stringify(now)}));
+if (!dest) process.exitCode = 2;`;
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+        encoding: "utf8",
+      });
+      expect(result.status).toBe(0);
+    }
+
+    const contents = fs
+      .readdirSync(out)
+      .map((name) => fs.readFileSync(path.join(out, name), "utf8"));
+    expect(contents).toHaveLength(2);
+    expect(contents.sort()).toEqual(["first process\n", "second process\n"]);
   });
 
   it("no-ops under CI", () => {

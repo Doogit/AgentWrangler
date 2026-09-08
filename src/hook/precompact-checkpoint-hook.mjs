@@ -11,6 +11,7 @@
  * committed). The hook writes no transcript content to stdout/stderr.
  */
 
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,9 +20,11 @@ import { fileURLToPath } from "node:url";
 
 const MAX_COUNT = 20;
 const MAX_BYTES = 500 * 1024 * 1024; // 500 MiB across all snapshots
+const MAX_COLLISION_ATTEMPTS = 16;
 
-// Monotonic counter so two firings in the same millisecond get distinct filenames
-// that still sort in write order (the timestamp dominates; this breaks same-ms ties).
+// A per-process counter preserves local write ordering.  The random token prevents
+// separately spawned hooks with the same session and millisecond from choosing the
+// same name; exclusive creation below is the final no-overwrite guard.
 let snapshotCounter = 0;
 
 /** The directory snapshots are written to (overridable for tests). */
@@ -33,7 +36,8 @@ export function checkpointDir() {
 export function snapshotName(sessionId, now) {
   snapshotCounter = (snapshotCounter + 1) % 1_000_000;
   const stamp = now.toISOString().replace(/[:.]/g, "-");
-  return `${encodeURIComponent(sessionId)}-${stamp}-${String(snapshotCounter).padStart(6, "0")}.jsonl`;
+  const counter = String(snapshotCounter).padStart(6, "0");
+  return `${encodeURIComponent(sessionId)}-${stamp}-${counter}-${randomBytes(6).toString("hex")}.jsonl`;
 }
 
 /**
@@ -43,14 +47,22 @@ export function snapshotName(sessionId, now) {
 export function writeCheckpoint(transcriptPath, sessionId, dir, now = new Date()) {
   if (typeof transcriptPath !== "string" || !fs.existsSync(transcriptPath)) return null;
   fs.mkdirSync(dir, { recursive: true });
-  const dest = path.join(dir, snapshotName(sessionId, now));
-  fs.copyFileSync(transcriptPath, dest);
-  try {
-    fs.chmodSync(dest, 0o600);
-  } catch {
-    // chmod is a no-op boundary on Windows; the user-profile ACL is the equivalent guard.
+  for (let attempt = 0; attempt < MAX_COLLISION_ATTEMPTS; attempt += 1) {
+    const dest = path.join(dir, snapshotName(sessionId, now));
+    try {
+      fs.copyFileSync(transcriptPath, dest, fs.constants.COPYFILE_EXCL);
+    } catch (error) {
+      if (error?.code === "EEXIST") continue;
+      throw error;
+    }
+    try {
+      fs.chmodSync(dest, 0o600);
+    } catch {
+      // chmod is a no-op boundary on Windows; the user-profile ACL is the equivalent guard.
+    }
+    return dest;
   }
-  return dest;
+  return null;
 }
 
 /**
@@ -58,9 +70,10 @@ export function writeCheckpoint(transcriptPath, sessionId, dir, now = new Date()
  * not create. Malformed .jsonl files are deliberately left alone by retention.
  */
 function snapshotTimestamp(name) {
-  const match = /-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-\d{6}\.jsonl$/.exec(
-    name,
-  );
+  const match =
+    /-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-\d{6}(?:-[a-f0-9]{12})?\.jsonl$/.exec(
+      name,
+    );
   if (!match) return null;
   const [, year, month, day, hour, minute, second, millisecond] = match;
   const timestamp = Date.parse(
