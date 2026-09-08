@@ -51,9 +51,10 @@ describe("getGlobalOverview", () => {
     expect(d.unpriced_turns).toBe(0);
     expect(d.forecast.state).toBe("OFF"); // fixture limit_tokens is null
 
-    const models = d.model_mix.map((m) => m.model).sort();
-    expect(models).toEqual(["claude-haiku", "claude-sonnet"]);
-    expect(d.context_per_turn.length).toBe(2);
+    // Price-ordered, most-expensive tier first: sonnet ($3 input) before haiku ($1).
+    const models = d.model_mix.map((m) => m.model);
+    expect(models).toEqual(["claude-sonnet", "claude-haiku"]);
+    expect(d.context_per_turn.map((r) => r.model)).toEqual(["claude-sonnet", "claude-haiku"]);
 
     // Envelope.
     expect(res.meta.metric_definition_version).toBe("observe-1");

@@ -110,7 +110,15 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
     warn_threshold_days: 2,
   };
 
+  // Ordered as getGlobalOverview emits them: most-expensive tier first.
   const context_per_turn: ContextPerTurnRow[] = [
+    {
+      model: "claude-fable-5",
+      n: 119,
+      avg_context_per_turn: 278_000,
+      avg_output_per_turn: 620,
+      usd_per_turn: 0.018,
+    },
     {
       model: "claude-opus-5",
       n: 8089,
@@ -126,13 +134,6 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
       usd_per_turn: 0.101,
     },
     {
-      model: "claude-fable-5",
-      n: 119,
-      avg_context_per_turn: 278_000,
-      avg_output_per_turn: 620,
-      usd_per_turn: 0.018,
-    },
-    {
       model: "claude-haiku-4-5",
       n: 96,
       avg_context_per_turn: 61_000,
@@ -142,9 +143,9 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
   ];
 
   const model_mix: ModelMixRow[] = [
+    { model: "claude-fable-5", turns: 119 },
     { model: "claude-opus-5", turns: 8089 },
     { model: "claude-sonnet-5", turns: 3767 },
-    { model: "claude-fable-5", turns: 119 },
     { model: "claude-haiku-4-5", turns: 96 },
   ];
 

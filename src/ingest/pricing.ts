@@ -98,6 +98,16 @@ export function modelTier(model: string | null | undefined): string | null {
 export const PREMIUM_MODEL_SQL =
   "(model LIKE '%opus%' OR model LIKE '%fable%' OR model LIKE '%mythos%')";
 
+/**
+ * Input list price ($/MTok) for a model, for ordering model lists
+ * most-expensive first. Derived from LIST_PRICES via modelTier so a new tier
+ * automatically sorts by its price; unpriceable models return 0 (sort last).
+ */
+export function modelInputListPrice(model: string): number {
+  const tier = modelTier(model);
+  return tier === null ? 0 : (LIST_PRICES[tier]?.[0] ?? 0);
+}
+
 function addDaysIso(iso: string, days: number): string {
   const d = new Date(iso);
   d.setUTCDate(d.getUTCDate() + days);

@@ -161,12 +161,13 @@ describe("OverviewPage — three distinct states", () => {
 
     const { container } = render(<OverviewPage />);
 
-    // Fixture context_per_turn has 4 models (Opus, Sonnet, Fable, Haiku) — all render.
+    // Fixture context_per_turn has 4 models (Fable, Opus, Sonnet, Haiku) — all render.
     await waitFor(() => {
       expect(container.querySelectorAll("[data-testid='context-per-turn-cell']").length).toBe(4);
     });
-    const section = container.querySelector("[data-testid='context-per-turn-section']");
-    expect(section?.textContent).toContain("Fable-5");
+    // Most-expensive tier renders first (price-ordered, not usage-ordered).
+    const cells = container.querySelectorAll("[data-testid='context-per-turn-cell']");
+    expect(cells[0]?.textContent).toContain("Fable-5");
   });
 
   it("shows empty / N/A state when data is null (state 3b: ok but no data)", async () => {

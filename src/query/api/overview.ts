@@ -12,7 +12,7 @@
 
 import { loadConfig } from "../../daemon/config.js";
 import type { Db } from "../../db/open.js";
-import { PREMIUM_MODEL_SQL } from "../../ingest/pricing.js";
+import { PREMIUM_MODEL_SQL, modelInputListPrice } from "../../ingest/pricing.js";
 import { getQueryDb } from "../db-context.js";
 import type {
   ApiResponse,
@@ -450,14 +450,23 @@ export function getGlobalOverview(filters: WindowFilter): ApiResponse<GlobalOver
   // counts sum to `turns_total`, NOT the reconciled `turns`. This is the
   // deliberate spend-vs-context difference (Data Model §2/§3) — a consumer must
   // not expect model_mix turns to reconcile with the reconciled `turns` figure.
-  const context_per_turn: ContextPerTurnRow[] = ctx.map((r) => ({
+  // Display order: most-expensive tier first (then turns, then name) — the
+  // premium models matter most per turn, and a price-stable order keeps the
+  // index-keyed card colors from shuffling as usage volume shifts.
+  const ctxSorted = [...ctx].sort(
+    (a, b) =>
+      modelInputListPrice(b.model) - modelInputListPrice(a.model) ||
+      b.n - a.n ||
+      a.model.localeCompare(b.model),
+  );
+  const context_per_turn: ContextPerTurnRow[] = ctxSorted.map((r) => ({
     model: r.model,
     n: r.n,
     avg_context_per_turn: r.avg_context_per_turn,
     avg_output_per_turn: r.avg_output_per_turn,
     usd_per_turn: r.usd_per_turn,
   }));
-  const model_mix: ModelMixRow[] = ctx.map((r) => ({ model: r.model, turns: r.n }));
+  const model_mix: ModelMixRow[] = ctxSorted.map((r) => ({ model: r.model, turns: r.n }));
 
   const data: GlobalOverview = {
     cost_equiv_u: g.cost_equiv_u,
