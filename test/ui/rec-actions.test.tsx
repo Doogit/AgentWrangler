@@ -13,7 +13,7 @@
  *   - No duplicated steps
  */
 
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BoundedStep,
@@ -29,6 +29,7 @@ import {
   mockRecommendations,
 } from "../../src/ui/api/fixtures";
 import { setExperimentalActions } from "../../src/ui/hooks/useExperimentalActions";
+import ImpactLedger from "../../src/ui/recommendations/ImpactLedger";
 import RecCard, { __resetHookInstallCache } from "../../src/ui/recommendations/RecCard";
 import RecommendationsPage from "../../src/ui/recommendations/RecommendationsPage";
 
@@ -591,6 +592,87 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     expect(vi.mocked(client.fetchRecommendations).mock.calls.length).toBeGreaterThan(1);
   });
 
+  it("copies and attests a change before tracking it, then exposes the measuring ledger state", async () => {
+    const initial = mockRecommendations();
+    const rec = initial.data?.active[0];
+    const measuring = mockLedger().data?.entries[1];
+    if (!initial.data || !rec || !measuring) throw new Error("missing controlled workflow fixture");
+
+    const tracked = structuredClone(initial);
+    if (tracked.data === null) throw new Error("tracked fixture data must be populated");
+    tracked.data.active = [];
+    tracked.data.active_groups = [];
+    tracked.data.adopted = [{ ...rec, state: "MEASURING" }];
+    let ledger: ReturnType<typeof mockLedger> = {
+      ...mockLedger(),
+      data: { entries: [], cap_read_coeff: 0.1 },
+    };
+    vi.mocked(client.fetchRecommendations)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue(tracked);
+    vi.mocked(client.fetchLedger).mockImplementation(() => Promise.resolve(ledger));
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/token") {
+        return { ok: true, json: async () => ({ token: "synthetic-token" }) };
+      }
+      if (url === "/api/recommendations/adopt") {
+        ledger = {
+          ...mockLedger(),
+          data: {
+            entries: [{ ...measuring, rec_id: rec.rec_id }],
+            cap_read_coeff: 0.1,
+          },
+        };
+        return { ok: true, json: async () => ({}) };
+      }
+      return { ok: false, status: 404, text: async () => "unexpected request" };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const page = render(<RecommendationsPage />);
+    await waitFor(() => expect(page.container.querySelector(".rec-card")).not.toBeNull());
+    vi.useFakeTimers();
+    const guidedToggle = page.container.querySelector<HTMLButtonElement>(".rec-guided-toggle");
+    if (!guidedToggle) throw new Error("guided prompt toggle not found");
+    fireEvent.click(guidedToggle);
+    const copyPrompt = page.container.querySelector<HTMLButtonElement>(
+      ".rec-prompt-artifact button",
+    );
+    if (!copyPrompt) throw new Error("copy prompt button not found");
+    fireEvent.click(copyPrompt);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const completeButton = Array.from(
+      page.container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "I completed the change");
+    if (!completeButton) throw new Error("completion attestation not found");
+    fireEvent.click(completeButton);
+    const trackButton = Array.from(
+      page.container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Track this change");
+    if (!trackButton) throw new Error("track change button not found");
+    fireEvent.click(trackButton);
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/recommendations/adopt",
+      expect.objectContaining({ body: JSON.stringify({ rec_id: rec.rec_id }), method: "POST" }),
+    );
+
+    // Re-mount at the ledger's independently fetched API boundary. No action
+    // runner is invoked: the controlled response is the post-track state.
+    page.unmount();
+    vi.useRealTimers();
+    const ledgerView = render(<ImpactLedger />);
+    await waitFor(() => expect(ledgerView.container.textContent).toContain("Measuring"));
+    expect(ledgerView.container.textContent).toContain("Probe checking after");
+  });
+
   it("shows adopted recs in the adopted section when present", async () => {
     const fixture = mockRecommendations();
     const adoptedRec = makeRec({
@@ -686,9 +768,55 @@ describe("RecCard — RV4 primary-action routing", () => {
     expect(getAllByRole("button", { name: "Copy prompt" })).toHaveLength(1);
   });
 
-  it("copy-route group renders exactly one Copy prompt action", () => {
+  it("collapsed copy-route group renders exactly one Copy prompt action", () => {
     const { getAllByRole } = render(<RecCard group={makeGroup()} rank={1} />);
     expect(getAllByRole("button", { name: "Copy prompt" })).toHaveLength(1);
+  });
+
+  it("keeps grouped D1 copy, attestation and tracking owned by the selected member", async () => {
+    vi.useFakeTimers();
+    const onAdopt = vi.fn().mockResolvedValue(undefined);
+    const recs = ["first", "second"].map((name) => ({
+      ...makeCopyRec(),
+      rec_id: `rec-${name}`,
+      file_ref: `C:/synthetic/${name}/CLAUDE.md`,
+    }));
+    const view = render(<RecCard group={makeGroup({ recs })} rank={1} onAdopt={onAdopt} />);
+    // The representative preview must grant no member evidence.
+    fireEvent.click(view.getByRole("button", { name: "Copy prompt" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    for (const toggle of view.getAllByRole("button", { name: /Show details/ })) {
+      fireEvent.click(toggle);
+    }
+    const rows = view.container.querySelectorAll(".rec-group-members > .rec-session-row");
+    expect(rows).toHaveLength(2);
+    const first = within(rows[0] as HTMLElement);
+    const second = within(rows[1] as HTMLElement);
+    expect(view.queryByRole("button", { name: "I completed the change" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Track this change" })).toBeNull();
+    expect(first.getByRole("button", { name: "Copy prompt" })).toBeDefined();
+    fireEvent.click(second.getByRole("button", { name: "Copy prompt" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(
+      expect.stringContaining("C:/synthetic/second/CLAUDE.md"),
+    );
+    expect(second.queryByRole("button", { name: "Track this change" })).toBeNull();
+    fireEvent.click(second.getByRole("button", { name: "I completed the change" }));
+    expect(second.getByText(/Tracking records a baseline/)).toBeDefined();
+    fireEvent.click(second.getByRole("button", { name: "Track this change" }));
+    expect(onAdopt).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(onAdopt).toHaveBeenCalledTimes(1);
+    expect(onAdopt).toHaveBeenCalledWith("rec-second");
+    expect(first.queryByRole("button", { name: "I completed the change" })).toBeNull();
+    expect(first.queryByRole("button", { name: "Track this change" })).toBeNull();
+    expect(first.getByRole("button", { name: "Copy prompt" })).toBeDefined();
   });
 
   it("no card renders the removed 'Copy Claude Code prompt' action", () => {

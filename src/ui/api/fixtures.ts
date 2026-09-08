@@ -59,6 +59,117 @@ import type { DaemonStatus } from "./client";
 // 1 USD = 1,000,000 micro-USD
 const MICRO = 1_000_000;
 
+/**
+ * The shared, deliberately small UA11 demo scenario.  Keep all selected-window
+ * spend surfaces derived from these values: the Overview total, workspace rows,
+ * and trend buckets must describe the same observation.
+ */
+export const UA11_SCENARIO = {
+  window: { from: "2026-08-16T00:00:00.000Z", to: "2026-08-23T00:00:00.000Z", preset: "7d" },
+  spend_u: 7_790_000,
+  workspace_spend_u: [2_600_000, 1_750_000, 1_200_000, 950_000, 1_290_000],
+  trend_spend_u: [1_200_000, 980_000, 2_100_000, 750_000, 1_560_000, 880_000, 320_000],
+} as const;
+
+const UA11_WORKSPACE_IDENTITIES = [
+  { workspace_id: "ws-1", project_slug: "orbit-api", repo_name: "orbit-api" },
+  { workspace_id: "ws-2", project_slug: "support-portal", repo_name: "support-portal" },
+  { workspace_id: "ws-3", project_slug: "data-janitor", repo_name: "data-janitor" },
+  { workspace_id: "ws-4", project_slug: "admin-console", repo_name: "admin-console" },
+  { workspace_id: "ws-5", project_slug: "AgentWrangler", repo_name: "AgentWrangler" },
+] as const;
+
+type Ua11Preset = "24h" | "7d" | "30d";
+type Ua11DailyObservation = { bucket: string; cost_equiv_u: number; turns: number };
+
+const UA11_OLDER_DAILY_SPEND = Array.from({ length: 23 }, (_, index) => ({
+  bucket: new Date(Date.UTC(2026, 6, 24 + index)).toISOString().slice(0, 10),
+  cost_equiv_u: 100_000,
+  turns: 10,
+}));
+const UA11_DAILY_OBSERVATIONS: readonly Ua11DailyObservation[] = [
+  ...UA11_OLDER_DAILY_SPEND,
+  ...UA11_SCENARIO.trend_spend_u.map((cost_equiv_u, index) => ({
+    bucket: new Date(Date.UTC(2026, 7, 16 + index)).toISOString().slice(0, 10),
+    cost_equiv_u,
+    turns: [45, 38, 72, 28, 59, 33, 12][index] ?? 0,
+  })),
+];
+
+function selectedUa11Days(preset: Ua11Preset): readonly Ua11DailyObservation[] {
+  const days = preset === "24h" ? 1 : preset === "7d" ? 7 : 30;
+  return UA11_DAILY_OBSERVATIONS.slice(-days);
+}
+
+function splitWhole(total: number, weights: readonly number[]): number[] {
+  const values = weights.map((weight) => Math.floor(total * weight));
+  values[values.length - 1] = total - values.slice(0, -1).reduce((sum, value) => sum + value, 0);
+  return values;
+}
+
+function selectedUa11Spend(preset: Ua11Preset): number {
+  return selectedUa11Days(preset).reduce((sum, day) => sum + day.cost_equiv_u, 0);
+}
+
+const UA11_WORKSPACE_WEIGHTS = [
+  2_600 / 7_790,
+  1_750 / 7_790,
+  1_200 / 7_790,
+  950 / 7_790,
+  1_290 / 7_790,
+] as const;
+const UA11_WORKSPACE_TURN_WEIGHTS = [0.35, 0.23, 0.18, 0.14, 0.1] as const;
+// Price order matches the production Overview contract; Trends uses the same split.
+const UA11_MODELS = [
+  "claude-fable-5",
+  "claude-opus-5",
+  "claude-sonnet-5",
+  "claude-haiku-4-5",
+] as const;
+const UA11_MODEL_WEIGHTS = [0.1, 0.5, 0.3, 0.1] as const;
+
+/** Preserve the stated seven-day workspace totals while keeping every day additive. */
+function ua11WorkspaceSpendSplit(day: Ua11DailyObservation): number[] {
+  const scenarioDay = Number(day.bucket.slice(-2)) - 16;
+  if (day.bucket < "2026-08-16" || scenarioDay < 0 || scenarioDay > 6) {
+    return splitWhole(day.cost_equiv_u, UA11_WORKSPACE_WEIGHTS);
+  }
+  if (scenarioDay < 6) return splitWhole(day.cost_equiv_u, UA11_WORKSPACE_WEIGHTS);
+  const assigned = UA11_SCENARIO.trend_spend_u.slice(0, 6).reduce(
+    (totals, spend) =>
+      totals.map((total, index) => total + (splitWhole(spend, UA11_WORKSPACE_WEIGHTS)[index] ?? 0)),
+    Array.from({ length: UA11_WORKSPACE_IDENTITIES.length }, () => 0),
+  );
+  return UA11_SCENARIO.workspace_spend_u.map((total, index) => total - (assigned[index] ?? 0));
+}
+
+function selectedUa11WorkspaceTotals(
+  preset: Ua11Preset,
+  field: "cost_equiv_u" | "turns",
+): number[] {
+  return selectedUa11Days(preset).reduce(
+    (totals, day) => {
+      const values = splitWhole(
+        day[field],
+        field === "cost_equiv_u" ? UA11_WORKSPACE_WEIGHTS : UA11_WORKSPACE_TURN_WEIGHTS,
+      );
+      const normalizedValues = field === "cost_equiv_u" ? ua11WorkspaceSpendSplit(day) : values;
+      return totals.map((total, index) => total + (normalizedValues[index] ?? 0));
+    },
+    Array.from({ length: UA11_WORKSPACE_IDENTITIES.length }, () => 0),
+  );
+}
+
+function selectedUa11ModelTotals(preset: Ua11Preset, field: "cost_equiv_u" | "turns"): number[] {
+  return selectedUa11Days(preset).reduce(
+    (totals, day) => {
+      const values = splitWhole(day[field], UA11_MODEL_WEIGHTS);
+      return totals.map((total, index) => total + (values[index] ?? 0));
+    },
+    UA11_MODELS.map(() => 0),
+  );
+}
+
 function windowFor(preset: "24h" | "7d" | "30d"): { from: string; to: string; preset: string } {
   const to = new Date("2026-08-23T00:00:00Z");
   const hours = preset === "24h" ? 24 : preset === "7d" ? 168 : 720;
@@ -100,59 +211,38 @@ function baseMeta(
 export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOverview> {
   const preset = filter.preset ?? "7d";
   const window = windowFor(preset);
+  const days = selectedUa11Days(preset);
+  const totalSpend = selectedUa11Spend(preset);
+  const totalTurns = days.reduce((sum, day) => sum + day.turns, 0);
 
   const forecast: BurnForecast = {
     state: "OFF",
     limit_tokens: null,
-    tokens_used: 2_450_000_000,
+    tokens_used: totalTurns * 12_000,
     tokens_per_day: null,
     projected_exhaustion_jd: null,
     warn_threshold_days: 2,
   };
 
+  const modelTurns = selectedUa11ModelTotals(preset, "turns");
+  const modelSpend = selectedUa11ModelTotals(preset, "cost_equiv_u");
   // Ordered as getGlobalOverview emits them: most-expensive tier first.
-  const context_per_turn: ContextPerTurnRow[] = [
-    {
-      model: "claude-fable-5",
-      n: 119,
-      avg_context_per_turn: 278_000,
-      avg_output_per_turn: 620,
-      usd_per_turn: 0.018,
-    },
-    {
-      model: "claude-opus-5",
-      n: 8089,
-      avg_context_per_turn: 238_000,
-      avg_output_per_turn: 1146,
-      usd_per_turn: 0.624,
-    },
-    {
-      model: "claude-sonnet-5",
-      n: 3767,
-      avg_context_per_turn: 248_000,
-      avg_output_per_turn: 890,
-      usd_per_turn: 0.101,
-    },
-    {
-      model: "claude-haiku-4-5",
-      n: 96,
-      avg_context_per_turn: 61_000,
-      avg_output_per_turn: 940,
-      usd_per_turn: 0.004,
-    },
-  ];
-
-  const model_mix: ModelMixRow[] = [
-    { model: "claude-fable-5", turns: 119 },
-    { model: "claude-opus-5", turns: 8089 },
-    { model: "claude-sonnet-5", turns: 3767 },
-    { model: "claude-haiku-4-5", turns: 96 },
-  ];
+  const context_per_turn: ContextPerTurnRow[] = UA11_MODELS.map((model, index) => ({
+    model,
+    n: modelTurns[index] ?? 0,
+    avg_context_per_turn: [278_000, 238_000, 248_000, 61_000][index] ?? 0,
+    avg_output_per_turn: [620, 1146, 890, 940][index] ?? 0,
+    usd_per_turn: (modelSpend[index] ?? 0) / MICRO / (modelTurns[index] || 1),
+  }));
+  const model_mix: ModelMixRow[] = UA11_MODELS.map((model, index) => ({
+    model,
+    turns: modelTurns[index] ?? 0,
+  }));
 
   const data: GlobalOverview = {
-    cost_equiv_u: Math.round(5042.23 * MICRO),
-    turns: 11_975,
-    turns_total: 20_616,
+    cost_equiv_u: totalSpend,
+    turns: totalTurns,
+    turns_total: totalTurns,
     unpriced_turns: 0,
     live_sessions: 0,
     forecast,
@@ -166,7 +256,19 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
 export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<WorkspaceSummary>> {
   const preset = filter.preset ?? "7d";
   const window = windowFor(preset);
-  const total = 5042.23 * MICRO;
+  const total = selectedUa11Spend(preset);
+  const workspaceSpend = selectedUa11WorkspaceTotals(preset, "cost_equiv_u");
+  const workspaceTurns = selectedUa11WorkspaceTotals(preset, "turns");
+  const orbitSpend = workspaceSpend[0] ?? 0;
+  const supportSpend = workspaceSpend[1] ?? 0;
+  const janitorSpend = workspaceSpend[2] ?? 0;
+  const adminSpend = workspaceSpend[3] ?? 0;
+  const wranglerSpend = workspaceSpend[4] ?? 0;
+  const orbitTurns = workspaceTurns[0] ?? 0;
+  const supportTurns = workspaceTurns[1] ?? 0;
+  const janitorTurns = workspaceTurns[2] ?? 0;
+  const adminTurns = workspaceTurns[3] ?? 0;
+  const wranglerTurns = workspaceTurns[4] ?? 0;
 
   const items: WorkspaceSummary[] = [
     {
@@ -175,11 +277,11 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       repo_path: "C:/Users/dev/GitHub/orbit-api",
       repo_owner: "acme",
       repo_name: "orbit-api",
-      cost_equiv_u: Math.round(1800 * MICRO),
-      turns: 4200,
-      cost_share: 1800 / 5042.23,
+      cost_equiv_u: orbitSpend,
+      turns: orbitTurns ?? 0,
+      cost_share: orbitSpend / total,
       has_live: false,
-      usd_per_turn: 1800 / 4200,
+      usd_per_turn: orbitSpend / MICRO / (orbitTurns ?? 1),
       avg_context_per_turn: 238_000,
       cache_write_pct: 0.12,
       opus_pct: 0.67,
@@ -191,11 +293,11 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       repo_path: "C:/Users/dev/GitHub/support-portal",
       repo_owner: "acme",
       repo_name: "support-portal",
-      cost_equiv_u: Math.round(1200 * MICRO),
-      turns: 2800,
-      cost_share: 1200 / 5042.23,
+      cost_equiv_u: supportSpend,
+      turns: supportTurns ?? 0,
+      cost_share: supportSpend / total,
       has_live: false,
-      usd_per_turn: 1200 / 2800,
+      usd_per_turn: supportSpend / MICRO / (supportTurns ?? 1),
       avg_context_per_turn: 180_000,
       cache_write_pct: 0.09,
       opus_pct: 0.45,
@@ -207,11 +309,11 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       repo_path: "C:/Users/dev/GitHub/data-janitor",
       repo_owner: "acme",
       repo_name: "data-janitor",
-      cost_equiv_u: Math.round(900 * MICRO),
-      turns: 2100,
-      cost_share: 900 / 5042.23,
+      cost_equiv_u: janitorSpend,
+      turns: janitorTurns ?? 0,
+      cost_share: janitorSpend / total,
       has_live: false,
-      usd_per_turn: 900 / 2100,
+      usd_per_turn: janitorSpend / MICRO / (janitorTurns ?? 1),
       avg_context_per_turn: 120_000,
       cache_write_pct: 0.18,
       opus_pct: 0.3,
@@ -223,11 +325,11 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       repo_path: "C:/Users/dev/GitHub/admin-console",
       repo_owner: "acme",
       repo_name: "admin-console",
-      cost_equiv_u: Math.round(700 * MICRO),
-      turns: 1630,
-      cost_share: 700 / 5042.23,
+      cost_equiv_u: adminSpend,
+      turns: adminTurns ?? 0,
+      cost_share: adminSpend / total,
       has_live: false,
-      usd_per_turn: 700 / 1630,
+      usd_per_turn: adminSpend / MICRO / (adminTurns ?? 1),
       avg_context_per_turn: 95_000,
       cache_write_pct: 0.07,
       opus_pct: 0.22,
@@ -239,11 +341,11 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       repo_path: "C:/Users/dev/GitHub/AgentWrangler",
       repo_owner: "acme",
       repo_name: "AgentWrangler",
-      cost_equiv_u: Math.round(total - (1800 + 1200 + 900 + 700) * MICRO),
-      turns: 1245,
-      cost_share: (5042.23 - 4600) / 5042.23,
+      cost_equiv_u: wranglerSpend,
+      turns: wranglerTurns ?? 0,
+      cost_share: wranglerSpend / total,
       has_live: false,
-      usd_per_turn: (5042.23 - 4600) / 1245,
+      usd_per_turn: wranglerSpend / MICRO / (wranglerTurns ?? 1),
       avg_context_per_turn: 210_000,
       cache_write_pct: 0.14,
       opus_pct: 0.55,
@@ -418,13 +520,50 @@ export function mockResetDatabase(): ApiResponse<Settings> {
 export function mockRecommendations(): ApiResponse<RecommendationsView> {
   const window = windowFor("7d");
 
+  // Source-backed D1 gives the browser workflow a concrete, workspace-scoped
+  // change to copy, attest, and track. Its projection remains separate from
+  // the observed measurement that appears after tracking.
+  const d1Card: RecommendationCard = {
+    rec_id: "rec-D1-ws-1-mock000000000000",
+    detector_id: "D1",
+    category: "CONTEXT",
+    scope_workspace_id: "ws-1",
+    lever: "Trim stale instructions from this workspace's CLAUDE.md.",
+    modeled_savings_u_per_wk: 2_600_000,
+    run_cost_u: null,
+    modeled_formula: {
+      model: "D1_CONTEXT_FILE_REDUCTION_V1",
+      inputs: { tokens_removed: 40_000, sessions_per_week: 4 },
+      expression: "tokens_removed * sessions_per_week",
+      kind: "MODELED",
+    },
+    evidence: {
+      component: "CLAUDE_MD",
+      file_ref: "CLAUDE.md",
+      title: "Trim stale CLAUDE.md instructions",
+      source_tokens: 80_000,
+      delta_context_tokens: 40_000,
+    },
+    target_metric: "CONTEXT_TOKENS:CLAUDE_MD:CLAUDE.md",
+    state: "PROPOSED",
+    created_at: window.to,
+    dismissed_until: null,
+    headroom: { tokens_per_wk_freed: 160_000, tokens_per_session_freed: 40_000 },
+    sessions_per_week: 4,
+    steps: [{ kind: "trim", target: "CLAUDE_MD", max_lines: 80 } satisfies BoundedStep],
+    cross_workspace: false,
+    workspace_multiplier: null,
+    file_ref: "CLAUDE.md",
+  };
+
   const d2Card: RecommendationCard = {
     rec_id: "rec-D2-global-mock000000000000",
     detector_id: "D2",
     category: "CONTEXT",
     scope_workspace_id: null,
     lever: "/clear between unrelated tasks; split long work; avoid mid-task /compact.",
-    modeled_savings_u_per_wk: 874_170_000,
+    // D2 is directional: its cache-read exposure cannot establish avoidable USD.
+    modeled_savings_u_per_wk: null,
     run_cost_u: null,
     modeled_formula: {
       model: "D2_LONG_CONTEXT_CACHE_READ_V1",
@@ -435,7 +574,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
       },
       expression:
         "cache_read_tokens_per_week / 1e6 * cache_read_price_usd_per_mtok * reduction_fraction",
-      result_usd_per_wk: 874.17,
+      kind: "DIRECTIONAL",
     },
     evidence: {
       qualifying_session_count: 4,
@@ -472,14 +611,21 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
   };
 
   const data: RecommendationsView = {
-    active: [d2Card],
+    active: [d2Card, d1Card],
     active_groups: [
       {
         detector_id: "D2",
         label: "Session hygiene",
         recs: [d2Card],
         session_count: 4,
-        total_savings_u_per_wk: d2Card.modeled_savings_u_per_wk ?? 0,
+        total_savings_u_per_wk: 0,
+      },
+      {
+        detector_id: "D1",
+        label: "CLAUDE.md / memory",
+        recs: [d1Card],
+        session_count: 0,
+        total_savings_u_per_wk: d1Card.modeled_savings_u_per_wk ?? 0,
       },
     ],
     limit_warnings: [],
@@ -620,8 +766,81 @@ export function mockLedger(): ApiResponse<LedgerView> {
     confounded_window: true,
   };
 
+  // A worsening raw D2 value remains NO_EFFECT: direction is visible, but it
+  // must never be converted into achieved or modeled savings.
+  const noEffectEntry: LedgerEntry = {
+    rec_id: "rec-D2-global-mockledger-no-effect",
+    detector_id: "D2",
+    lever: "Keep unrelated work in separate sessions.",
+    adopted_at: "2026-08-06T09:00:00.000Z",
+    state: "MEASURED_NO_EFFECT",
+    target_metric: "avg_context_per_turn",
+    modeled_savings_u_per_wk: null,
+    modeled_cap_weighted_u_per_wk: null,
+    effects: [
+      {
+        rec_id: "rec-D2-global-mockledger-no-effect",
+        measured_at: "2026-08-22T09:00:00.000Z",
+        before_from: "2026-08-01T00:00:00.000Z",
+        before_to: "2026-08-06T09:00:00.000Z",
+        after_from: "2026-08-06T09:00:00.000Z",
+        after_to: "2026-08-20T09:00:00.000Z",
+        before_value: 187_500,
+        after_value: 225_000,
+        before_n: 5,
+        after_n: 5,
+        delta_pct: 20,
+        verdict: "NO_EFFECT",
+        qualification: "EXPERIMENTAL",
+      },
+    ],
+    confounded_window: false,
+  };
+
+  const inconclusiveEntry: LedgerEntry = {
+    rec_id: "rec-D8-global-mockledger-inconclusive",
+    detector_id: "D8",
+    lever: "Avoid cache rewrites after idle gaps.",
+    adopted_at: "2026-08-04T09:00:00.000Z",
+    state: "MEASURED_NO_EFFECT",
+    target_metric: "cache_read_to_creation_ratio",
+    modeled_savings_u_per_wk: null,
+    modeled_cap_weighted_u_per_wk: null,
+    effects: [
+      {
+        rec_id: "rec-D8-global-mockledger-inconclusive",
+        measured_at: "2026-08-22T09:00:00.000Z",
+        before_from: "2026-08-01T00:00:00.000Z",
+        before_to: "2026-08-04T09:00:00.000Z",
+        after_from: "2026-08-04T09:00:00.000Z",
+        after_to: "2026-08-18T09:00:00.000Z",
+        before_value: 1.2,
+        after_value: 1.1,
+        before_n: 4,
+        after_n: 4,
+        delta_pct: -8.33,
+        verdict: "INCONCLUSIVE",
+        qualification: null,
+      },
+    ],
+    confounded_window: true,
+  };
+
+  const warningEntry: LedgerEntry = {
+    rec_id: "rec-D5-global-mockledger-warning",
+    detector_id: "D5",
+    lever: "Configure a weekly token limit.",
+    adopted_at: "2026-08-03T09:00:00.000Z",
+    state: "ADOPTED",
+    target_metric: "limit_configuration",
+    modeled_savings_u_per_wk: null,
+    modeled_cap_weighted_u_per_wk: null,
+    effects: [],
+    confounded_window: false,
+  };
+
   const data: LedgerView = {
-    entries: [d1Entry, d2Entry],
+    entries: [d1Entry, d2Entry, noEffectEntry, inconclusiveEntry, warningEntry],
     cap_read_coeff: 0.1,
   };
 
@@ -643,87 +862,48 @@ export function mockLedger(): ApiResponse<LedgerView> {
   };
 }
 
-export function mockTrends(_filter: WindowFilter): ApiResponse<TrendData> {
-  const window = windowFor("7d");
+export function mockTrends(filter: WindowFilter): ApiResponse<TrendData> {
+  const preset = filter.preset ?? "7d";
+  const window = windowFor(preset);
+  const days = selectedUa11Days(preset);
+  const modelWeights = UA11_MODEL_WEIGHTS;
+  const models = UA11_MODELS;
   const data: TrendData = {
     bucket: "day",
-    buckets: [
-      { bucket: "2026-08-17", cost_equiv_u: 1_200_000, turns: 45 },
-      { bucket: "2026-08-18", cost_equiv_u: 980_000, turns: 38 },
-      { bucket: "2026-08-19", cost_equiv_u: 2_100_000, turns: 72 },
-      { bucket: "2026-08-20", cost_equiv_u: 750_000, turns: 28 },
-      { bucket: "2026-08-21", cost_equiv_u: 1_560_000, turns: 59 },
-      { bucket: "2026-08-22", cost_equiv_u: 880_000, turns: 33 },
-      { bucket: "2026-08-23", cost_equiv_u: 320_000, turns: 12 },
-    ],
-    by_model: [
-      { bucket: "2026-08-17", model: "claude-opus-5", cost_equiv_u: 900_000, turns: 30 },
-      { bucket: "2026-08-17", model: "claude-sonnet-5", cost_equiv_u: 300_000, turns: 15 },
-      { bucket: "2026-08-18", model: "claude-opus-5", cost_equiv_u: 700_000, turns: 25 },
-      { bucket: "2026-08-18", model: "claude-sonnet-5", cost_equiv_u: 280_000, turns: 13 },
-    ],
-    by_workspace: [
-      {
-        bucket: "2026-08-17",
-        workspace_id: "ws-1",
-        project_slug: "orbit-api",
-        cost_equiv_u: 800_000,
-        turns: 30,
-      },
-      {
-        bucket: "2026-08-17",
-        workspace_id: "ws-2",
-        project_slug: "AgentWrangler",
-        cost_equiv_u: 400_000,
-        turns: 15,
-      },
-      {
-        bucket: "2026-08-18",
-        workspace_id: "ws-1",
-        project_slug: "orbit-api",
-        cost_equiv_u: 600_000,
-        turns: 22,
-      },
-      {
-        bucket: "2026-08-18",
-        workspace_id: "ws-2",
-        project_slug: "AgentWrangler",
-        cost_equiv_u: 380_000,
-        turns: 16,
-      },
-    ],
-    sessions: [
-      {
-        session_id: "s1",
-        workspace_id: "ws-1",
-        project_slug: "orbit-api",
-        first_turn_at: "2026-08-17T10:00:00Z",
-        cost_equiv_u: 450_000,
-      },
-      {
-        session_id: "s2",
-        workspace_id: "ws-2",
-        project_slug: "AgentWrangler",
-        first_turn_at: "2026-08-18T14:00:00Z",
-        cost_equiv_u: 320_000,
-      },
-      {
-        session_id: "s3",
-        workspace_id: "ws-1",
-        project_slug: "orbit-api",
-        first_turn_at: "2026-08-19T09:00:00Z",
-        cost_equiv_u: 780_000,
-      },
-    ],
-    cap_weighted: [
-      { bucket: "2026-08-17", cap_weighted_tokens: 320_000, turns: 45 },
-      { bucket: "2026-08-18", cap_weighted_tokens: 265_000, turns: 38 },
-      { bucket: "2026-08-19", cap_weighted_tokens: 580_000, turns: 72 },
-      { bucket: "2026-08-20", cap_weighted_tokens: 195_000, turns: 28 },
-      { bucket: "2026-08-21", cap_weighted_tokens: 410_000, turns: 59 },
-      { bucket: "2026-08-22", cap_weighted_tokens: 230_000, turns: 33 },
-      { bucket: "2026-08-23", cap_weighted_tokens: 88_000, turns: 12 },
-    ],
+    buckets: [...days],
+    by_model: days.flatMap((day) => {
+      const spend = splitWhole(day.cost_equiv_u, modelWeights);
+      const turns = splitWhole(day.turns, modelWeights);
+      return models.map((model, index) => ({
+        bucket: day.bucket,
+        model,
+        cost_equiv_u: spend[index] ?? 0,
+        turns: turns[index] ?? 0,
+      }));
+    }),
+    by_workspace: days.flatMap((day) => {
+      const spend = ua11WorkspaceSpendSplit(day);
+      const turns = splitWhole(day.turns, UA11_WORKSPACE_TURN_WEIGHTS);
+      return UA11_WORKSPACE_IDENTITIES.map((workspace, index) => ({
+        bucket: day.bucket,
+        workspace_id: workspace.workspace_id,
+        project_slug: workspace.project_slug,
+        cost_equiv_u: spend[index] ?? 0,
+        turns: turns[index] ?? 0,
+      }));
+    }),
+    sessions: days.flatMap(ua11DailySessions).map((session) => ({
+      session_id: session.session_id,
+      workspace_id: session.workspace_id,
+      project_slug: session.repo_name ?? "",
+      first_turn_at: session.first_turn_at ?? "",
+      cost_equiv_u: session.cost_equiv_u,
+    })),
+    cap_weighted: days.map((day) => ({
+      bucket: day.bucket,
+      cap_weighted_tokens: day.turns * 8_000,
+      turns: day.turns,
+    })),
     cap_read_coeff: 0.1,
     adoption_markers: [
       {
@@ -733,7 +913,7 @@ export function mockTrends(_filter: WindowFilter): ApiResponse<TrendData> {
         adopted_at: "2026-08-20T09:00:00.000Z",
         bucket: "2026-08-20",
       },
-    ],
+    ].filter((marker) => marker.adopted_at >= window.from && marker.adopted_at < window.to),
   };
   return { data, meta: baseMeta(window, data.buckets.length) };
 }
@@ -793,19 +973,47 @@ export function mockLiveSessions(): ApiResponse<PagedList<LiveSessionRow>> {
   };
 }
 
-export function mockSession(sessionId: string): ApiResponse<SessionSummary> {
+function ua11DailySessions(day: Ua11DailyObservation): SessionSummary[] {
+  const spend = ua11WorkspaceSpendSplit(day);
+  const turns = splitWhole(day.turns, UA11_WORKSPACE_TURN_WEIGHTS);
+  return UA11_WORKSPACE_IDENTITIES.map((workspace, index) => ({
+    ...ua11SessionSummary(
+      `ua11-session-${day.bucket}-${workspace.workspace_id}`,
+      workspace.workspace_id,
+    ),
+    cost_equiv_u: spend[index] ?? 0,
+    turn_count: turns[index] ?? 0,
+    first_turn_at: `${day.bucket}T10:00:00.000Z`,
+    last_turn_at: new Date(
+      Date.parse(`${day.bucket}T10:00:00.000Z`) + Math.max(0, (turns[index] ?? 0) - 1) * 180_000,
+    ).toISOString(),
+    state: "RECONCILED",
+  }));
+}
+
+function ua11SessionSummary(sessionId: string, workspaceId: string): SessionSummary {
+  const workspace = UA11_WORKSPACE_IDENTITIES.find(
+    (candidate) => candidate.workspace_id === workspaceId,
+  );
+  if (workspace === undefined) throw new Error(`unknown UA11 workspace fixture: ${workspaceId}`);
+  const detailSpend =
+    ua11WorkspaceSpendSplit({
+      bucket: "2026-08-16",
+      cost_equiv_u: UA11_SCENARIO.trend_spend_u[0],
+      turns: 45,
+    })[UA11_WORKSPACE_IDENTITIES.indexOf(workspace)] ?? 0;
   const data: SessionSummary = {
     session_id: sessionId,
-    workspace_id: "ws-1",
-    repo_path: "C:/Users/dev/GitHub/orbit-api",
+    workspace_id: workspace.workspace_id,
+    repo_path: `C:/Users/dev/GitHub/${workspace.repo_name}`,
     repo_owner: "acme",
-    repo_name: "orbit-api",
+    repo_name: workspace.repo_name,
     file_path: "sessions/demo.jsonl",
     state: "LIVE",
     turn_count: 2,
-    cost_equiv_u: 3_420_000,
-    first_turn_at: "2026-08-22T10:00:00Z",
-    last_turn_at: "2026-08-22T10:03:00Z",
+    cost_equiv_u: detailSpend,
+    first_turn_at: "2026-08-16T10:00:00Z",
+    last_turn_at: "2026-08-16T10:03:00Z",
     hygiene_flags: [],
     compaction_count: 0,
     api_error_count: 0,
@@ -822,6 +1030,18 @@ export function mockSession(sessionId: string): ApiResponse<SessionSummary> {
     long_gap_count: 1,
     gap_n: 3,
   };
+  return data;
+}
+
+export function mockSession(sessionId: string): ApiResponse<SessionSummary> {
+  const canonical = UA11_DAILY_OBSERVATIONS.flatMap(ua11DailySessions).find(
+    (session) => session.session_id === sessionId,
+  );
+  // Arbitrary IDs remain useful for focused UI tests; public drilldowns use canonical IDs.
+  const workspaceId = sessionId.startsWith("workspace-session-")
+    ? sessionId.replace("workspace-session-", "")
+    : "ws-1";
+  const data = canonical ?? ua11SessionSummary(sessionId, workspaceId);
   return {
     data,
     meta: {
@@ -833,13 +1053,15 @@ export function mockSession(sessionId: string): ApiResponse<SessionSummary> {
 
 export function mockWorkspaceSessions(
   workspaceId: string,
-  _filter: WindowFilter,
+  filter: WindowFilter,
 ): ApiResponse<PagedList<SessionSummary>> {
-  const session = mockSession("session-demo").data;
-  if (session === null) throw new Error("session fixture must have data");
+  const preset = filter.preset ?? "7d";
+  const items = selectedUa11Days(preset)
+    .flatMap(ua11DailySessions)
+    .filter((session) => session.workspace_id === workspaceId);
   return {
-    data: { items: [{ ...session, workspace_id: workspaceId }], next_cursor: null },
-    meta: baseMeta(windowFor("7d"), 1),
+    data: { items, next_cursor: null },
+    meta: baseMeta(windowFor(preset), items.length),
   };
 }
 
@@ -862,7 +1084,7 @@ export function mockTurnTimeline(
       cache_write_1h: 0,
       cache_write_other: 0,
       context_tokens: 2200,
-      cost_equiv_u: 1_250_000,
+      cost_equiv_u: 720_000,
       cost_claim: "LIST_EQUIV",
       provisional: true,
       effort: null,
@@ -881,21 +1103,33 @@ export function mockTurnTimeline(
       cache_write_1h: 0,
       cache_write_other: 0,
       context_tokens: 2400,
-      cost_equiv_u: null,
+      cost_equiv_u: 480_000,
       cost_claim: "LIST_EQUIV",
       provisional: false,
       effort: "medium",
     },
   ];
-  const first = rows[0];
-  const second = rows[1];
-  if (first === undefined || second === undefined) {
-    throw new Error("turn timeline fixture must contain two rows");
-  }
+  const session = mockSession(sessionId).data;
+  if (!session) throw new Error("turn timeline requires a session");
+  const costs = splitWhole(
+    session.cost_equiv_u,
+    Array.from({ length: session.turn_count }, () => 1 / session.turn_count),
+  );
+  const timeline = Array.from({ length: session.turn_count }, (_, index) => {
+    const template = rows[index % rows.length];
+    if (!template) throw new Error("turn template missing");
+    return {
+      ...template,
+      message_id: `turn-${index + 1}`,
+      ts: new Date(Date.parse(session.first_turn_at ?? "") + index * 180_000).toISOString(),
+      cost_equiv_u: costs[index] ?? 0,
+      provisional: sessionId.startsWith("ua11-session-") ? false : index === 0,
+    };
+  });
   const firstPage = after === undefined;
   const data: PagedList<TurnRow> = firstPage
-    ? { items: [first], next_cursor: "mock-page-2" }
-    : { items: [second], next_cursor: null };
+    ? { items: timeline.slice(0, 1), next_cursor: timeline.length > 1 ? "mock-page-2" : null }
+    : { items: timeline.slice(1), next_cursor: null };
   return {
     data,
     meta: {
@@ -1225,75 +1459,33 @@ export function mockHookConfigResponse(installed: boolean): ApiResponse<HookConf
 }
 
 /** Three hot sessions for overview teaser. */
-export function mockHotSessions(): HotSessionRow[] {
-  return [
-    {
-      session_id: "hot-session-1",
-      workspace_id: "ws-alpha",
-      turns: 24,
-      cost_equiv_u: 5_200_000,
-      total_output_tokens: 48_000,
-      avg_output_tokens: 2_000,
-      total_context_tokens: 1_200_000,
-      avg_context_tokens: 50_000,
-      model: "claude-opus-5",
-      last_turn_at: "2026-09-02T14:30:00Z",
-      api_error_count: 2,
-      compaction_count: 1,
-      interrupt_count: 0,
-      user_turn_count: 6,
-      tool_error_count: 3,
-      test_fail_count: 1,
-      gap_median_s: 38,
-      gap_p90_s: 420,
-      long_gap_count: 2,
-      gap_n: 5,
-    },
-    {
-      session_id: "hot-session-2",
-      workspace_id: "ws-beta",
-      turns: 12,
-      cost_equiv_u: 2_100_000,
-      total_output_tokens: 18_000,
-      avg_output_tokens: 1_500,
-      total_context_tokens: 480_000,
-      avg_context_tokens: 40_000,
+export function mockHotSessions(filter: WindowFilter = { preset: "7d" }): HotSessionRow[] {
+  return selectedUa11Days(filter.preset ?? "7d")
+    .flatMap(ua11DailySessions)
+    .sort((a, b) => b.cost_equiv_u - a.cost_equiv_u)
+    .slice(0, 3)
+    .map((session) => ({
+      session_id: session.session_id,
+      workspace_id: session.workspace_id,
+      turns: session.turn_count,
+      cost_equiv_u: session.cost_equiv_u,
+      total_output_tokens: session.turn_count * 400,
+      avg_output_tokens: 400,
+      total_context_tokens: session.turn_count * 2200,
+      avg_context_tokens: 2200,
       model: "claude-sonnet-5",
-      last_turn_at: "2026-09-02T13:00:00Z",
+      last_turn_at: session.last_turn_at ?? "",
       api_error_count: 0,
       compaction_count: 0,
       interrupt_count: 0,
-      user_turn_count: 3,
-      tool_error_count: 1,
-      test_fail_count: 0,
-      gap_median_s: 60,
-      gap_p90_s: 185,
-      long_gap_count: 0,
-      gap_n: 2,
-    },
-    {
-      session_id: "hot-session-3",
-      workspace_id: "ws-gamma",
-      turns: 8,
-      cost_equiv_u: 980_000,
-      total_output_tokens: 9_600,
-      avg_output_tokens: 1_200,
-      total_context_tokens: 240_000,
-      avg_context_tokens: 30_000,
-      model: "claude-sonnet-5",
-      last_turn_at: "2026-09-02T12:00:00Z",
-      api_error_count: 0,
-      compaction_count: 0,
-      interrupt_count: 0,
-      user_turn_count: 2,
+      user_turn_count: 0,
       tool_error_count: 0,
       test_fail_count: 0,
       gap_median_s: null,
       gap_p90_s: null,
       long_gap_count: 0,
       gap_n: 0,
-    },
-  ];
+    }));
 }
 
 const DRIVERS_NOTE = "Per-driver figures are observed proxies; never summed.";

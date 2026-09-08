@@ -608,6 +608,7 @@ function TrendChartInner({
               <XAxis
                 dataKey="x"
                 type="category"
+                allowDuplicatedCategory={false}
                 interval={
                   gridProps.preserveStartEnd ? "preserveStartEnd" : xAxisInterval(scatterTickCount)
                 }

@@ -605,7 +605,7 @@ export async function fetchBurnStatus(signal?: AbortSignal): Promise<ApiResponse
  * Endpoint: GET /api/hot-sessions
  */
 export async function fetchHotSessions(filter?: WindowFilter): Promise<HotSessionRow[]> {
-  if (USE_MOCK) return Promise.resolve(mockHotSessions());
+  if (USE_MOCK) return Promise.resolve(mockHotSessions(filter));
   const params = new URLSearchParams();
   if (filter?.preset !== undefined) params.set("preset", filter.preset);
   if (filter?.from !== undefined) params.set("from", filter.from);

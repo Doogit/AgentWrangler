@@ -305,6 +305,7 @@ function runClaudePhase(
   const changedPaths: string[] = [];
   let finalized = false;
   let fatalExitMessage: string | null = null;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
 
   const cleanup = () => {
     fs.unlink(settingsPath, () => {});
@@ -362,9 +363,11 @@ function runClaudePhase(
   });
 
   const timer = setTimeout(() => {
+    // Keep the job exclusive until the child has actually closed. Publishing
+    // FAILED here lets a retry (or workspace cleanup) race the dying process.
+    fatalExitMessage ??= "job timed out";
     proc.kill("SIGTERM");
-    setTimeout(() => proc.kill("SIGKILL"), 2000);
-    markFailed("job timed out");
+    killTimer = setTimeout(() => proc.kill("SIGKILL"), 2000);
   }, rt.timeoutMs);
 
   proc.on("error", (err) => {
@@ -374,6 +377,7 @@ function runClaudePhase(
 
   proc.on("close", (code) => {
     clearTimeout(timer);
+    clearTimeout(killTimer);
     if (finalized) return;
     finalized = true;
     cleanup();

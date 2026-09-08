@@ -74,3 +74,19 @@ Jobs run once each after a timer boundary; they are not production recurring tim
 | 100000 | 1011.8 | 0 | 132.15 | 15.344/16.146 |
 
 Idle is a one-second post-job child sample with no production interval timers. CPU precision and scheduler noise are visible at this duration; zero measured CPU is not a universal zero-cost claim. The harness excludes product index startup, ingestion/tailers, operator paths/settings, credential discovery, GitHub outcomes and git churn. Context probing receives an empty temporary Claude directory; synthetic workspaces have no repository path. Full-daemon idle and periodic collector attribution remain separate validation work. No live transcript, credential or operator database is included.
+
+## Isolated production entrypoint checkpoint (2026-09-07)
+
+Run `node --import tsx/esm scripts/benchmark/production-daemon-profile.ts` from the repository root. The harness seeds aggregate-only synthetic histories, boots `src/daemon/index.ts` with an isolated home/config/database and empty scan root, and blocks child processes, global fetch and non-loopback sockets. Independent privacy review accepted this harness before execution.
+
+One Windows / Node v24.14.0 run completed at 2026-09-07T16:53:01Z with confirmed child shutdown and empty stderr:
+
+| Synthetic turns | Startup ms / CPU ms | Paused idle CPU ms | Original cadence 5s CPU ms | Accelerated 2s CPU ms | Cadence RSS MB |
+|---:|---:|---:|---:|---:|---:|
+| 1000 | 1048.013 / 62 | 0 | 15 | 47 | 105.11 |
+| 10000 | 947.303 / 78 | 15 | 0 | 48 | 105.51 |
+| 100000 | 1175.547 / 62 | 0 | 32 | 77 | 108.92 |
+
+Each scale registered 2s, 30s, 10m and two weekly callbacks; the accelerated window fired each callback twice and recorded four blocked boundary attempts. The five-second original-cadence sample reaches only the two-second tail timer. CPU precision, short sampling windows and scheduler noise limit interpretation.
+
+The fixed January 1-15, 2026 seed falls outside the September current-week and trailing detector windows. Accelerated results measure production callback orchestration and fail-closed overhead, not populated recent-window report/detector workloads. Empty roots exclude transcript parsing, filesystem churn and populated repository mapping. Credentials, Git, network and operator settings are excluded. This source-entrypoint run does not establish installed-package, cross-platform or real production-load acceptance and does not justify an optimization by itself.

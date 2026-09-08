@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   configureApplyJobsForTests,
   confirmApplyJob,
@@ -73,6 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   resetApplyJobsForTests();
   resetQueryDb();
   db.close();
@@ -247,6 +248,46 @@ describe("apply jobs", () => {
 
     expect(failed.error_msg).toContain("job timed out");
   });
+
+  it.each([false, true])(
+    "holds a timed-out job until child close (force kill: %s)",
+    async (forceKill) => {
+      vi.useFakeTimers();
+      class DelayedCloseChild extends EventEmitter {
+        readonly stdout = new EventEmitter();
+        readonly stderr = new EventEmitter();
+        readonly stdin = new EventEmitter();
+        readonly kill = vi.fn(() => true);
+      }
+      const child = new DelayedCloseChild();
+      configureApplyJobsForTests({
+        tmpRoot: path.join(tmpDir, "jobs"),
+        timeoutMs: 100,
+        spawn: () => child as unknown as ChildProcessWithoutNullStreams,
+      });
+      insertRec("rec-delayed-close");
+      const started = startApplyJob("rec-delayed-close", workspaceCwd).data;
+      if (!started) throw new Error("missing start response");
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(getApplyJob(started.job_id).data?.status).toBe("DRY_RUNNING");
+      expect(() => startApplyJob("rec-delayed-close", workspaceCwd)).toThrow(
+        /job already in progress/,
+      );
+      if (forceKill) {
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(child.kill).toHaveBeenLastCalledWith("SIGKILL");
+        expect(getApplyJob(started.job_id).data?.status).toBe("DRY_RUNNING");
+      }
+
+      child.emit("close", null);
+      expect(getApplyJob(started.job_id).data?.status).toBe("FAILED");
+      expect(getApplyJob(started.job_id).data?.error_msg).toBe("job timed out");
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(child.kill).toHaveBeenCalledTimes(forceKill ? 2 : 1);
+    },
+  );
 
   it("marks the job failed when stdout exceeds the cap", async () => {
     configureApplyJobsForTests({

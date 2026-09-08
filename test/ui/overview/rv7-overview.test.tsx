@@ -180,15 +180,17 @@ describe("OverviewPage RV7 tile row", () => {
 
   it("hot-sessions rows call onSelectSession on click", async () => {
     const onSelectSession = vi.fn();
+    const firstSession = mockHotSessions()[0];
+    if (!firstSession) throw new Error("missing hot session fixture");
     const { container } = render(<OverviewPage onSelectSession={onSelectSession} />);
     await waitFor(() => {
-      const firstRow = container.querySelector(
-        "[data-testid='hot-session-row-hot-session-1']",
-      ) as HTMLButtonElement;
-      expect(firstRow).not.toBeNull();
-      fireEvent.click(firstRow);
-      expect(onSelectSession).toHaveBeenCalledWith("hot-session-1");
+      expect(
+        container.querySelector(`[data-testid='hot-session-row-${firstSession.session_id}']`),
+      ).not.toBeNull();
     });
+    fireEvent.click(screen.getByTestId(`hot-session-row-${firstSession.session_id}`));
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).toHaveBeenCalledWith(firstSession.session_id);
   });
 
   it("SuccessRateCard (SUCCESS RATE label) is NOT present on Overview", async () => {
