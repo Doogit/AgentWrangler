@@ -61,7 +61,3 @@ async (page) => {
   await navigate('glossary','How to read this dashboard');
   await shot('glossary');
 }
-
-
-
-
