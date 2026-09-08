@@ -93,6 +93,18 @@ function metric(workspaceId: string | null): CostPerSuccessContract {
 }
 
 describe("getCostPerSuccess", () => {
+  it("counts closed-unmerged PRs within the selected workspace and terminal-date window", () => {
+    insWs("ws-closed");
+    insWs("ws-other");
+    insWorkItem("wi-closed-in", "ws-closed", 1, "CLOSED", TS_IN);
+    insWorkItem("wi-closed-before", "ws-closed", 2, "CLOSED", "2027-05-31T23:59:59.000Z");
+    insWorkItem("wi-closed-after", "ws-closed", 3, "CLOSED", TO);
+    insWorkItem("wi-closed-other", "ws-other", 1, "CLOSED", TS_IN);
+
+    expect(metric("ws-closed").closed_unmerged_count).toBe(1);
+    expect(metric(null).closed_unmerged_count).toBe(2);
+  });
+
   it("computes the exact cost per merged PR from distinct linked sessions", () => {
     insWs("ws-cost");
     insSession("sess-cost-1", "ws-cost", 1000);

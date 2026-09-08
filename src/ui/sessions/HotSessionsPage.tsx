@@ -149,7 +149,7 @@ export default function HotSessionsPage({
                     Friction{" "}
                     <InfoTip
                       label="What Friction means"
-                      content="A low, elevated, or high signal based on errors, test failures, context compactions, interrupts, and user-message share. Open a high signal to see what happened."
+                      content="A legacy low, elevated, or high signal based on errors, test failures, context compactions, and user-message share. Interrupt telemetry is unavailable. This is an observation aid, not a health or quality rating."
                     />
                   </th>
                   <th scope="col">Last active</th>
