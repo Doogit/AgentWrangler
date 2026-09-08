@@ -43,16 +43,15 @@ beforeEach(() => {
 });
 
 describe("HeadroomSummary — known fixture", () => {
-  it("renders the headroom percentage from the fixture (~35%)", async () => {
+  it("renders active modeled recommendation headroom", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    // headroom_u_per_wk / actual_u_per_wk = 2_450_000 / 7_000_000 ≈ 35%
-    // Exact phrase, not bare "35%", so a unit-scale bug rendering "135%" is caught.
-    expect(text).toContain("35% of trailing spend");
+    // $46.56 / $3,100 rounds to 2%; retain the full phrase to catch unit-scale errors.
+    expect(text).toContain("2% of trailing spend");
   });
 
   it("caps the display at '>100%' when modeled savings exceed trailing spend", async () => {
@@ -89,7 +88,7 @@ describe("HeadroomSummary — known fixture", () => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("3 open recs");
+    expect(text).toContain("1 open rec");
   });
 });
 

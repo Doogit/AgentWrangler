@@ -108,10 +108,10 @@ describe("OverviewPage — three distinct states", () => {
 
     const { container } = render(<OverviewPage />);
 
-    // The verdict trend and spend card share the UA11 $7.79 selected window.
+    // The verdict trend and spend card share the UA11 $3,100 selected window.
     await waitFor(() => {
       const matches = container.querySelectorAll("*");
-      const found = Array.from(matches).some((el) => el.textContent?.includes("$7.79"));
+      const found = Array.from(matches).some((el) => el.textContent?.includes("$3,100"));
       expect(found).toBe(true);
     });
     // No error banner
@@ -500,10 +500,10 @@ describe("OverviewPage WorkspaceTable", () => {
 
     const { container } = render(<OverviewPage />);
 
-    // orbit-api cost from the coherent fixture = $2.60.
+    // orbit-api cost from the coherent fixture = $1,350.00.
     await waitFor(() => {
       const found = Array.from(container.querySelectorAll("td")).some(
-        (td) => td.textContent?.trim() === "$2.60",
+        (td) => td.textContent?.trim() === "$1,350.00",
       );
       expect(found).toBe(true);
     });
@@ -559,11 +559,11 @@ describe("CacheEfficiencyKPI", () => {
 
     await waitFor(() => {
       const text = container.textContent ?? "";
-      expect(text).toMatch(/83\.3%/);
-      expect(text).toMatch(/5\.0×/);
+      expect(text).toMatch(/87\.9%/);
+      expect(text).toMatch(/7\.3×/);
       expect(text).toMatch(/REUSE DOMINANT/);
       expect(text).toMatch(/diagnostic only · not a health signal/);
-      expect(text).toMatch(/Cap-weighted draw: 13\.9M/);
+      expect(text).toMatch(/Cap-weighted draw: 1\.3B/);
       expect(text).toMatch(/coefficient 0\.1× unverified/);
     });
 

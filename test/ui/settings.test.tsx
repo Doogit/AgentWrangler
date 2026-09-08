@@ -63,11 +63,11 @@ describe("SettingsPage — parser health", () => {
     setupSuccess();
     render(<SettingsPage />);
 
-    // Fixture: files_seen=42, files_parsed=40, lines_quarantined=2
+    // Fixture: files_seen=146, files_parsed=124, lines_quarantined=0
     await waitFor(() => {
       const text = document.body.textContent ?? "";
-      expect(text).toMatch(/42/);
-      expect(text).toMatch(/40/);
+      expect(text).toMatch(/146/);
+      expect(text).toMatch(/124/);
     });
   });
 
@@ -75,10 +75,10 @@ describe("SettingsPage — parser health", () => {
     setupSuccess();
     render(<SettingsPage />);
     await waitFor(() => {
-      expect(document.body.textContent).toMatch(/40 parsed files/);
+      expect(document.body.textContent).toMatch(/124 parsed files/);
     });
     expect(document.body.textContent).not.toMatch(/ingest-1/);
-    expect(document.querySelector("[title='Parser versions: ingest-1: 40']")).not.toBeNull();
+    expect(document.querySelector("[title='Parser versions: ingest-1: 124']")).not.toBeNull();
   });
 });
 

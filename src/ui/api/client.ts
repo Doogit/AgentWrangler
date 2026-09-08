@@ -61,6 +61,7 @@ import {
   mockGithubTokenStatus,
   mockGlobalOverview,
   mockHeadroomTrend,
+  mockHookConfigResponse,
   mockHotSessions,
   mockLedger,
   mockLinkageRate,
@@ -397,6 +398,7 @@ export async function saveSettings(update: SettingsUpdate): Promise<ApiResponse<
 
 /** Read the runtime thresholds for the context-budget hook. */
 export async function fetchHookConfig(): Promise<ApiResponse<HookConfigResponse>> {
+  if (USE_MOCK) return mockHookConfigResponse(false);
   const res = await daemonFetch("/api/hook-config");
   if (!res.ok) throw new Error(`/api/hook-config returned ${res.status}`);
   return res.json() as Promise<ApiResponse<HookConfigResponse>>;

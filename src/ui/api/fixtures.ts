@@ -8,6 +8,7 @@
  */
 
 import type { PracticeEntry, PracticesResult } from "../../detector/practice-registry";
+import { d1Savings } from "../../detector/savings";
 import type { OAuthStatus } from "../../oauth/credentials";
 import type { GithubTokenStatus } from "../../outcomes/github/credential";
 import type { BurnStatus } from "../../query/api/burn-status";
@@ -60,15 +61,17 @@ import type { DaemonStatus } from "./client";
 const MICRO = 1_000_000;
 
 /**
- * The shared, deliberately small UA11 demo scenario.  Keep all selected-window
+ * The shared, high-volume UA11 demo scenario. Keep all selected-window
  * spend surfaces derived from these values: the Overview total, workspace rows,
  * and trend buckets must describe the same observation.
  */
 export const UA11_SCENARIO = {
-  window: { from: "2026-08-16T00:00:00.000Z", to: "2026-08-23T00:00:00.000Z", preset: "7d" },
-  spend_u: 7_790_000,
-  workspace_spend_u: [2_600_000, 1_750_000, 1_200_000, 950_000, 1_290_000],
-  trend_spend_u: [1_200_000, 980_000, 2_100_000, 750_000, 1_560_000, 880_000, 320_000],
+  window: { from: "2026-08-17T00:00:00.000Z", to: "2026-08-24T00:00:00.000Z", preset: "7d" },
+  spend_u: 3_100_000_000,
+  workspace_spend_u: [1_350_000_000, 850_000_000, 450_000_000, 275_000_000, 175_000_000],
+  trend_spend_u: [
+    410_000_000, 385_000_000, 502_000_000, 340_000_000, 465_000_000, 420_000_000, 578_000_000,
+  ],
 } as const;
 
 const UA11_WORKSPACE_IDENTITIES = [
@@ -83,16 +86,16 @@ type Ua11Preset = "24h" | "7d" | "30d";
 type Ua11DailyObservation = { bucket: string; cost_equiv_u: number; turns: number };
 
 const UA11_OLDER_DAILY_SPEND = Array.from({ length: 23 }, (_, index) => ({
-  bucket: new Date(Date.UTC(2026, 6, 24 + index)).toISOString().slice(0, 10),
-  cost_equiv_u: 100_000,
-  turns: 10,
+  bucket: new Date(Date.UTC(2026, 6, 25 + index)).toISOString().slice(0, 10),
+  cost_equiv_u: 420_000_000,
+  turns: 2_600,
 }));
 const UA11_DAILY_OBSERVATIONS: readonly Ua11DailyObservation[] = [
   ...UA11_OLDER_DAILY_SPEND,
   ...UA11_SCENARIO.trend_spend_u.map((cost_equiv_u, index) => ({
-    bucket: new Date(Date.UTC(2026, 7, 16 + index)).toISOString().slice(0, 10),
+    bucket: new Date(Date.UTC(2026, 7, 17 + index)).toISOString().slice(0, 10),
     cost_equiv_u,
-    turns: [45, 38, 72, 28, 59, 33, 12][index] ?? 0,
+    turns: [3_000, 2_700, 3_300, 2_400, 3_100, 2_800, 2_100][index] ?? 0,
   })),
 ];
 
@@ -112,13 +115,17 @@ function selectedUa11Spend(preset: Ua11Preset): number {
 }
 
 const UA11_WORKSPACE_WEIGHTS = [
-  2_600 / 7_790,
-  1_750 / 7_790,
-  1_200 / 7_790,
-  950 / 7_790,
-  1_290 / 7_790,
+  1_350 / 3_100,
+  850 / 3_100,
+  450 / 3_100,
+  275 / 3_100,
+  175 / 3_100,
 ] as const;
-const UA11_WORKSPACE_TURN_WEIGHTS = [0.35, 0.23, 0.18, 0.14, 0.1] as const;
+const UA11_WORKSPACE_TURN_WEIGHTS = [0.4, 0.3, 0.13, 0.1, 0.07] as const;
+const UA11_WORKSPACE_SESSION_WEIGHTS = [0.4, 0.3, 0.13, 0.1, 0.07] as const;
+const UA11_SEVEN_DAY_SESSION_COUNTS = [18, 18, 18, 17, 18, 18, 17] as const;
+const UA11_AVG_CONTEXT_TOKENS = 125_581;
+const UA11_AVG_OUTPUT_TOKENS = 565;
 // Price order matches the production Overview contract; Trends uses the same split.
 const UA11_MODELS = [
   "claude-fable-5",
@@ -126,12 +133,13 @@ const UA11_MODELS = [
   "claude-sonnet-5",
   "claude-haiku-4-5",
 ] as const;
-const UA11_MODEL_WEIGHTS = [0.1, 0.5, 0.3, 0.1] as const;
+const UA11_MODEL_TURN_WEIGHTS = [0.04, 0.57, 0.32, 0.07] as const;
+const UA11_MODEL_SPEND_WEIGHTS = [0.04, 0.867, 0.075, 0.018] as const;
 
 /** Preserve the stated seven-day workspace totals while keeping every day additive. */
 function ua11WorkspaceSpendSplit(day: Ua11DailyObservation): number[] {
-  const scenarioDay = Number(day.bucket.slice(-2)) - 16;
-  if (day.bucket < "2026-08-16" || scenarioDay < 0 || scenarioDay > 6) {
+  const scenarioDay = Number(day.bucket.slice(-2)) - 17;
+  if (day.bucket < "2026-08-17" || scenarioDay < 0 || scenarioDay > 6) {
     return splitWhole(day.cost_equiv_u, UA11_WORKSPACE_WEIGHTS);
   }
   if (scenarioDay < 6) return splitWhole(day.cost_equiv_u, UA11_WORKSPACE_WEIGHTS);
@@ -163,15 +171,26 @@ function selectedUa11WorkspaceTotals(
 function selectedUa11ModelTotals(preset: Ua11Preset, field: "cost_equiv_u" | "turns"): number[] {
   return selectedUa11Days(preset).reduce(
     (totals, day) => {
-      const values = splitWhole(day[field], UA11_MODEL_WEIGHTS);
+      const values = splitWhole(
+        day[field],
+        field === "turns" ? UA11_MODEL_TURN_WEIGHTS : UA11_MODEL_SPEND_WEIGHTS,
+      );
       return totals.map((total, index) => total + (values[index] ?? 0));
     },
     UA11_MODELS.map(() => 0),
   );
 }
 
+const UA11_D1_SOURCE_TOKENS = 10_000;
+const UA11_D1_TARGET_TOKENS = 2_000;
+const UA11_D1 = d1Savings(
+  UA11_D1_SOURCE_TOKENS - UA11_D1_TARGET_TOKENS,
+  selectedUa11WorkspaceTotals("7d", "turns")[0] ?? 0,
+  0.75,
+);
+
 function windowFor(preset: "24h" | "7d" | "30d"): { from: string; to: string; preset: string } {
-  const to = new Date("2026-08-23T00:00:00Z");
+  const to = new Date("2026-08-24T00:00:00Z");
   const hours = preset === "24h" ? 24 : preset === "7d" ? 168 : 720;
   const from = new Date(to.getTime() - hours * 3_600_000);
   return { from: from.toISOString(), to: to.toISOString(), preset };
@@ -230,8 +249,8 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
   const context_per_turn: ContextPerTurnRow[] = UA11_MODELS.map((model, index) => ({
     model,
     n: modelTurns[index] ?? 0,
-    avg_context_per_turn: [278_000, 238_000, 248_000, 61_000][index] ?? 0,
-    avg_output_per_turn: [620, 1146, 890, 940][index] ?? 0,
+    avg_context_per_turn: [128_000, 146_150, 110_000, 28_000][index] ?? 0,
+    avg_output_per_turn: [500, 580, 585, 390][index] ?? 0,
     usd_per_turn: (modelSpend[index] ?? 0) / MICRO / (modelTurns[index] || 1),
   }));
   const model_mix: ModelMixRow[] = UA11_MODELS.map((model, index) => ({
@@ -282,7 +301,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       cost_share: orbitSpend / total,
       has_live: false,
       usd_per_turn: orbitSpend / MICRO / (orbitTurns ?? 1),
-      avg_context_per_turn: 238_000,
+      avg_context_per_turn: 149_452,
       cache_write_pct: 0.12,
       opus_pct: 0.67,
       premium_pct: 0.71,
@@ -298,7 +317,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       cost_share: supportSpend / total,
       has_live: false,
       usd_per_turn: supportSpend / MICRO / (supportTurns ?? 1),
-      avg_context_per_turn: 180_000,
+      avg_context_per_turn: 137_000,
       cache_write_pct: 0.09,
       opus_pct: 0.45,
       premium_pct: 0.45,
@@ -314,7 +333,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       cost_share: janitorSpend / total,
       has_live: false,
       usd_per_turn: janitorSpend / MICRO / (janitorTurns ?? 1),
-      avg_context_per_turn: 120_000,
+      avg_context_per_turn: 100_000,
       cache_write_pct: 0.18,
       opus_pct: 0.3,
       premium_pct: 0.34,
@@ -330,7 +349,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       cost_share: adminSpend / total,
       has_live: false,
       usd_per_turn: adminSpend / MICRO / (adminTurns ?? 1),
-      avg_context_per_turn: 95_000,
+      avg_context_per_turn: 75_000,
       cache_write_pct: 0.07,
       opus_pct: 0.22,
       premium_pct: 0.22,
@@ -346,7 +365,7 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
       cost_share: wranglerSpend / total,
       has_live: false,
       usd_per_turn: wranglerSpend / MICRO / (wranglerTurns ?? 1),
-      avg_context_per_turn: 210_000,
+      avg_context_per_turn: 60_000,
       cache_write_pct: 0.14,
       opus_pct: 0.55,
       premium_pct: 0.58,
@@ -364,18 +383,18 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
 // ---------------------------------------------------------------------------
 
 const MOCK_PARSER_HEALTH: ParserHealth = {
-  files_seen: 42,
-  files_parsed: 40,
-  lines_quarantined: 2,
-  synthetic_excluded: 5,
-  duplicate_drops: 3,
-  parser_version_mix: { "ingest-1": 40 },
+  files_seen: 146,
+  files_parsed: 124,
+  lines_quarantined: 0,
+  synthetic_excluded: 0,
+  duplicate_drops: 0,
+  parser_version_mix: { "ingest-1": 124 },
 };
 
 /** Aggregate-only first-run status; callers can override individual counters. */
 export function mockStatus(overrides: Partial<DaemonStatus> = {}): DaemonStatus {
   return {
-    sessions: 5,
+    sessions: selectedUa11Days("7d").flatMap(ua11DailySessions).length,
     scan_state: "complete",
     lines_quarantined: 0,
     invalid_scan_root_count: 0,
@@ -420,8 +439,15 @@ const MOCK_REPORTS: Report[] = [
     period_end: "2026-08-24T00:00:00.000Z",
     generated_at: "2026-08-24T00:00:01.000Z",
     content_json: JSON.stringify({
-      spend: { cost_equiv_u: 99125, turns: 9, turns_total: 10, unpriced_turns: 0 },
-      top_recommendations: [{ rec_id: "rec-D2-global-1", modeled_savings_u_per_wk: 8969400 }],
+      spend: {
+        cost_equiv_u: UA11_SCENARIO.spend_u,
+        turns: 19_400,
+        turns_total: 19_400,
+        unpriced_turns: 0,
+      },
+      top_recommendations: [
+        { rec_id: "rec-D1-ws-1-mock000000000000", modeled_savings_u_per_wk: UA11_D1.savingsU },
+      ],
       outcomes: {
         terminal_n: 12,
         success_rate: 0.75,
@@ -529,27 +555,34 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     category: "CONTEXT",
     scope_workspace_id: "ws-1",
     lever: "Trim stale instructions from this workspace's CLAUDE.md.",
-    modeled_savings_u_per_wk: 2_600_000,
+    modeled_savings_u_per_wk: UA11_D1.savingsU,
     run_cost_u: null,
     modeled_formula: {
-      model: "D1_CONTEXT_FILE_REDUCTION_V1",
-      inputs: { tokens_removed: 40_000, sessions_per_week: 4 },
-      expression: "tokens_removed * sessions_per_week",
+      ...UA11_D1.formula,
       kind: "MODELED",
     },
     evidence: {
       component: "CLAUDE_MD",
       file_ref: "CLAUDE.md",
       title: "Trim stale CLAUDE.md instructions",
-      source_tokens: 80_000,
-      delta_context_tokens: 40_000,
+      source_tokens: UA11_D1_SOURCE_TOKENS,
+      source_target: UA11_D1_TARGET_TOKENS,
+      delta_context_tokens: UA11_D1_SOURCE_TOKENS - UA11_D1_TARGET_TOKENS,
+      turns_per_week: selectedUa11WorkspaceTotals("7d", "turns")[0] ?? 0,
     },
     target_metric: "CONTEXT_TOKENS:CLAUDE_MD:CLAUDE.md",
     state: "PROPOSED",
     created_at: window.to,
     dismissed_until: null,
-    headroom: { tokens_per_wk_freed: 160_000, tokens_per_session_freed: 40_000 },
-    sessions_per_week: 4,
+    headroom: {
+      tokens_per_wk_freed:
+        (UA11_D1_SOURCE_TOKENS - UA11_D1_TARGET_TOKENS) *
+        (selectedUa11WorkspaceTotals("7d", "turns")[0] ?? 0),
+      tokens_per_session_freed: UA11_D1_SOURCE_TOKENS - UA11_D1_TARGET_TOKENS,
+    },
+    sessions_per_week: selectedUa11Days("7d")
+      .flatMap(ua11DailySessions)
+      .filter((session) => session.workspace_id === "ws-1").length,
     steps: [{ kind: "trim", target: "CLAUDE_MD", max_lines: 80 } satisfies BoundedStep],
     cross_workspace: false,
     workspace_multiplier: null,
@@ -577,8 +610,8 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
       kind: "DIRECTIONAL",
     },
     evidence: {
-      qualifying_session_count: 4,
-      session_ids: ["sess-mock-1", "sess-mock-2", "sess-mock-3", "sess-mock-4"],
+      qualifying_session_count: ua11D2QualifyingSessions().length,
+      session_ids: ua11D2QualifyingSessions().map((session) => session.session_id),
       turn_count_threshold: 150,
       avg_context_threshold: 180_000,
       raw_context_average_tokens_per_turn: 220_000,
@@ -598,13 +631,47 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     dismissed_until: null,
     // P2 enrichment
     headroom: null, // D2 evidence lacks delta_context_tokens/turns_per_week
-    sessions_per_week: 4,
+    sessions_per_week: ua11D2QualifyingSessions().length,
     steps: [
       {
         kind: "generic",
         description: "/clear between unrelated tasks; split long work; avoid mid-task /compact.",
       } satisfies BoundedStep,
     ],
+    cross_workspace: true,
+    workspace_multiplier: null,
+    file_ref: null,
+  };
+
+  const adoptedD1Card: RecommendationCard = {
+    ...d1Card,
+    rec_id: "rec-D1-global-mockledger0001",
+    scope_workspace_id: null,
+    lever: "Trim the global CLAUDE.md to its load-bearing core.",
+    state: "ADOPTED",
+  };
+  const adoptedD2Card: RecommendationCard = {
+    ...d2Card,
+    rec_id: "rec-D2-global-mockledger0002",
+    state: "ADOPTED",
+  };
+  const adoptedD5Card: RecommendationCard = {
+    rec_id: "rec-D5-global-mockledger-warning",
+    detector_id: "D5",
+    category: "LIMIT",
+    scope_workspace_id: null,
+    lever: "Configure a weekly token limit.",
+    modeled_savings_u_per_wk: null,
+    run_cost_u: null,
+    modeled_formula: { model: "none", inputs: {}, kind: "WARNING" },
+    evidence: {},
+    target_metric: "limit_configuration",
+    state: "ADOPTED",
+    created_at: window.to,
+    dismissed_until: null,
+    headroom: null,
+    sessions_per_week: null,
+    steps: [{ kind: "generic", description: "Configure a weekly token limit." }],
     cross_workspace: true,
     workspace_multiplier: null,
     file_ref: null,
@@ -617,7 +684,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
         detector_id: "D2",
         label: "Session hygiene",
         recs: [d2Card],
-        session_count: 4,
+        session_count: ua11D2QualifyingSessions().length,
         total_savings_u_per_wk: 0,
       },
       {
@@ -629,7 +696,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
       },
     ],
     limit_warnings: [],
-    adopted: [],
+    adopted: [adoptedD1Card, adoptedD2Card, adoptedD5Card],
     dismissed: [],
     detectors: [
       {
@@ -642,7 +709,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
         detector_id: "D2",
         name: "SESSION_LONG_FULL_CONTEXT",
         status: "ACTIVE",
-        note: "4 qualifying long-context sessions this week",
+        note: `${ua11D2QualifyingSessions().length} qualifying long-context sessions this week`,
       },
       {
         detector_id: "D5",
@@ -710,11 +777,11 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
 export function mockLedger(): ApiResponse<LedgerView> {
   const effectiveEffect: EffectRow = {
     rec_id: "rec-D1-global-mockledger0001",
-    measured_at: "2026-08-20T09:00:00.000Z",
-    before_from: "2026-08-18T00:00:00.000Z",
-    before_to: "2026-08-20T09:00:00.000Z",
-    after_from: "2026-08-20T09:00:00.000Z",
-    after_to: "2026-08-24T12:00:00.000Z",
+    measured_at: "2026-08-24T00:00:00.000Z",
+    before_from: "2026-07-27T00:00:00.000Z",
+    before_to: "2026-08-10T00:00:00.000Z",
+    after_from: "2026-08-10T00:00:00.000Z",
+    after_to: "2026-08-24T00:00:00.000Z",
     before_value: 32600,
     after_value: 20200,
     before_n: 6,
@@ -744,7 +811,7 @@ export function mockLedger(): ApiResponse<LedgerView> {
     rec_id: "rec-D1-global-mockledger0001",
     detector_id: "D1",
     lever: "Trim the global CLAUDE.md to its load-bearing core.",
-    adopted_at: "2026-08-20T09:00:00.000Z",
+    adopted_at: "2026-08-10T00:00:00.000Z",
     state: "MEASURED_EFFECTIVE",
     target_metric: "avg_context_per_turn",
     modeled_savings_u_per_wk: 4_200_000, // $4.20/wk raw
@@ -760,8 +827,8 @@ export function mockLedger(): ApiResponse<LedgerView> {
     adopted_at: "2026-08-21T14:30:00.000Z",
     state: "MEASURING",
     target_metric: "avg_context_per_turn",
-    modeled_savings_u_per_wk: 12_000_000, // $12.00/wk raw
-    modeled_cap_weighted_u_per_wk: 1_200_000, // $1.20/wk cap-weighted
+    modeled_savings_u_per_wk: null,
+    modeled_cap_weighted_u_per_wk: null,
     effects: [measuringEffect],
     confounded_window: true,
   };
@@ -866,14 +933,13 @@ export function mockTrends(filter: WindowFilter): ApiResponse<TrendData> {
   const preset = filter.preset ?? "7d";
   const window = windowFor(preset);
   const days = selectedUa11Days(preset);
-  const modelWeights = UA11_MODEL_WEIGHTS;
   const models = UA11_MODELS;
   const data: TrendData = {
     bucket: "day",
     buckets: [...days],
     by_model: days.flatMap((day) => {
-      const spend = splitWhole(day.cost_equiv_u, modelWeights);
-      const turns = splitWhole(day.turns, modelWeights);
+      const spend = splitWhole(day.cost_equiv_u, UA11_MODEL_SPEND_WEIGHTS);
+      const turns = splitWhole(day.turns, UA11_MODEL_TURN_WEIGHTS);
       return models.map((model, index) => ({
         bucket: day.bucket,
         model,
@@ -976,19 +1042,73 @@ export function mockLiveSessions(): ApiResponse<PagedList<LiveSessionRow>> {
 function ua11DailySessions(day: Ua11DailyObservation): SessionSummary[] {
   const spend = ua11WorkspaceSpendSplit(day);
   const turns = splitWhole(day.turns, UA11_WORKSPACE_TURN_WEIGHTS);
-  return UA11_WORKSPACE_IDENTITIES.map((workspace, index) => ({
-    ...ua11SessionSummary(
-      `ua11-session-${day.bucket}-${workspace.workspace_id}`,
-      workspace.workspace_id,
-    ),
-    cost_equiv_u: spend[index] ?? 0,
-    turn_count: turns[index] ?? 0,
-    first_turn_at: `${day.bucket}T10:00:00.000Z`,
-    last_turn_at: new Date(
-      Date.parse(`${day.bucket}T10:00:00.000Z`) + Math.max(0, (turns[index] ?? 0) - 1) * 180_000,
-    ).toISOString(),
-    state: "RECONCILED",
-  }));
+  const scenarioDay = Number(day.bucket.slice(-2)) - 17;
+  const sessionCount =
+    day.bucket >= "2026-08-17" &&
+    scenarioDay >= 0 &&
+    scenarioDay < UA11_SEVEN_DAY_SESSION_COUNTS.length
+      ? (UA11_SEVEN_DAY_SESSION_COUNTS[scenarioDay] ?? 17)
+      : 17;
+  const sessionsByWorkspace = splitWhole(sessionCount, UA11_WORKSPACE_SESSION_WEIGHTS);
+  return UA11_WORKSPACE_IDENTITIES.flatMap((workspace, workspaceIndex) => {
+    const count = sessionsByWorkspace[workspaceIndex] ?? 0;
+    const spendBySession = splitWhole(
+      spend[workspaceIndex] ?? 0,
+      Array.from({ length: count }, () => 1 / count),
+    );
+    const turnsBySession = splitWhole(
+      turns[workspaceIndex] ?? 0,
+      Array.from({ length: count }, () => 1 / count),
+    );
+    return Array.from({ length: count }, (_, sessionIndex) => {
+      const start = new Date(
+        Date.parse(`${day.bucket}T08:00:00.000Z`) + (workspaceIndex * 3 + sessionIndex) * 1_800_000,
+      );
+      const sessionTurns = turnsBySession[sessionIndex] ?? 0;
+      return {
+        ...ua11SessionSummary(
+          `ua11-session-${day.bucket}-${workspace.workspace_id}-${sessionIndex + 1}`,
+          workspace.workspace_id,
+        ),
+        cost_equiv_u: spendBySession[sessionIndex] ?? 0,
+        turn_count: sessionTurns,
+        first_turn_at: start.toISOString(),
+        last_turn_at: new Date(
+          start.getTime() + Math.max(0, sessionTurns - 1) * 30_000,
+        ).toISOString(),
+        state: "RECONCILED" as const,
+      };
+    });
+  });
+}
+
+function isUa11D2Candidate(session: SessionSummary): boolean {
+  return (
+    session.workspace_id === "ws-1" &&
+    session.session_id.endsWith("-1") &&
+    ["2026-08-17", "2026-08-18", "2026-08-19"].some((date) => session.session_id.includes(date))
+  );
+}
+
+function ua11SessionContextTokens(session: SessionSummary): number {
+  if (isUa11D2Candidate(session)) return 220_000;
+  // Baselines offset the three 220K D2 sessions so every workspace summary
+  // remains the turn-weighted mean of its public session timelines.
+  return (
+    {
+      "ws-1": 144_458,
+      "ws-2": 137_000,
+      "ws-3": 100_000,
+      "ws-4": 75_000,
+      "ws-5": 60_000,
+    }[session.workspace_id] ?? UA11_AVG_CONTEXT_TOKENS
+  );
+}
+
+function ua11D2QualifyingSessions(): SessionSummary[] {
+  return selectedUa11Days("7d")
+    .flatMap(ua11DailySessions)
+    .filter((session) => session.turn_count > 150 && ua11SessionContextTokens(session) > 180_000);
 }
 
 function ua11SessionSummary(sessionId: string, workspaceId: string): SessionSummary {
@@ -1000,7 +1120,7 @@ function ua11SessionSummary(sessionId: string, workspaceId: string): SessionSumm
     ua11WorkspaceSpendSplit({
       bucket: "2026-08-16",
       cost_equiv_u: UA11_SCENARIO.trend_spend_u[0],
-      turns: 45,
+      turns: 3_000,
     })[UA11_WORKSPACE_IDENTITIES.indexOf(workspace)] ?? 0;
   const data: SessionSummary = {
     session_id: sessionId,
@@ -1012,8 +1132,8 @@ function ua11SessionSummary(sessionId: string, workspaceId: string): SessionSumm
     state: "LIVE",
     turn_count: 2,
     cost_equiv_u: detailSpend,
-    first_turn_at: "2026-08-16T10:00:00Z",
-    last_turn_at: "2026-08-16T10:03:00Z",
+    first_turn_at: "2026-08-17T10:00:00Z",
+    last_turn_at: "2026-08-17T10:00:30Z",
     hygiene_flags: [],
     compaction_count: 0,
     api_error_count: 0,
@@ -1121,8 +1241,14 @@ export function mockTurnTimeline(
     return {
       ...template,
       message_id: `turn-${index + 1}`,
-      ts: new Date(Date.parse(session.first_turn_at ?? "") + index * 180_000).toISOString(),
+      ts: new Date(Date.parse(session.first_turn_at ?? "") + index * 30_000).toISOString(),
       cost_equiv_u: costs[index] ?? 0,
+      output_tokens: sessionId.startsWith("ua11-session-")
+        ? UA11_AVG_OUTPUT_TOKENS
+        : template.output_tokens,
+      context_tokens: sessionId.startsWith("ua11-session-")
+        ? ua11SessionContextTokens(session)
+        : template.context_tokens,
       provisional: sessionId.startsWith("ua11-session-") ? false : index === 0,
     };
   });
@@ -1143,17 +1269,38 @@ export function mockTurnTimeline(
 // Spend-Viz-v2 fixtures
 // ---------------------------------------------------------------------------
 
+const UA11_CACHE_CREATION_BY_BUCKET: Readonly<Record<string, number>> = {
+  "2026-08-17": 24_000_000,
+  "2026-08-18": 22_000_000,
+  "2026-08-19": 110_000_000,
+  "2026-08-20": 21_000_000,
+  "2026-08-21": 25_000_000,
+  "2026-08-22": 23_000_000,
+  "2026-08-23": 18_000_000,
+};
+
+function ua11CacheCreationTokens(bucket: string): number {
+  return UA11_CACHE_CREATION_BY_BUCKET[bucket] ?? 20_000_000;
+}
+
 /** Mock token-flavor decomposition — cap-proxy-weighted display. */
-export function mockFlavorDecomposition(_filter: WindowFilter): ApiResponse<FlavorDecomposition> {
-  const window = windowFor("7d");
+export function mockFlavorDecomposition(filter: WindowFilter): ApiResponse<FlavorDecomposition> {
+  const preset = filter.preset ?? "7d";
+  const window = windowFor(preset);
+  const turns = selectedUa11Days(preset).reduce((sum, day) => sum + day.turns, 0);
+  const scale = turns / 19_400;
   const coeff = 0.1;
 
-  const rawInput = 8_500_000;
-  const rawOutput = 1_200_000;
-  const rawCw5m = 2_000_000;
-  const rawCw1h = 800_000;
+  const rawInput = Math.round(900_000_000 * scale);
+  const rawOutput = turns * UA11_AVG_OUTPUT_TOKENS;
+  const cacheCreation = selectedUa11Days(preset).reduce(
+    (sum, day) => sum + ua11CacheCreationTokens(day.bucket),
+    0,
+  );
+  const rawCw5m = Math.round(cacheCreation * 0.82);
+  const rawCw1h = cacheCreation - rawCw5m;
   const rawCwOther = 0;
-  const rawCr = 14_000_000;
+  const rawCr = Math.round(1_766_000_000 * scale);
 
   const totalRaw = rawInput + rawOutput + rawCw5m + rawCw1h + rawCwOther + rawCr;
   const totalWeighted = rawInput + rawOutput + rawCw5m + rawCw1h + rawCwOther + rawCr * coeff;
@@ -1195,66 +1342,27 @@ export function mockFlavorDecomposition(_filter: WindowFilter): ApiResponse<Flav
     cap_weighted_tokens: rawInput + rawOutput + rawCw5m + rawCw1h + rawCr * coeff,
     coeff_used: coeff,
     coeff_unverified: true,
-    turns: 287,
+    turns,
   };
 
   return { data, meta: { ...baseMeta(window, 6), claim_kind: "PROXY" } };
 }
 
 /** Mock cache-write spike timeline — 7-day series with one spike. */
-export function mockCacheWriteTrend(_filter: WindowFilter): ApiResponse<CacheWriteTrend> {
-  const window = windowFor("7d");
-  const buckets: CacheWriteBucketRow[] = [
-    {
-      bucket: "2026-08-17",
-      cache_creation_tokens: 200_000,
-      cache_read_tokens: 1_400_000,
-      efficiency_ratio: 0.875,
-      turns: 45,
-    },
-    {
-      bucket: "2026-08-18",
-      cache_creation_tokens: 180_000,
-      cache_read_tokens: 1_260_000,
-      efficiency_ratio: 0.875,
-      turns: 38,
-    },
-    {
-      bucket: "2026-08-19",
-      cache_creation_tokens: 950_000,
-      cache_read_tokens: 800_000,
-      efficiency_ratio: 0.457,
-      turns: 72,
-    },
-    {
-      bucket: "2026-08-20",
-      cache_creation_tokens: 175_000,
-      cache_read_tokens: 1_225_000,
-      efficiency_ratio: 0.875,
-      turns: 28,
-    },
-    {
-      bucket: "2026-08-21",
-      cache_creation_tokens: 190_000,
-      cache_read_tokens: 1_330_000,
-      efficiency_ratio: 0.875,
-      turns: 59,
-    },
-    {
-      bucket: "2026-08-22",
-      cache_creation_tokens: 165_000,
-      cache_read_tokens: 1_155_000,
-      efficiency_ratio: 0.875,
-      turns: 33,
-    },
-    {
-      bucket: "2026-08-23",
-      cache_creation_tokens: 70_000,
-      cache_read_tokens: 490_000,
-      efficiency_ratio: 0.875,
-      turns: 12,
-    },
-  ];
+export function mockCacheWriteTrend(filter: WindowFilter): ApiResponse<CacheWriteTrend> {
+  const preset = filter.preset ?? "7d";
+  const window = windowFor(preset);
+  const buckets: CacheWriteBucketRow[] = selectedUa11Days(preset).map((day) => {
+    const cache_creation_tokens = ua11CacheCreationTokens(day.bucket);
+    const cache_read_tokens = day.turns * 91_000;
+    return {
+      bucket: day.bucket,
+      cache_creation_tokens,
+      cache_read_tokens,
+      efficiency_ratio: cache_read_tokens / (cache_read_tokens + cache_creation_tokens),
+      turns: day.turns,
+    };
+  });
   const data: CacheWriteTrend = { buckets, spike_buckets: ["2026-08-19"] };
   return { data, meta: baseMeta(window, buckets.length) };
 }
@@ -1481,10 +1589,10 @@ export function mockHotSessions(filter: WindowFilter = { preset: "7d" }): HotSes
       workspace_id: session.workspace_id,
       turns: session.turn_count,
       cost_equiv_u: session.cost_equiv_u,
-      total_output_tokens: session.turn_count * 400,
-      avg_output_tokens: 400,
-      total_context_tokens: session.turn_count * 2200,
-      avg_context_tokens: 2200,
+      total_output_tokens: session.turn_count * UA11_AVG_OUTPUT_TOKENS,
+      avg_output_tokens: UA11_AVG_OUTPUT_TOKENS,
+      total_context_tokens: session.turn_count * ua11SessionContextTokens(session),
+      avg_context_tokens: ua11SessionContextTokens(session),
       model: "claude-sonnet-5",
       last_turn_at: session.last_turn_at ?? "",
       api_error_count: 0,
@@ -1557,10 +1665,10 @@ export function mockSessionDrivers(sessionId: string, cheap = false): ApiRespons
           detector_id: "D6",
           label: "TOOL_RESULT_BLOAT",
           measured: {
-            tool_result_bytes: 120_000,
+            tool_result_bytes: 2_100_000,
             bloat_share: 0.41,
             attributed_tool: "Bash",
-            turn_count: 12,
+            turn_count: 210,
           },
           share: 0.41,
           rec_id: "rec-d6-1",
@@ -1718,20 +1826,26 @@ export function mockPractices(): PracticesResult {
 /** Efficiency headroom fixture — 3 open recs, ~35% modeled headroom. */
 export function mockEfficiencyHeadroom(): ApiResponse<EfficiencyHeadroom> {
   const window = windowFor("7d");
-  const headroom_u_per_wk = 2_450_000; // ~$2.45/wk
-  const actual_u_per_wk = 7_000_000; // ~$7.00/wk
+  const active = mockRecommendations().data?.active ?? [];
+  const headroom_u_per_wk = active.reduce(
+    (sum, recommendation) => sum + (recommendation.modeled_savings_u_per_wk ?? 0),
+    0,
+  );
+  const actual_u_per_wk = UA11_SCENARIO.spend_u;
   const data: EfficiencyHeadroom = {
     headroom_u_per_wk,
     actual_u_per_wk,
     headroom_pct: headroom_u_per_wk / actual_u_per_wk,
-    open_rec_count: 3,
+    open_rec_count: active.filter(
+      (recommendation) => recommendation.modeled_savings_u_per_wk !== null,
+    ).length,
     from: window.from,
     to: window.to,
   };
   return {
     data,
     meta: {
-      n: 3,
+      n: data.open_rec_count,
       window,
       qualification: {
         provisional_excluded: true,

@@ -18,15 +18,26 @@ glossary — sidebar → **"How to read this dashboard."**
 - **Why is my dashboard empty?** Check [first launch and scan state](getting-started.md#first-launch).
 
 <details>
-<summary>Earlier animated synthetic dashboard preview (optional)</summary>
+<summary>Animated synthetic dashboard walkthrough (optional)</summary>
 
 ![Animated tour of the synthetic dashboard](assets/dashboard.gif)
 
 </details>
 
-The refreshed static screenshots below show the current interface without animation. The older
-animation may differ. Sample values illustrate the views; some fixture panels are independent
-examples. Measurement claims must come from your selected window and ledger evidence.
+The screenshots and animation use the same synthetic heavy-use scenario: roughly $3,100
+in weekly list-price equivalents and 19,400 turns across anonymized workspaces. These are
+illustrative values, not a subscription bill or a promise of savings. The context-reduction
+estimate uses removable tokens, observed turns, and a cache-read price; it is a projection.
+The ledger shows separate seeded measurement examples, not the result of actions in the tour.
+
+The animation holds seven scenes for 5–7 seconds each: Overview, limits and hot sessions,
+Workspaces, session detail, a proposed context change, its evidence, and the Impact ledger.
+The static images below provide an alternative to animation.
+
+To reproduce the media, start an isolated `npx vite --mode test --host 127.0.0.1 --port 47841 --strictPort`
+and use `scripts/demo/capture.js` with Playwright CLI, followed by `scripts/demo/compose.py`.
+The capture script fixes the clock to the historical sample week; screenshots carry a
+synthetic-data footer. Capture only the fixture instance.
 
 ## Overview
 
