@@ -483,7 +483,8 @@ describe("ESF2 rollback recovery and comparison metadata", () => {
       attestedAt: "2026-02-20T00:00:00Z",
       actualRollbackAt: "2026-02-16T00:00:00Z",
     });
-    expect(engine.getCycle("outside-1")).toMatchObject({ comparisonStatus: "DESCRIPTIVE" });
+    // The full frozen window matured before this known outside-window rollback.
+    expect(engine.getCycle("outside-1")).toMatchObject({ comparisonStatus: "COMPARABLE" });
     expect(engine.getCycle("outside-1")?.comparisonReasons).not.toEqual(
       expect.arrayContaining(["ROLLBACK_IN_WINDOW", "ROLLBACK_TIME_UNKNOWN"]),
     );

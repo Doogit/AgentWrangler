@@ -489,7 +489,9 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
         ).run(at, cycleId);
         return getCycle(db, cycleId) as EffectCycle;
       }
-      const end = stopped ? at : cycle.scheduledObservationTo;
+      // A lifecycle action may arrive before the next pass has finalized an overdue cycle.
+      // Preserve its frozen window even when the action wins the terminal-state race.
+      const end = stopped && at < cycle.scheduledObservationTo ? at : cycle.scheduledObservationTo;
       let bundle = options.observer.observe(
         db,
         cycle,
@@ -504,7 +506,14 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
       );
       bundle.guardrails = bundle.guardrails.map(guardrailDirection);
       const { direction } = directionFor(handler, bundle.before.value, bundle.after.value);
-      const cmp = comparison(db, cycle, bundle, direction, stopped, end);
+      const cmp = comparison(
+        db,
+        cycle,
+        bundle,
+        direction,
+        stopped && end < cycle.scheduledObservationTo,
+        end,
+      );
       const nextState = stopped ? "STOPPED" : "FINALIZED";
       const result = db
         .prepare(

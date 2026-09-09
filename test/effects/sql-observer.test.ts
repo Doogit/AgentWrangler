@@ -53,6 +53,42 @@ function track(db: Database.Database, id: string, detector: string, metric: stri
 }
 
 describe("SQLite effect observations", () => {
+  it.each(["stop", "rollback", "attest"] as const)(
+    "keeps the frozen deadline when %s reaches an overdue cycle before the scheduled pass",
+    (action) => {
+      const db = createInMemoryFixtureDb();
+      sample(db, "before", 10, "2026-01-25T00:00:00.000Z");
+      sample(db, "after", 10, "2026-02-05T00:00:00.000Z");
+      sample(db, "past-deadline", 10, "2026-02-15T00:10:00.000Z");
+      db.prepare("UPDATE turns SET cache_read_tokens=120 WHERE session_id LIKE 'after-%'").run();
+      db.prepare(
+        "UPDATE turns SET cache_read_tokens=0 WHERE session_id LIKE 'past-deadline-%'",
+      ).run();
+      rec(db, "d8", "D8", "d8-cache-ratio");
+      const engine = track(db, "d8", "D8", "d8-cache-ratio");
+      const at = "2026-02-15T00:30:00.000Z";
+      if (action === "stop")
+        engine.stop("d8-1", { idempotencyKey: "stop", reason: "USER_STOPPED", at });
+      else if (action === "rollback")
+        engine.rollback("d8-1", { idempotencyKey: "rollback", requestedAt: at });
+      else
+        engine.attestExternalRollback("d8-1", {
+          idempotencyKey: "attest",
+          attestationSource: "USER_ATTESTED",
+          attestedAt: at,
+        });
+      expect(engine.getCycle("d8-1")).toMatchObject({
+        state: "STOPPED",
+        observationTo: "2026-02-15T00:00:00.000Z",
+        terminalAt: at,
+        targetDirection: "IMPROVED",
+        finalEvidence: { after: { value: 12, sessionN: 10 } },
+      });
+      expect(engine.getCycle("d8-1")?.comparisonReasons).not.toContain("WINDOW_STOPPED_EARLY");
+      db.close();
+    },
+  );
+
   it("freezes the 9-session baseline and does not promote it after late historical insertion", () => {
     const db = createInMemoryFixtureDb();
     sample(db, "before", 9, "2026-01-25T00:00:00Z");
