@@ -45,6 +45,7 @@ import {
 import { loadConfig } from "./config.js";
 import { runEffectMeasurementPass } from "./effect-pass.js";
 import { createServer } from "./http.js";
+import { createDaemonLifecycle } from "./lifecycle.js";
 import { type OutcomesPassResult, createOutcomesPassRunner } from "./outcomes-pass.js";
 import { setReady, setScanRoots, setScanState } from "./readiness.js";
 
@@ -202,11 +203,6 @@ runProbePass("boot");
 // The runner (src/daemon/outcomes-pass.ts) adds a hard 15-min per-pass deadline:
 // a hung pass can no longer wedge the poll cadence forever — the running flag
 // always clears and the next poll resumes.
-let outcomesTimer: NodeJS.Timeout | null = null;
-let reportsTimer: NodeJS.Timeout | null = null;
-let reportsRunning = false;
-let bptCalibrationTimer: NodeJS.Timeout | null = null;
-
 const outcomesRunner = createOutcomesPassRunner({
   db,
   probe: () => runProbePass("poll"),
@@ -222,31 +218,32 @@ function runOutcomesPass(): Promise<OutcomesPassResult> {
   return outcomesRunner.run();
 }
 
+// R12 bytes→token calibration — best-effort, never crash the daemon.
+// Runs on boot (deferred) and weekly when: opt-in enabled AND ratio is absent
+// or older than 30 days. Mirrors the outcomes bootstrap pattern.
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+function runBptCalibrationIfStale(): void {
+  const enabled = bptConfigGet(db, "bytes_per_token_calibration_enabled");
+  if (enabled !== "true") return;
+  const measuredAt = bptConfigGet(db, "bytes_per_token_measured_at");
+  if (measuredAt !== null && Date.now() - new Date(measuredAt).getTime() < THIRTY_DAYS_MS) return;
+  calibrateBytesPerToken(db).catch((e) => {
+    console.error(
+      `Bytes-per-token calibration failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  });
+}
+
 // ── Deferred boot scan (runs AFTER the HTTP port is bound) ───────────────────
 // startTailBatched() performs a yielding initial back-scan (ingestAllKnown +
 // reconcile), then arms the tail/discovery timers. We do NOT
 // also call runBackscan — that would spin up a second Ingestor whose separate
 // Health instance is the one surfaced in Settings. One Ingestor, one Health.
 // Bounded: if ingestion fails to start, still serve the dashboard (degraded).
-let handle: TailHandle | null = null;
-
-// One-shot guard: runBootScan executes exactly once regardless of how many
-// requests or timers fire kickBootScan concurrently.
-let scanKicked = false;
-
-function kickBootScan(): void {
-  if (scanKicked) return;
-  scanKicked = true;
-  // Use setImmediate so the triggering HTTP response flushes before boot work
-  // starts. The scan itself also yields between bounded batches.
-  setImmediate(() => {
-    runBootScan().catch((e) => {
-      console.error(`Boot scan failed: ${e instanceof Error ? e.message : String(e)}`);
-    });
-  });
-}
-
-async function runBootScan(): Promise<void> {
+// The one-shot kick guard, the daemon-owned intervals, and shutdown ordering
+// live in the lifecycle harness (src/daemon/lifecycle.ts).
+async function runBootScan(): Promise<TailHandle | null> {
+  let handle: TailHandle | null = null;
   try {
     const scanRoots = getSettingsData(db).scan_roots;
     setScanRoots(scanRoots);
@@ -311,22 +308,8 @@ async function runBootScan(): Promise<void> {
     }
   });
 
-  // R12 bytes→token calibration — best-effort, never crash the daemon.
-  // Runs on boot (deferred) and weekly when: opt-in enabled AND ratio is absent
-  // or older than 30 days. Mirrors the outcomes bootstrap pattern.
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-  function runBptCalibrationIfStale(): void {
-    const enabled = bptConfigGet(db, "bytes_per_token_calibration_enabled");
-    if (enabled !== "true") return;
-    const measuredAt = bptConfigGet(db, "bytes_per_token_measured_at");
-    if (measuredAt !== null && Date.now() - new Date(measuredAt).getTime() < THIRTY_DAYS_MS) return;
-    calibrateBytesPerToken(db).catch((e) => {
-      console.error(
-        `Bytes-per-token calibration failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    });
-  }
-
+  // Deferred boot calibration check (the weekly interval is armed by the
+  // lifecycle harness after this scan resolves).
   setImmediate(() => {
     try {
       runBptCalibrationIfStale();
@@ -337,44 +320,25 @@ async function runBootScan(): Promise<void> {
     }
   });
 
-  bptCalibrationTimer = setInterval(
-    () => {
-      try {
-        runBptCalibrationIfStale();
-      } catch (e) {
-        console.error(
-          `Bytes-per-token calibration poll failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-    },
-    7 * 24 * 60 * 60 * 1000, // weekly
-  );
-
-  // 10-minute poll — guarded by outcomesRunning to prevent overlap
-  outcomesTimer = setInterval(
-    () => {
-      runOutcomesPass().catch((e) => {
-        console.error(`Outcomes poll failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
-    },
-    10 * 60 * 1000,
-  );
-
-  reportsTimer = setInterval(
-    async () => {
-      if (reportsRunning) return;
-      reportsRunning = true;
-      try {
-        await Promise.resolve(generateWeeklyReport(db, new Date()));
-      } catch (e) {
-        console.error(`Weekly report poll failed: ${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        reportsRunning = false;
-      }
-    },
-    7 * 24 * 60 * 60 * 1000,
-  );
+  return handle;
 }
+
+// ── Lifecycle harness: boot-kick guard, daemon intervals, shutdown ordering ──
+// closeServer closes over `server` (declared below); shutdown only ever runs
+// after listen, so the reference is initialized by then.
+const lifecycle = createDaemonLifecycle({
+  bootScan: runBootScan,
+  calibrationTick: runBptCalibrationIfStale,
+  outcomesTick: () => {
+    runOutcomesPass().catch((e) => {
+      console.error(`Outcomes poll failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
+  },
+  reportsTick: () => generateWeeklyReport(db, new Date()),
+  closeServer: (onClosed) => server.close(onClosed),
+  closeDb: () => db.close(),
+  onClosed: () => process.exit(0),
+});
 
 // ── 4. Start HTTP server ──────────────────────────────────────────────────────
 // Bind the port BEFORE the back-scan so the loading page is delivered
@@ -387,7 +351,7 @@ const server: http.Server = createServer(
   config.port,
   config.uiRoot,
   sessionToken,
-  kickBootScan,
+  lifecycle.kickBootScan,
 );
 server.listen(config.port, "127.0.0.1", () => {
   const url = `http://127.0.0.1:${config.port}`;
@@ -403,7 +367,7 @@ server.listen(config.port, "127.0.0.1", () => {
   // Fallback: kick the back-scan after 3 s even if no browser request arrives
   // (headless mode, --no-open, CI). The one-shot guard in kickBootScan() makes
   // whichever trigger fires first the only one that runs the scan.
-  setTimeout(kickBootScan, 3000);
+  lifecycle.armBootFallback();
 });
 
 /** Open `url` in the system default browser (best-effort; never crashes the daemon). */
@@ -428,21 +392,9 @@ function openBrowser(url: string): void {
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 process.on("SIGINT", () => {
   console.log("Shutting down…");
-  handle?.stop();
-  if (outcomesTimer !== null) clearInterval(outcomesTimer);
-  if (reportsTimer !== null) clearInterval(reportsTimer);
-  server.close(() => {
-    db.close();
-    process.exit(0);
-  });
+  lifecycle.shutdown();
 });
 
 process.on("SIGTERM", () => {
-  handle?.stop();
-  if (outcomesTimer !== null) clearInterval(outcomesTimer);
-  if (reportsTimer !== null) clearInterval(reportsTimer);
-  server.close(() => {
-    db.close();
-    process.exit(0);
-  });
+  lifecycle.shutdown();
 });

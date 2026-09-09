@@ -36,6 +36,7 @@
     "evidence:judge-g2": "node --import tsx/esm src/evidence/g2/cli.ts",
     "build:daemon": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "build:ui": "vite build",
+    "build:ui:profiling": "vite build --mode profiling",
     "build": "npm run build:daemon && npm run build:ui",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build && npm test"

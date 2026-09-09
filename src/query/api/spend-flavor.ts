@@ -18,7 +18,7 @@
  */
 
 import type { Db } from "../../db/open.js";
-import { capWeightedTokens, resolveCapReadCoeff } from "../cap-weighted.js";
+import { capWeightExprSql, capWeightedTokens, resolveCapReadCoeff } from "../cap-weighted.js";
 import { getQueryDb } from "../db-context.js";
 import type { ApiResponse, QueryWindow } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
@@ -194,20 +194,26 @@ interface FlavorAggRow {
   raw_cw1h: number;
   raw_cw_other: number;
   raw_cr: number;
+  /** SUM of capWeightExprSql per turn — same expression/order as capWeightedTokens (PERF2). */
+  cap_weighted_raw: number | null;
   turns: number;
 }
 
-const FLAVOR_SQL = `
+// One scan supplies both the flavor sums and the cap-weighted total. The
+// weighted term reuses capWeightExprSql so the meter formula (and its per-row
+// summation/rounding behavior) cannot drift from capWeightedTokens.
+const flavorSql = (coeff: number): string => `
   SELECT
-    COALESCE(SUM(input_tokens), 0)                              AS raw_input,
-    COALESCE(SUM(output_tokens), 0)                             AS raw_output,
-    COALESCE(SUM(cache_write_5m), 0)                            AS raw_cw5m,
-    COALESCE(SUM(cache_write_1h), 0)                            AS raw_cw1h,
-    COALESCE(SUM(cache_write_other), 0)                         AS raw_cw_other,
-    COALESCE(SUM(cache_read_tokens), 0)                         AS raw_cr,
+    COALESCE(SUM(t.input_tokens), 0)                            AS raw_input,
+    COALESCE(SUM(t.output_tokens), 0)                           AS raw_output,
+    COALESCE(SUM(t.cache_write_5m), 0)                          AS raw_cw5m,
+    COALESCE(SUM(t.cache_write_1h), 0)                          AS raw_cw1h,
+    COALESCE(SUM(t.cache_write_other), 0)                       AS raw_cw_other,
+    COALESCE(SUM(t.cache_read_tokens), 0)                       AS raw_cr,
+    SUM(${capWeightExprSql("t", coeff)})                        AS cap_weighted_raw,
     COUNT(*)                                                    AS turns
-  FROM turns
-  WHERE ts >= ? AND ts < ? AND provisional = 0
+  FROM turns t
+  WHERE t.ts >= ? AND t.ts < ? AND t.provisional = 0
 `;
 
 // ---------------------------------------------------------------------------
@@ -280,7 +286,7 @@ export function getFlavorDecomposition(filter: WindowFilter): ApiResponse<Flavor
   const { from, to } = win;
   const coeff = resolveCapReadCoeff(db);
 
-  const agg = db.prepare(FLAVOR_SQL).get(from, to) as FlavorAggRow;
+  const agg = db.prepare(flavorSql(coeff)).get(from, to) as FlavorAggRow;
 
   const flavors = buildFlavors(agg, coeff);
   const total_raw_tokens = flavors.reduce((s, f) => s + f.raw_tokens, 0);
@@ -289,7 +295,9 @@ export function getFlavorDecomposition(filter: WindowFilter): ApiResponse<Flavor
   const cacheCreation = agg.raw_cw5m + agg.raw_cw1h + agg.raw_cw_other;
   const cacheTotal = agg.raw_cr + cacheCreation;
   const cache_efficiency_ratio = cacheTotal > 0 ? agg.raw_cr / cacheTotal : null;
-  const capRow = capWeightedTokens(db, { fromIso: from, toIso: to, coeff })[0];
+  // Round-after-sum, matching capWeightedTokens' Math.round(cap_weighted_raw).
+  // turns=0 -> SUM is NULL -> 0, matching the meter's empty-window fallback.
+  const cap_weighted_tokens = agg.turns > 0 ? Math.round(agg.cap_weighted_raw ?? 0) : 0;
 
   const data: FlavorDecomposition = {
     flavors,
@@ -300,7 +308,7 @@ export function getFlavorDecomposition(filter: WindowFilter): ApiResponse<Flavor
     cache_read_tokens: agg.raw_cr,
     cache_creation_tokens: cacheCreation,
     reuse_band: classifyCacheReuseBand(agg.raw_cr, cacheCreation, agg.turns),
-    cap_weighted_tokens: capRow?.cap_weighted_tokens ?? 0,
+    cap_weighted_tokens,
     coeff_used: coeff,
     coeff_unverified: true,
     turns: agg.turns,
@@ -333,7 +341,8 @@ export function getCacheEfficiency(filter: WindowFilter): ApiResponse<CacheEffic
   const win = resolveWindow(filter);
   const { from, to } = win;
 
-  const rows = capWeightedTokens(db, { fromIso: from, toIso: to });
+  const coeff = resolveCapReadCoeff(db);
+  const rows = capWeightedTokens(db, { fromIso: from, toIso: to, coeff });
   const row = rows[0];
 
   const cache_read_tokens = row?.cache_read_tokens ?? 0;
@@ -347,7 +356,7 @@ export function getCacheEfficiency(filter: WindowFilter): ApiResponse<CacheEffic
     cache_creation_tokens,
     reuse_band: classifyCacheReuseBand(cache_read_tokens, cache_creation_tokens, row?.turns ?? 0),
     cap_weighted_tokens: row?.cap_weighted_tokens ?? 0,
-    coeff_used: resolveCapReadCoeff(db),
+    coeff_used: coeff,
     coeff_unverified: true,
     turns: row?.turns ?? 0,
   };

@@ -23,7 +23,18 @@ import {
 
 const STARTUP_TIMEOUT_MS = 15_000;
 const PAGE_TIMEOUT_MS = 30_000;
-const SYNTHETIC_TURNS = 1_000;
+const BROWSER_SCALES = [1_000, 10_000, 100_000] as const;
+const PROFILING_SCALE = 1_000;
+
+/** Hash routes measured per scale, with the API request that marks readiness. */
+const BROWSER_ROUTES = [
+  { name: "overview", hash: "#/overview", api: "/api/overview?", selector: "rv7-tile-row" },
+  { name: "hot_sessions", hash: "#/sessions", api: "/api/hot-sessions", selector: null },
+  { name: "workspaces", hash: "#/workspaces", api: "/api/workspaces?", selector: null },
+  { name: "recommendations", hash: "#/recommendations", api: "/api/recommendations", selector: null },
+] as const;
+
+type BrowserRoute = (typeof BROWSER_ROUTES)[number];
 
 type CdpResponse = {
   fromDiskCache?: boolean;
@@ -175,13 +186,13 @@ function waitForReady(child: childProcess.ChildProcess): Promise<number> {
   });
 }
 
-async function startSyntheticChild(tempDir: string): Promise<ChildHarness> {
+async function startSyntheticChild(tempDir: string, turns: number): Promise<ChildHarness> {
   const dbPath = path.join(tempDir, "synthetic.sqlite");
   const claudeDir = path.join(tempDir, "empty-claude");
   fs.mkdirSync(claudeDir);
   const db = openDb(dbPath);
   runMigrations(db);
-  seedSyntheticHistory(db, SYNTHETIC_TURNS);
+  seedSyntheticHistory(db, turns);
   db.close();
   const childScript = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -236,11 +247,15 @@ export function syntheticBenchmarkApiPath(requestUrl: string): string {
 
 async function startSyntheticUi(
   childPort: number,
+  uiRootDir = "dist/ui",
+  rewritePresets = true,
 ): Promise<{ url: string; close(): Promise<void> }> {
-  const uiRoot = path.resolve("dist/ui");
+  const uiRoot = path.resolve(uiRootDir);
   if (!fs.existsSync(path.join(uiRoot, "index.html")))
     throw new Error(
-      "Production UI assets are unavailable; run npm run build:ui before browser measurement",
+      `Production UI assets are unavailable at ${uiRootDir}; run npm run build:ui${
+        uiRootDir === "dist/ui" ? "" : ":profiling"
+      } before browser measurement`,
     );
   const server = http.createServer((request, response) => {
     const requestUrl = request.url ?? "/";
@@ -249,7 +264,7 @@ async function startSyntheticUi(
         {
           hostname: "127.0.0.1",
           port: childPort,
-          path: syntheticBenchmarkApiPath(requestUrl),
+          path: rewritePresets ? syntheticBenchmarkApiPath(requestUrl) : requestUrl,
           method: request.method,
           headers: request.headers,
         },
@@ -483,14 +498,31 @@ async function connect(wsUrl: string): Promise<{ client: CdpClient; close(): voi
   return { client: new CdpClient(socket), close: () => socket.close() };
 }
 
+/** Route readiness: its API request observed, nothing aria-busy, double rAF settle. */
+function readinessExpression(api: string, selector: string | null): string {
+  const selectorCheck =
+    selector === null
+      ? "true"
+      : `Boolean(document.querySelector('[data-testid="${selector}"]'))`;
+  return `new Promise((resolve, reject) => { const deadline = performance.now() + 30000; const check = () => { const apiLoaded = performance.getEntriesByType('resource').some((entry) => entry.name.includes('${api}')); const busy = document.querySelector('[aria-busy="true"]'); if (${selectorCheck} && apiLoaded && !busy) { requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))); return; } if (performance.now() >= deadline) { reject(new Error('Route did not finish rendering after its API query')); return; } setTimeout(check, 25); }; check(); })`;
+}
+
+async function navigateBlank(client: CdpClient, sessionId: string): Promise<void> {
+  const load = client.once("Page.loadEventFired", PAGE_TIMEOUT_MS);
+  await client.call("Page.navigate", { url: "about:blank" }, sessionId);
+  await load;
+}
+
 async function browserSample(
   client: CdpClient,
   sessionId: string,
   url: string,
+  readiness: { api: string; selector: string | null },
 ): Promise<
   BrowserSample & {
     layoutDuration: number;
     longTasks: Array<{ duration?: number }>;
+    reactCommits: Array<{ duration?: number | null }>;
     overviewReadyMs: number;
   }
 > {
@@ -527,11 +559,10 @@ async function browserSample(
     const load = client.once("Page.loadEventFired", PAGE_TIMEOUT_MS);
     await client.call("Page.navigate", { url }, sessionId);
     await load;
-    const readiness = await client.call<CdpRuntimeEvaluation<number>>(
+    const readinessResult = await client.call<CdpRuntimeEvaluation<number>>(
       "Runtime.evaluate",
       {
-        expression:
-          "new Promise((resolve, reject) => { const deadline = performance.now() + 30000; const check = () => { const overview = document.querySelector('[data-testid=\"rv7-tile-row\"]'); const overviewLoaded = performance.getEntriesByType('resource').some((entry) => entry.name.includes('/api/overview')); const busy = document.querySelector('[aria-busy=\"true\"]'); if (overview && overviewLoaded && !busy) { requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))); return; } if (performance.now() >= deadline) { reject(new Error('Overview did not finish rendering after its API query')); return; } setTimeout(check, 25); }; check(); })",
+        expression: readinessExpression(readiness.api, readiness.selector),
         awaitPromise: true,
         returnByValue: true,
       },
@@ -542,13 +573,14 @@ async function browserSample(
         navigation?: PerformanceNavigation[];
         resources?: PerformanceEntry[];
         longTasks?: Array<{ duration?: number }>;
+        reactCommits?: Array<{ duration?: number | null }>;
       }>
     >(
       "Runtime.evaluate",
       {
         // loadEventEnd stays 0 until the load handler finishes, so poll before sampling.
         expression:
-          "new Promise((resolve) => { let tries = 0; const check = () => { const nav = performance.getEntriesByType('navigation')[0]; if ((nav && nav.loadEventEnd > 0) || tries >= 100) resolve({ navigation: performance.getEntriesByType('navigation').map(({ duration, startTime, loadEventEnd }) => ({ duration, startTime, loadEventEnd })), resources: performance.getEntriesByType('resource').map(({ duration, transferSize, initiatorType }) => ({ duration, transferSize, initiatorType })), longTasks: window.__awBrowserMeasure?.longTasks ?? [] }); else { tries += 1; setTimeout(check, 10); } }; check(); })",
+          "new Promise((resolve) => { let tries = 0; const check = () => { const nav = performance.getEntriesByType('navigation')[0]; if ((nav && nav.loadEventEnd > 0) || tries >= 100) resolve({ navigation: performance.getEntriesByType('navigation').map(({ duration, startTime, loadEventEnd }) => ({ duration, startTime, loadEventEnd })), resources: performance.getEntriesByType('resource').map(({ duration, transferSize, initiatorType }) => ({ duration, transferSize, initiatorType })), longTasks: window.__awBrowserMeasure?.longTasks ?? [], reactCommits: window.__awBrowserMeasure?.reactCommits ?? [] }); else { tries += 1; setTimeout(check, 10); } }; check(); })",
         awaitPromise: true,
         returnByValue: true,
       },
@@ -567,8 +599,9 @@ async function browserSample(
       requests,
       retainedCacheEntries: value.resources ?? [],
       longTasks: value.longTasks ?? [],
+      reactCommits: value.reactCommits ?? [],
       layoutDuration: Math.max(0, afterLayoutSeconds - beforeLayoutSeconds) * 1_000,
-      overviewReadyMs: requireRuntimeValue(readiness, "Overview readiness"),
+      overviewReadyMs: requireRuntimeValue(readinessResult, "Route readiness"),
     };
   } finally {
     removeRequest();
@@ -576,44 +609,290 @@ async function browserSample(
   }
 }
 
-async function main(): Promise<void> {
-  // Keep the temporary root compatible with the child's synthetic-path guard.
+// Installed before every document: long-task observer plus a minimal React
+// DevTools hook. With the profiling bundle (dist/ui-profiling) each commit's
+// root actualDuration is real; with the production bundle it is null.
+const PAGE_INSTRUMENTATION_SOURCE =
+  "window.__awBrowserMeasure={longTasks:[],reactCommits:[]};" +
+  "new PerformanceObserver((list)=>window.__awBrowserMeasure.longTasks.push(...list.getEntries().map(({duration})=>({duration})))).observe({type:'longtask',buffered:true});" +
+  "window.__REACT_DEVTOOLS_GLOBAL_HOOK__={isDisabled:false,supportsFiber:true,renderers:new Map(),inject:function(){return 1;},onScheduleFiberRoot:function(){},onCommitFiberRoot:function(id,root){try{var d=root&&root.current&&root.current.actualDuration;window.__awBrowserMeasure.reactCommits.push({duration:typeof d==='number'?d:null});}catch(e){}},onCommitFiberUnmount:function(){},onPostCommitFiberRoot:function(){},checkDCE:function(){}};";
+
+const APP_CACHE_STATS_EXPRESSION =
+  "(() => { const cache = window.__awResponseCache; if (!(cache instanceof Map)) return { available: false }; let bytes = 0; for (const entry of cache.values()) { try { bytes += JSON.stringify(entry.data).length; } catch {} } return { available: true, entries: cache.size, approx_payload_bytes: bytes }; })()";
+
+interface PageSession {
+  sessionId: string;
+  close(): Promise<void>;
+}
+
+async function openPageSession(client: CdpClient): Promise<PageSession> {
+  const target = await client.call<{ targetId: string }>("Target.createTarget", {
+    url: "about:blank",
+  });
+  const attached = await client.call<{ sessionId: string }>("Target.attachToTarget", {
+    targetId: target.targetId,
+    flatten: true,
+  });
+  const sessionId = attached.sessionId;
+  await client.call("Page.enable", {}, sessionId);
+  await client.call("Network.enable", {}, sessionId);
+  await client.call("Performance.enable", {}, sessionId);
+  await client.call(
+    "Page.addScriptToEvaluateOnNewDocument",
+    { source: PAGE_INSTRUMENTATION_SOURCE },
+    sessionId,
+  );
+  return {
+    sessionId,
+    close: async () => {
+      await client.call("Target.closeTarget", { targetId: target.targetId });
+    },
+  };
+}
+
+async function evaluate<T>(
+  client: CdpClient,
+  sessionId: string,
+  expression: string,
+  label: string,
+): Promise<T> {
+  const result = await client.call<CdpRuntimeEvaluation<T>>(
+    "Runtime.evaluate",
+    { expression, awaitPromise: true, returnByValue: true },
+    sessionId,
+  );
+  return requireRuntimeValue(result, label);
+}
+
+/** In-document hash navigation; readiness mirrors readinessExpression. */
+function spaHopExpression(hash: string, api: string): string {
+  return `new Promise((resolve, reject) => { location.hash = '${hash}'; const deadline = performance.now() + 30000; const check = () => { const apiLoaded = performance.getEntriesByType('resource').some((entry) => entry.name.includes('${api}')); const busy = document.querySelector('[aria-busy="true"]'); if (apiLoaded && !busy) { requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))); return; } if (performance.now() >= deadline) { reject(new Error('SPA route ${hash} did not become ready')); return; } setTimeout(check, 25); }; check(); })`;
+}
+
+const OVERVIEW_REQUEST_COUNT_EXPRESSION =
+  "performance.getEntriesByType('resource').filter((entry) => /\\/api\\/overview(\\?|$)/.test(entry.name)).length";
+
+function summarizeDurations(values: number[]): Record<string, number> {
+  const sorted = [...values].sort((a, b) => a - b);
+  const nearestRank = (quantile: number): number =>
+    sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1)] ?? 0;
+  return {
+    count: sorted.length,
+    total_ms: Number(sorted.reduce((sum, value) => sum + value, 0).toFixed(3)),
+    p50_ms: Number(nearestRank(0.5).toFixed(3)),
+    p95_ms: Number(nearestRank(0.95).toFixed(3)),
+    max_ms: Number((sorted[sorted.length - 1] ?? 0).toFixed(3)),
+  };
+}
+
+async function measureScale(
+  client: CdpClient,
+  scale: number,
+): Promise<Record<string, unknown>> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wrangler-synthetic-"));
-  let chrome: Chrome | undefined;
   let child: ChildHarness | undefined;
   let ui: { url: string; close(): Promise<void> } | undefined;
+  let session: PageSession | undefined;
   try {
-    chrome = await launchChrome(path.join(tempDir, "chrome-profile"));
+    child = await startSyntheticChild(tempDir, scale);
+    ui = await startSyntheticUi(child.port);
+    if (!isLoopbackUrl(ui.url)) throw new Error("Refusing a non-loopback browser target");
+    session = await openPageSession(client);
+    const routeResults: Record<string, unknown>[] = [];
+    for (const route of BROWSER_ROUTES) {
+      // Each cold sample starts from a cleared browser cache; the shared Chrome
+      // profile would otherwise carry asset cache across scales and routes.
+      await client.call("Network.clearBrowserCache", {}, session.sessionId);
+      await navigateBlank(client, session.sessionId);
+      const cold = await browserSample(client, session.sessionId, `${ui.url}${route.hash}`, route);
+      await navigateBlank(client, session.sessionId);
+      const warm = await browserSample(client, session.sessionId, `${ui.url}${route.hash}`, route);
+      routeResults.push({
+        name: route.name,
+        hash: route.hash,
+        ...summarizeBrowserSamples({
+          cold,
+          warm,
+          longTasks: [...cold.longTasks, ...warm.longTasks],
+          layoutDurations: [{ duration: cold.layoutDuration }, { duration: warm.layoutDuration }],
+        }),
+      });
+    }
+    // Application query-cache retention: one document visiting every measured
+    // route in place, then the retained module-level response-cache stats.
+    await navigateBlank(client, session.sessionId);
+    const first = BROWSER_ROUTES[0];
+    await browserSample(client, session.sessionId, `${ui.url}${first.hash}`, first);
+    for (const route of BROWSER_ROUTES.slice(1)) {
+      await evaluate(
+        client,
+        session.sessionId,
+        spaHopExpression(route.hash, route.api),
+        `SPA hop ${route.name}`,
+      );
+    }
+    const appCache = await evaluate<Record<string, unknown>>(
+      client,
+      session.sessionId,
+      APP_CACHE_STATS_EXPRESSION,
+      "App cache stats",
+    );
+    return {
+      scale_turns: scale,
+      routes: routeResults,
+      app_cache_retention: {
+        ...appCache,
+        method:
+          "One document SPA-navigates across all measured routes, then reads the module-level responseCache (window.__awResponseCache) cardinality and approximate retained payload bytes.",
+      },
+    };
+  } finally {
+    if (session) await session.close();
+    await ui?.close();
+    await child?.close();
+    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+/**
+ * Live moving-preset cache behavior: with preset rewriting disabled, the app
+ * resolves its rolling preset against the real clock (the historical fixture is
+ * out of range, so responses are empty). A revisit within the response-cache
+ * TTL that issues no new overview request demonstrates that the document-local
+ * cache reuses a rolling-preset key even though its effective window advanced.
+ */
+async function measureLivePresetCache(client: CdpClient): Promise<Record<string, unknown>> {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wrangler-synthetic-"));
+  let child: ChildHarness | undefined;
+  let ui: { url: string; close(): Promise<void> } | undefined;
+  let session: PageSession | undefined;
+  try {
+    child = await startSyntheticChild(tempDir, PROFILING_SCALE);
+    ui = await startSyntheticUi(child.port, "dist/ui", false);
+    if (!isLoopbackUrl(ui.url)) throw new Error("Refusing a non-loopback browser target");
+    session = await openPageSession(client);
+    await navigateBlank(client, session.sessionId);
+    const load = client.once("Page.loadEventFired", PAGE_TIMEOUT_MS);
+    await client.call("Page.navigate", { url: `${ui.url}#/overview` }, session.sessionId);
+    await load;
+    await evaluate(
+      client,
+      session.sessionId,
+      readinessExpression("/api/overview?", null),
+      "Live preset overview readiness",
+    );
+    const firstVisitRequests = await evaluate<number>(
+      client,
+      session.sessionId,
+      OVERVIEW_REQUEST_COUNT_EXPRESSION,
+      "Overview request count",
+    );
+    await evaluate(
+      client,
+      session.sessionId,
+      spaHopExpression("#/workspaces", "/api/workspaces?"),
+      "SPA hop workspaces",
+    );
+    await evaluate(
+      client,
+      session.sessionId,
+      spaHopExpression("#/overview", "/api/overview?"),
+      "SPA hop back to overview",
+    );
+    const revisitRequests = await evaluate<number>(
+      client,
+      session.sessionId,
+      OVERVIEW_REQUEST_COUNT_EXPRESSION,
+      "Overview request count after revisit",
+    );
+    const appCache = await evaluate<Record<string, unknown>>(
+      client,
+      session.sessionId,
+      APP_CACHE_STATS_EXPRESSION,
+      "App cache stats",
+    );
+    return {
+      available: true,
+      preset_rewriting_disabled: true,
+      fixture_note:
+        "The historical fixture is outside the live preset window, so responses are empty; cache-key behavior is unaffected by payload size.",
+      overview_requests_first_visit: firstVisitRequests,
+      overview_requests_after_spa_revisit: revisitRequests,
+      revisit_within_ttl_refetched: revisitRequests > firstVisitRequests,
+      app_cache_retention: appCache,
+    };
+  } finally {
+    if (session) await session.close();
+    await ui?.close();
+    await child?.close();
+    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+/** React commit durations from the profiling bundle (dist/ui-profiling). */
+async function measureReactCommits(client: CdpClient): Promise<Record<string, unknown>> {
+  if (!fs.existsSync(path.resolve("dist/ui-profiling", "index.html"))) {
+    return {
+      available: false,
+      reason:
+        "dist/ui-profiling is missing; run npm run build:ui:profiling before browser measurement",
+    };
+  }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wrangler-synthetic-"));
+  let child: ChildHarness | undefined;
+  let ui: { url: string; close(): Promise<void> } | undefined;
+  let session: PageSession | undefined;
+  try {
+    child = await startSyntheticChild(tempDir, PROFILING_SCALE);
+    ui = await startSyntheticUi(child.port, "dist/ui-profiling");
+    if (!isLoopbackUrl(ui.url)) throw new Error("Refusing a non-loopback browser target");
+    session = await openPageSession(client);
+    const overview = BROWSER_ROUTES[0];
+    await client.call("Network.clearBrowserCache", {}, session.sessionId);
+    await navigateBlank(client, session.sessionId);
+    const cold = await browserSample(client, session.sessionId, `${ui.url}${overview.hash}`, overview);
+    await navigateBlank(client, session.sessionId);
+    const warm = await browserSample(client, session.sessionId, `${ui.url}${overview.hash}`, overview);
+    const durations = (samples: Array<{ duration?: number | null }>): number[] =>
+      samples
+        .map((entry) => entry.duration)
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    const coldDurations = durations(cold.reactCommits);
+    const warmDurations = durations(warm.reactCommits);
+    if (coldDurations.length === 0)
+      throw new Error("Profiling bundle produced no React commit durations");
+    return {
+      available: true,
+      assets: "dist/ui-profiling (react-dom/profiling; separate build identity from dist/ui)",
+      scale_turns: PROFILING_SCALE,
+      route: overview.name,
+      cold_commits: summarizeDurations(coldDurations),
+      warm_commits: summarizeDurations(warmDurations),
+    };
+  } finally {
+    if (session) await session.close();
+    await ui?.close();
+    await child?.close();
+    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+async function main(): Promise<void> {
+  // Keep the temporary root compatible with the child's synthetic-path guard.
+  const chromeDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wrangler-synthetic-"));
+  let chrome: Chrome | undefined;
+  try {
+    chrome = await launchChrome(path.join(chromeDir, "chrome-profile"));
     if (!chrome) {
       console.log("Chrome unavailable, skipping browser run");
       return;
     }
-    child = await startSyntheticChild(tempDir);
-    ui = await startSyntheticUi(child.port);
-    if (!isLoopbackUrl(ui.url)) throw new Error("Refusing a non-loopback browser target");
     const connection = await connect(chrome.wsUrl);
     try {
-      const target = await connection.client.call<{ targetId: string }>("Target.createTarget", {
-        url: "about:blank",
-      });
-      const attached = await connection.client.call<{ sessionId: string }>(
-        "Target.attachToTarget",
-        { targetId: target.targetId, flatten: true },
-      );
-      const sessionId = attached.sessionId;
-      await connection.client.call("Page.enable", {}, sessionId);
-      await connection.client.call("Network.enable", {}, sessionId);
-      await connection.client.call("Performance.enable", {}, sessionId);
-      await connection.client.call(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {
-          source:
-            "window.__awBrowserMeasure={longTasks:[]};new PerformanceObserver((list)=>window.__awBrowserMeasure.longTasks.push(...list.getEntries().map(({duration})=>({duration})))).observe({type:'longtask',buffered:true});",
-        },
-        sessionId,
-      );
-      const cold = await browserSample(connection.client, sessionId, ui.url);
-      const warm = await browserSample(connection.client, sessionId, ui.url);
+      const scales: Record<string, unknown>[] = [];
+      for (const scale of BROWSER_SCALES) scales.push(await measureScale(connection.client, scale));
+      const livePresetCache = await measureLivePresetCache(connection.client);
+      const reactCommits = await measureReactCommits(connection.client);
       console.log(
         JSON.stringify(
           {
@@ -621,15 +900,13 @@ async function main(): Promise<void> {
             production_assets: true,
             synthetic_window: { from: SYNTHETIC_WINDOW_FROM, to: SYNTHETIC_WINDOW_TO },
             preset_requests_rewritten_to_synthetic_window: true,
-            ...summarizeBrowserSamples({
-              cold,
-              warm,
-              longTasks: [...cold.longTasks, ...warm.longTasks],
-              layoutDurations: [
-                { duration: cold.layoutDuration },
-                { duration: warm.layoutDuration },
-              ],
-            }),
+            readiness_definition:
+              "Route readiness: the route's API request appears in resource timing, nothing is aria-busy, then a double requestAnimationFrame settle. Overview additionally requires its tile row.",
+            cold_definition:
+              "Each cold navigation starts from a cleared browser cache via Network.clearBrowserCache; warm repeats the same navigation with the cache retained.",
+            scales,
+            live_preset_cache: livePresetCache,
+            react_commit_profiling: reactCommits,
           },
           null,
           2,
@@ -639,10 +916,8 @@ async function main(): Promise<void> {
       connection.close();
     }
   } finally {
-    await ui?.close();
-    await child?.close();
     await chrome?.close();
-    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+    fs.rmSync(chromeDir, { recursive: true, force: true, maxRetries: 3 });
   }
 }
 

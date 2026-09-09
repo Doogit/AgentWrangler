@@ -30,12 +30,14 @@ import {
   reconcileSessions,
 } from "./reconcile.js";
 import {
+  DEFAULT_TAIL_CHUNK_BYTES,
   type FileVersion,
+  MAX_TAIL_LINE_BYTES,
   fileVersion,
   loadOffset,
   sameFileVersion,
   saveOffset,
-  tailFile,
+  tailFileChunk,
 } from "./tail.js";
 import type { HealthCounters, TurnProjection } from "./types.js";
 import { LONG_GAP_THRESHOLD_S } from "./types.js";
@@ -51,6 +53,21 @@ export interface IngestorOptions {
   reconcile: ReconcileOptions;
   tailIntervalMs: number;
   discoveryIntervalMs: number;
+  /**
+   * Freshness floor for the per-tick reconcile when a tail tick ingests
+   * nothing: idle ticks skip reconcile until this much time has passed since
+   * the last one (PERF5). Must stay well under activityWindowSecs so
+   * active→idle session transitions are still observed promptly.
+   */
+  reconcileIdleFloorMs: number;
+  /**
+   * Freshness floor for the discovery-tick detector pass when nothing changed
+   * (no lines parsed since the last pass, no new mappings): idle ticks skip
+   * the pass until this much time has passed since the last one (PERF5).
+   * Detector inputs are ingest-derived, so with a zero ingest delta only
+   * pure time-window edges can move between passes.
+   */
+  detectorIdleFloorMs: number;
   /** Injectable clock (ISO string) for deterministic tests. */
   now: () => Date;
   onNewMappings?: (count: number) => void;
@@ -62,10 +79,20 @@ export const DEFAULT_INGESTOR_OPTIONS: IngestorOptions = {
   reconcile: DEFAULT_RECONCILE_OPTIONS,
   tailIntervalMs: 2_000,
   discoveryIntervalMs: 30_000,
+  reconcileIdleFloorMs: 60_000,
+  detectorIdleFloorMs: 5 * 60_000,
   now: () => new Date(),
 };
 
 const INITIAL_SCAN_BATCH_SIZE = 100;
+const MAX_LINE_WARN_LABEL = `${MAX_TAIL_LINE_BYTES / (1024 * 1024)} MiB`;
+
+interface CorrelationStage {
+  toolUseOwner: Map<string, string>;
+  gitUseIds: Set<string>;
+  countedResults: Set<string>;
+  resultBytesByMsg: Map<string, number>;
+}
 
 export interface TailHandle {
   stop(): void;
@@ -84,9 +111,20 @@ export class Ingestor {
   private readonly countedResults = new Set<string>(); // toolUseIds already summed
   private readonly resultBytesByMsg = new Map<string, number>(); // messageId → running byte sum
   private readonly lineCursor = new Map<string, number>(); // filePath → complete lines consumed
+  // Per-chunk staging overlay for the four correlation structures above. SQLite
+  // rolls a failed transaction back but plain Maps/Sets do not, so applyLine
+  // writes land here while a chunk transaction runs and are folded into the
+  // base structures only after it commits (discarded on failure).
+  private stage: CorrelationStage | null = null;
   private readonly lastVersion = new Map<string, FileVersion>(); // filePath → last-seen version
   private readonly discoveryCache = createDiscoveryCache();
   private readonly unresolvedRemotes = new Set<string>();
+
+  // Idle-gating state (PERF5): timestamps of the last reconcile / detector
+  // pass, and whether any lines were parsed since the last detector pass.
+  private lastReconcileAtMs = 0;
+  private lastDetectorPassAtMs = 0;
+  private ingestedSinceDetectorPass = false;
 
   // Prepared statements.
   private readonly stInsertTurn;
@@ -268,21 +306,36 @@ export class Ingestor {
 
   private startTailTimers(): TailHandle {
     let busy = false;
+    let stopped = false;
 
-    // Fast tail cadence: advance byte offsets on every known file, then reconcile.
+    // Fast tail cadence: advance byte offsets on every known file, then
+    // reconcile. Ingestion is chunk-bounded and yields between chunks; the
+    // busy guard is released only when the whole async pass settles, so ticks
+    // never overlap a still-running pass. A tick that parsed nothing skips
+    // reconcile until the idle floor elapses (PERF5): with a zero ingest
+    // delta, reconcile output only moves on activity-window decay, which the
+    // floor observes well within activityWindowSecs.
     const tailTimer = setInterval(() => {
       if (busy) return;
       busy = true;
-      try {
-        for (const f of refreshDiscoveryCache(this.roots, this.discoveryCache)) {
-          this.ingestFile(f.filePath, f.projectSlug);
+      void (async () => {
+        try {
+          let parsedAny = false;
+          for (const f of refreshDiscoveryCache(this.roots, this.discoveryCache)) {
+            if (stopped) return; // stop() during a suspended pass: quit at a file boundary
+            parsedAny = (await this.ingestFileYielding(f.filePath, f.projectSlug)) || parsedAny;
+          }
+          if (parsedAny) this.ingestedSinceDetectorPass = true;
+          const reconcileDue =
+            parsedAny ||
+            this.opts.now().getTime() - this.lastReconcileAtMs >= this.opts.reconcileIdleFloorMs;
+          if (!stopped && reconcileDue) this.reconcileNow();
+        } catch (e) {
+          console.warn(`tail tick failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          busy = false;
         }
-        this.reconcileNow();
-      } catch (e) {
-        console.warn(`tail tick failed: ${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        busy = false;
-      }
+      })();
     }, this.opts.tailIntervalMs);
 
     // Slower discovery cadence: register any newly-appeared workspace slugs, then
@@ -297,7 +350,14 @@ export class Ingestor {
           readRemote: this.opts.readRemote ?? defaultReadRemote,
           unresolved: this.unresolvedRemotes,
         });
-        this.runPostIngest();
+        // Change-gated detector pass (PERF5): detector inputs are ingest-derived,
+        // so a pass with no new parsed lines and no new mappings recomputes the
+        // same data; the idle floor bounds staleness of pure time-window edges.
+        const detectorsDue =
+          newlyMapped > 0 ||
+          this.ingestedSinceDetectorPass ||
+          this.opts.now().getTime() - this.lastDetectorPassAtMs >= this.opts.detectorIdleFloorMs;
+        if (detectorsDue) this.runPostIngest();
         if (newlyMapped > 0 && this.opts.onNewMappings !== undefined) {
           try {
             this.opts.onNewMappings(newlyMapped);
@@ -314,6 +374,7 @@ export class Ingestor {
 
     return {
       stop: () => {
+        stopped = true;
         clearInterval(tailTimer);
         clearInterval(discoveryTimer);
       },
@@ -341,6 +402,52 @@ export class Ingestor {
     this.unresolvedRemotes.clear();
   }
 
+  // ── correlation staging (chunk-transaction safety) ─────────────────────────
+  // Reads see the staged overlay first, then the committed base; writes go to
+  // the stage while a chunk transaction is open, else straight to the base.
+
+  private stagedOwnerGet(toolUseId: string): string | undefined {
+    return this.stage?.toolUseOwner.get(toolUseId) ?? this.toolUseOwner.get(toolUseId);
+  }
+
+  private stagedOwnerSet(toolUseId: string, messageId: string): void {
+    (this.stage?.toolUseOwner ?? this.toolUseOwner).set(toolUseId, messageId);
+  }
+
+  private stagedGitHas(toolUseId: string): boolean {
+    return (this.stage?.gitUseIds.has(toolUseId) ?? false) || this.gitUseIds.has(toolUseId);
+  }
+
+  private stagedGitAdd(toolUseId: string): void {
+    (this.stage?.gitUseIds ?? this.gitUseIds).add(toolUseId);
+  }
+
+  private stagedCountedHas(toolUseId: string): boolean {
+    return (
+      (this.stage?.countedResults.has(toolUseId) ?? false) || this.countedResults.has(toolUseId)
+    );
+  }
+
+  private stagedCountedAdd(toolUseId: string): void {
+    (this.stage?.countedResults ?? this.countedResults).add(toolUseId);
+  }
+
+  private stagedResultBytesGet(messageId: string): number | undefined {
+    return this.stage?.resultBytesByMsg.get(messageId) ?? this.resultBytesByMsg.get(messageId);
+  }
+
+  private stagedResultBytesSet(messageId: string, bytes: number): void {
+    (this.stage?.resultBytesByMsg ?? this.resultBytesByMsg).set(messageId, bytes);
+  }
+
+  /** Fold a committed chunk's staged mutations into the base structures. */
+  private commitStage(stage: CorrelationStage): void {
+    for (const [k, v] of stage.toolUseOwner) this.toolUseOwner.set(k, v);
+    for (const id of stage.gitUseIds) this.gitUseIds.add(id);
+    for (const id of stage.countedResults) this.countedResults.add(id);
+    for (const [k, v] of stage.resultBytesByMsg) this.resultBytesByMsg.set(k, v);
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   private ingestAllKnown(): void {
@@ -361,7 +468,8 @@ export class Ingestor {
       for (let i = start; i < end; i++) {
         const f = files[i];
         if (f === undefined) continue;
-        this.ingestFile(f.filePath, f.projectSlug);
+        // Yields between chunks WITHIN a large file, on top of the batch yield.
+        await this.ingestFileYielding(f.filePath, f.projectSlug);
       }
       if (end < files.length) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -372,6 +480,7 @@ export class Ingestor {
   private reconcileNow(): void {
     const cutoff = new Date(this.opts.now().getTime() - this.opts.activityWindowSecs * 1000);
     reconcileSessions(this.db, cutoff.toISOString(), this.opts.reconcile);
+    this.lastReconcileAtMs = this.opts.now().getTime();
   }
 
   /**
@@ -381,33 +490,109 @@ export class Ingestor {
    */
   private runPostIngest(): void {
     runPostIngestHook(this.db, this.opts.now());
+    this.lastDetectorPassAtMs = this.opts.now().getTime();
+    this.ingestedSinceDetectorPass = false;
   }
 
   /** Tail one file from its stored offset and ingest the complete new lines. */
   ingestFile(filePath: string, projectSlug: string): void {
-    // Skip only when size, identity, and timestamps all match. This keeps the
-    // 2s tail tick from touching the DB for idle files while still noticing
+    let firstChunk = true;
+    let parsedAny = false;
+    for (;;) {
+      const step = this.ingestFileChunk(
+        filePath,
+        projectSlug,
+        DEFAULT_TAIL_CHUNK_BYTES,
+        firstChunk,
+      );
+      firstChunk = false;
+      parsedAny ||= step.parsed > 0;
+      if (!step.hasMore) break;
+    }
+    if (parsedAny) this.health.fileParsed();
+  }
+
+  /**
+   * Chunk-bounded, event-loop-yielding variant of ingestFile. Each chunk runs
+   * its own synchronous transaction (never held across a yield); the file's
+   * version is re-checked between yields via the fresh stat in each chunk step.
+   */
+  async ingestFileYielding(
+    filePath: string,
+    projectSlug: string,
+    budgetBytes = DEFAULT_TAIL_CHUNK_BYTES,
+  ): Promise<boolean> {
+    let firstChunk = true;
+    let parsedAny = false;
+    for (;;) {
+      const step = this.ingestFileChunk(filePath, projectSlug, budgetBytes, firstChunk);
+      firstChunk = false;
+      parsedAny ||= step.parsed > 0;
+      if (!step.hasMore) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (parsedAny) this.health.fileParsed();
+    return parsedAny;
+  }
+
+  /**
+   * One bounded step of a file's catch-up: at most ~budgetBytes of complete
+   * lines applied in ONE synchronous transaction, with offset/lineCursor/
+   * metric-baseline advanced only after that transaction commits. Returns
+   * hasMore=true when the caller should take another step (progress was made
+   * and unread bytes remain).
+   */
+  private ingestFileChunk(
+    filePath: string,
+    projectSlug: string,
+    budgetBytes: number,
+    firstChunk: boolean,
+  ): { hasMore: boolean; parsed: number } {
+    // Skip only when size, identity, and timestamps all match the version the
+    // file was last FULLY caught up at (recorded below only when no unread
+    // bytes remain, so a failed or partial pass is always retried). This keeps
+    // the 2s tail tick from touching the DB for idle files while still noticing
     // same-size rewrites and path replacement.
-    // every tick, which was starving the daemon's event loop (outcomes pass).
     // Keep the per-file stat: directory mtimes only decide when to refresh paths;
     // they cannot safely replace append/rotation change detection for each file.
     let currentVersion: FileVersion;
     try {
       currentVersion = fileVersion(fs.statSync(filePath));
     } catch {
-      return; // file vanished between discovery and tail; nothing to ingest
+      return { hasMore: false, parsed: 0 }; // file vanished between discovery and tail
     }
     const previousVersion = this.lastVersion.get(filePath);
-    if (previousVersion !== undefined && sameFileVersion(previousVersion, currentVersion)) return;
-    this.lastVersion.set(filePath, currentVersion);
+    if (previousVersion !== undefined && sameFileVersion(previousVersion, currentVersion)) {
+      return { hasMore: false, parsed: 0 };
+    }
 
-    this.health.fileSeen();
+    if (firstChunk) this.health.fileSeen();
     registerWorkspace(this.db, projectSlug);
 
     const stored = loadOffset(this.db, filePath);
-    this.seedLegacyMetricPrefix(filePath, stored?.offset ?? null, currentVersion.size);
-    const result = tailFile(filePath, stored, currentVersion);
+    const seeding = this.seedLegacyMetricPrefix(
+      filePath,
+      stored?.offset ?? null,
+      currentVersion.size,
+    );
+    if (seeding.hasMore) return { hasMore: true, parsed: 0 }; // finish seeding (with yields) first
+
+    const result = tailFileChunk(filePath, stored, budgetBytes, currentVersion);
     if (result.wasReset) this.lineCursor.set(filePath, 0);
+
+    if (result.event === "OVERSIZED_LINE") {
+      // Recoverable: the offset stays unadvanced. Record the version so the
+      // tail tick does not re-attempt the capped framing until the file
+      // changes; a change re-triggers the read and the line is retried.
+      console.warn(
+        `ingest: line exceeds the ${MAX_LINE_WARN_LABEL} cap in ${filePath}; offset held at ${result.newOffset}`,
+      );
+      this.lastVersion.set(filePath, currentVersion);
+      return { hasMore: false, parsed: 0 };
+    }
+
+    const startOffset = stored?.offset ?? 0;
+    const progressed = result.wasReset || result.newOffset !== startOffset;
 
     if (result.lines.length === 0) {
       if (
@@ -420,70 +605,174 @@ export class Ingestor {
         saveOffset(this.db, filePath, result.newOffset, result.newHeadHash, currentVersion);
       }
       this.stSetMetricBaseline.run(filePath, result.newOffset);
-      return;
+      const hasMore = result.hasMore && progressed;
+      if (!hasMore) this.lastVersion.set(filePath, currentVersion);
+      return { hasMore, parsed: 0 };
     }
 
     const defaultSessionId = sessionStemFor(filePath);
-    const base = this.lineCursor.get(filePath) ?? 0;
+    const base = this.recoverLineCursor(filePath, result.wasReset ? 0 : startOffset);
+    const versionSalt = result.newHeadHash;
 
-    const tx = this.db.transaction(() => {
-      for (let i = 0; i < result.lines.length; i++) {
-        const raw = result.lines[i];
-        if (raw === undefined) continue;
-        this.applyLine(raw, { defaultSessionId }, projectSlug, filePath, base + i + 1);
-      }
-    });
-    tx();
-
+    const stage: CorrelationStage = {
+      toolUseOwner: new Map(),
+      gitUseIds: new Set(),
+      countedResults: new Set(),
+      resultBytesByMsg: new Map(),
+    };
+    this.stage = stage;
+    try {
+      const tx = this.db.transaction(() => {
+        for (let i = 0; i < result.lines.length; i++) {
+          const raw = result.lines[i];
+          if (raw === undefined) continue;
+          this.applyLine(
+            raw,
+            { defaultSessionId },
+            projectSlug,
+            filePath,
+            base + i + 1,
+            versionSalt,
+          );
+        }
+      });
+      tx();
+    } finally {
+      this.stage = null;
+    }
+    // The chunk transaction committed: only now fold staged correlation state
+    // in and advance the durable progress markers. A throw above leaves both
+    // the DB and the process-local maps at the previous chunk boundary.
+    this.commitStage(stage);
     this.lineCursor.set(filePath, base + result.lines.length);
     saveOffset(this.db, filePath, result.newOffset, result.newHeadHash, currentVersion);
     this.stSetMetricBaseline.run(filePath, result.newOffset);
-    this.health.fileParsed();
+    if (!result.hasMore) this.lastVersion.set(filePath, currentVersion);
+    return { hasMore: result.hasMore, parsed: result.lines.length };
+  }
+
+  /**
+   * The in-memory line cursor is lost on restart while the byte offset
+   * persists; quarantine identity and display both use line numbers, so on a
+   * cold resume recount the complete lines up to the resume offset (bounded
+   * windows, one-time per file per process).
+   */
+  private recoverLineCursor(filePath: string, resumeOffset: number): number {
+    const cached = this.lineCursor.get(filePath);
+    if (cached !== undefined) return cached;
+    if (resumeOffset <= 0) return 0;
+    let count = 0;
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(filePath, "r");
+      const window = Buffer.alloc(Math.min(DEFAULT_TAIL_CHUNK_BYTES, resumeOffset));
+      let pos = 0;
+      // Count only non-blank complete lines, mirroring tailFileChunk's
+      // split+filter, so the recovered cursor matches in-process numbering
+      // even when the file contains blank lines.
+      let lineHasContent = false;
+      while (pos < resumeOffset) {
+        const want = Math.min(window.length, resumeOffset - pos);
+        const got = fs.readSync(fd, window, 0, want, pos);
+        if (got <= 0) break;
+        for (let i = 0; i < got; i++) {
+          if (window[i] === 0x0a) {
+            if (lineHasContent) count++;
+            lineHasContent = false;
+          } else {
+            lineHasContent = true;
+          }
+        }
+        pos += got;
+      }
+    } catch {
+      count = 0; // unreadable: fall back to a fresh cursor
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    this.lineCursor.set(filePath, count);
+    return count;
   }
 
   /**
    * Upgrade bridge for offsets created before the metric-event ledger existed.
    * Already-consumed complete lines are registered without advancing counters.
+   * Seeding is chunk-bounded and resumable: one bounded window per call, with
+   * seeded_offset persisted at a line boundary in the same transaction, so a
+   * restart resumes where it stopped. Ledger inserts are INSERT OR IGNORE, so
+   * re-covering already-seeded bytes cannot double-register an event.
    */
   private seedLegacyMetricPrefix(
     filePath: string,
     storedOffset: number | null,
     currentSize: number,
-  ): void {
+  ): { hasMore: boolean } {
     const baseline = this.stGetMetricBaseline.get(filePath) as
       | { seeded_offset: number }
       | undefined;
-    if (baseline !== undefined) return;
 
     if (storedOffset === null || storedOffset <= 0 || storedOffset > currentSize) {
-      this.stSetMetricBaseline.run(filePath, 0);
-      return;
+      if (baseline === undefined) this.stSetMetricBaseline.run(filePath, 0);
+      return { hasMore: false };
     }
+    const seededFrom = baseline?.seeded_offset ?? 0;
+    if (baseline !== undefined && seededFrom >= storedOffset) return { hasMore: false };
 
-    const fd = fs.openSync(filePath, "r");
-    try {
-      const buf = Buffer.alloc(storedOffset);
-      const bytesRead = fs.readSync(fd, buf, 0, storedOffset, 0);
-      let lastNl = -1;
+    // One bounded window per call; grow it only to frame a single line with no
+    // boundary inside the window, capped at MAX_TAIL_LINE_BYTES.
+    let windowBytes = Math.min(DEFAULT_TAIL_CHUNK_BYTES, storedOffset - seededFrom);
+    let buf: Buffer | undefined;
+    let bytesRead = 0;
+    let lastNl = -1;
+    for (;;) {
+      buf = Buffer.alloc(windowBytes);
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(filePath, "r");
+        bytesRead = fs.readSync(fd, buf, 0, windowBytes, seededFrom);
+      } catch {
+        return { hasMore: false }; // unreadable: leave seeding to a later pass
+      } finally {
+        if (fd !== undefined) fs.closeSync(fd);
+      }
       for (let i = bytesRead - 1; i >= 0; i--) {
         if (buf[i] === 0x0a) {
           lastNl = i;
           break;
         }
       }
-      const lines = lastNl < 0 ? [] : buf.subarray(0, lastNl).toString("utf8").split("\n");
-      const defaultSessionId = sessionStemFor(filePath);
-      this.db.transaction(() => {
-        for (const raw of lines) {
-          if (raw.length === 0) continue;
-          const proj = projectLine(raw, { defaultSessionId });
-          if (proj.kind === "record") this.recordMetricEvent(raw, proj, false);
-        }
-        this.stSetMetricBaseline.run(filePath, storedOffset);
-      })();
-    } finally {
-      fs.closeSync(fd);
+      const canGrow =
+        lastNl === -1 &&
+        windowBytes < storedOffset - seededFrom &&
+        windowBytes < MAX_TAIL_LINE_BYTES;
+      if (!canGrow) break;
+      windowBytes = Math.min(windowBytes * 2, MAX_TAIL_LINE_BYTES, storedOffset - seededFrom);
     }
+
+    if (lastNl === -1) {
+      // No line boundary before the cap (or a prefix that does not end on one).
+      // The prefix was already consumed historically; skip past this window so
+      // seeding terminates. At most that single unframeable line is unregistered.
+      const seededTo = seededFrom + bytesRead;
+      console.warn(
+        `ingest: legacy prefix of ${filePath} has no line boundary in a ${MAX_LINE_WARN_LABEL} window; skipping ahead`,
+      );
+      this.stSetMetricBaseline.run(filePath, seededTo);
+      return { hasMore: seededTo < storedOffset };
+    }
+
+    const lines = buf.subarray(0, lastNl).toString("utf8").split("\n");
+    const defaultSessionId = sessionStemFor(filePath);
+    const seededTo = seededFrom + lastNl + 1;
+    this.db.transaction(() => {
+      for (const raw of lines) {
+        if (raw.length === 0) continue;
+        const proj = projectLine(raw, { defaultSessionId });
+        if (proj.kind === "record") this.recordMetricEvent(raw, proj, false);
+      }
+      this.stSetMetricBaseline.run(filePath, seededTo);
+    })();
+    return { hasMore: seededTo < storedOffset };
   }
 
   private applyLine(
@@ -492,11 +781,12 @@ export class Ingestor {
     workspaceId: string,
     filePath: string,
     lineNo: number,
+    versionSalt: string,
   ): void {
     const proj = projectLine(raw, ctx);
 
     if (proj.kind === "quarantine") {
-      this.quarantine(filePath, lineNo, proj.errorClass);
+      this.quarantine(filePath, lineNo, proj.errorClass, versionSalt);
       return;
     }
 
@@ -536,8 +826,8 @@ export class Ingestor {
     for (const te of proj.toolEvents) {
       this.insertToolEvent(te);
       if (te.toolUseId !== null) {
-        if (te.ownerMessageId !== null) this.toolUseOwner.set(te.toolUseId, te.ownerMessageId);
-        if (te.gitCommandHint) this.gitUseIds.add(te.toolUseId);
+        if (te.ownerMessageId !== null) this.stagedOwnerSet(te.toolUseId, te.ownerMessageId);
+        if (te.gitCommandHint) this.stagedGitAdd(te.toolUseId);
       }
     }
 
@@ -610,7 +900,7 @@ export class Ingestor {
 
     // If tool_result bytes already accumulated for this turn (results seen first
     // is impossible within a file, but the owner map may hold late updates).
-    const bytes = this.resultBytesByMsg.get(turn.messageId);
+    const bytes = this.stagedResultBytesGet(turn.messageId);
     if (bytes !== undefined) this.stSetResultBytes.run(bytes, turn.messageId);
   }
 
@@ -660,17 +950,17 @@ export class Ingestor {
     // daemon restart, when the process-local toolUseOwner map is empty.
     this.stRefreshOwnerResultBytes.run(toolUseId);
 
-    if (this.countedResults.has(toolUseId)) return; // turn aggregate stays idempotent
-    this.countedResults.add(toolUseId);
+    if (this.stagedCountedHas(toolUseId)) return; // turn aggregate stays idempotent
+    this.stagedCountedAdd(toolUseId);
 
-    const owner = this.toolUseOwner.get(toolUseId);
+    const owner = this.stagedOwnerGet(toolUseId);
     if (owner !== undefined) {
-      const next = (this.resultBytesByMsg.get(owner) ?? 0) + resultBytes;
-      this.resultBytesByMsg.set(owner, next);
+      const next = (this.stagedResultBytesGet(owner) ?? 0) + resultBytes;
+      this.stagedResultBytesSet(owner, next);
       this.stSetResultBytes.run(next, owner);
     }
     // Persist a commit SHA only for tool_uses that looked like git commit/push.
-    if (commitSha !== null && this.gitUseIds.has(toolUseId)) {
+    if (commitSha !== null && this.stagedGitHas(toolUseId)) {
       this.stSetCommitSha.run(commitSha, toolUseId);
     }
   }
@@ -799,10 +1089,23 @@ export class Ingestor {
     this.stSetGapAggregates.run(gapMedianS, gapP90S, longGapCount, gapN, sessionId);
   }
 
-  private quarantine(filePath: string, lineNo: number, errorClass: string): void {
+  /**
+   * Quarantine identity includes the file version's width-prefixed head hash so
+   * a rotated file (new content, same path) cannot silently reuse a prior
+   * version's quarantine ID, while a faithful re-scan of the SAME version
+   * (truncation reset, restart) still dedupes. Line numbers stay durable across
+   * restarts via recoverLineCursor. Pre-existing rows keep their historic IDs
+   * and are never rewritten.
+   */
+  private quarantine(
+    filePath: string,
+    lineNo: number,
+    errorClass: string,
+    versionSalt: string,
+  ): void {
     const qId = crypto
       .createHash("sha1")
-      .update(`${filePath}|${lineNo}|${errorClass}`)
+      .update(`${filePath}|${lineNo}|${errorClass}|${versionSalt}`)
       .digest("hex")
       .slice(0, 24);
     this.stInsertQuarantine.run(

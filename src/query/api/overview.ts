@@ -282,6 +282,21 @@ const PRESET_DAYS: Record<NonNullable<WindowFilter["preset"]>, number> = {
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 500;
+/**
+ * FROZEN freshness contract (PERF2, 2026-09-09) — PERF3 builds on exactly this:
+ *  - Keys are (queryType, exact from, exact to, workspaceFilter) per DB handle.
+ *    A hit may serve data up to TTL-stale relative to ingestion, replay, reset,
+ *    config or adoption mutations; staleness is bounded by the TTL, nothing
+ *    invalidates entries early.
+ *  - Presets resolve a fresh `now` per request, so daemon-side preset requests
+ *    are always cache MISSES (recomputed); only the browser's document-local
+ *    responseCache reuses a rolling-preset key within its own 45s TTL. The two
+ *    layers can combine to ~90s worst-case staleness on explicit windows.
+ *  - Mutation responses are never cached (cachedQuery wraps pure reads only);
+ *    live/status/burn stay network-only.
+ * Any preset/daemon reuse beyond this needs the spec's full mutation-epoch and
+ * effective-window contract (docs/plans/spec-performance-review.md, PERF2).
+ */
 export const QUERY_CACHE_TTL_MS = 45_000;
 const MAX_QUERY_CACHE_ENTRIES = 256;
 
