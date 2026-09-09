@@ -2,8 +2,8 @@
  * test/ui/efficiency-headroom.test.tsx — BM2 efficiency headroom in ImpactLedger.
  *
  * Covers:
- *   - null headroom_pct renders the honest empty state (no NaN / ∞).
- *   - A known fixture renders the expected percentage.
+ *   - Individual modeled opportunities render without a misleading combined percentage.
+ *   - Missing opportunity coverage renders the honest empty state (no NaN / ∞).
  *   - No "$X wasted" / "$X saved" headline (INT-5 guard).
  *   - Framed as "Possible improvement" / "early upper estimate".
  */
@@ -100,7 +100,7 @@ describe("HeadroomSummary — individual opportunities", () => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("3 open recs");
+    expect(text).toContain("1 open rec");
   });
 });
 

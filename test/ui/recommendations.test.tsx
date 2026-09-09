@@ -85,7 +85,7 @@ describe("RecommendationsPage — states", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Why this is ranked here");
     expect(text).toContain("What we observed");
-    expect(text).toContain("4 long, high-context sessions");
+    expect(text).toContain("3 long, high-context sessions");
     expect(text).toContain("Possible reduction");
     expect(text).toContain("How to measure success");
 
@@ -516,7 +516,7 @@ describe("RecommendationsPage — states", () => {
     fireEvent.click(expandBtn);
 
     const observations = container.querySelector(".rec-observations")?.textContent ?? "";
-    expect(observations).toContain("4 long, high-context sessions");
+    expect(observations).toContain("3 long, high-context sessions");
     expect(observations).toContain("The detector looked for at least 150 turns");
     expect(observations).not.toContain("Raw-context average:");
     expect(observations).not.toContain("Cap-weighted burn:");

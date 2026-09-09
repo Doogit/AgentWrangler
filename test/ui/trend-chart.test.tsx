@@ -169,7 +169,7 @@ describe("TrendChart — three distinct UI states", () => {
   it("sorts session scatter points by their source date", () => {
     const trendResponse = mockTrends({ preset: "7d" });
     if (!trendResponse.data) throw new Error("fixture must have data");
-    const sessions = ["2026-08-18", "2026-08-16", "2026-08-17"].map((date) => {
+    const sessions = ["2026-08-19", "2026-08-17", "2026-08-18"].map((date) => {
       const session = trendResponse.data?.sessions.find((row) =>
         row.first_turn_at.startsWith(date),
       );
@@ -178,7 +178,7 @@ describe("TrendChart — three distinct UI states", () => {
     });
     const points = buildSessionScatterData({ ...trendResponse.data, sessions });
 
-    expect(points.map((point) => point.x)).toEqual(["2026-08-16", "2026-08-17", "2026-08-18"]);
+    expect(points.map((point) => point.x)).toEqual(["2026-08-17", "2026-08-18", "2026-08-19"]);
   });
 
   it("thins x-axis ticks only after the chart has more than eight points", () => {
