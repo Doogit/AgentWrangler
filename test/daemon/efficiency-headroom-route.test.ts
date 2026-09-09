@@ -50,16 +50,19 @@ describe("GET /api/efficiency-headroom", () => {
     expect(res.status).toBe(200);
     const body = JSON.parse(res.body) as {
       data: { headroom_u_per_wk: number; actual_u_per_wk: number; headroom_pct: number | null };
-      meta: { claim_kind: string; qualification: { note: string } };
+      meta: {
+        claim_kind: string;
+        metric_definition_version: string;
+        qualification: { note: string };
+      };
     };
     expect(typeof body.data.headroom_u_per_wk).toBe("number");
     expect(typeof body.data.actual_u_per_wk).toBe("number");
-    // pct is a number or null — never NaN/∞.
-    if (body.data.headroom_pct !== null) {
-      expect(Number.isFinite(body.data.headroom_pct)).toBe(true);
-    }
+    // ESF1 cannot expose an overlap-unaware combined efficiency percentage.
+    expect(body.data.headroom_pct).toBeNull();
+    expect(body.meta.metric_definition_version).toBe("esf-1");
     expect(body.meta.claim_kind).toBe("EXPERIMENTAL");
-    expect(body.meta.qualification.note).toMatch(/modeled headroom/i);
+    expect(body.meta.qualification.note).toMatch(/modeled (?:weekly )?opportunit/i);
     // INT-5: no "$X wasted" headline copy.
     expect(res.body.toLowerCase()).not.toContain("wasted");
   });

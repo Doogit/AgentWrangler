@@ -149,7 +149,7 @@ export default function HotSessionsPage({
                     Friction{" "}
                     <InfoTip
                       label="What Friction means"
-                      content="A low, elevated, or high signal based on errors, test failures, context compactions, interrupts, and user-message share. Open a high signal to see what happened."
+                      content="A legacy low, elevated, or high signal based on errors, test failures, context compactions, and user-message share. Interrupt telemetry is unavailable. This is an observation aid, not a health or quality rating."
                     />
                   </th>
                   <th scope="col">Last active</th>
@@ -220,6 +220,15 @@ export default function HotSessionsPage({
                             test_fail_count: row.test_fail_count,
                             compaction_count: row.compaction_count,
                             interrupt_count: row.interrupt_count,
+                            interrupts_supported: row.interrupts_supported,
+                            api_error_eligible_request_count: row.api_error_eligible_request_count,
+                            api_error_rate: row.api_error_rate,
+                            tool_completed_count: row.tool_completed_count,
+                            tool_completed_error_count: row.tool_completed_error_count,
+                            tool_error_rate: row.tool_error_rate,
+                            test_completed_count: row.test_completed_count,
+                            test_pass_count: row.test_pass_count,
+                            test_outcome: row.test_outcome,
                             user_turn_count: row.user_turn_count,
                             turn_count: row.turns,
                             gap_median_s: row.gap_median_s,

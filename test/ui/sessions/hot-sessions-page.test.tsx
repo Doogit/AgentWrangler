@@ -26,7 +26,10 @@ beforeEach(() => {
           interrupt_count: 0,
           user_turn_count: 0,
           tool_error_count: 0,
-          test_fail_count: 0,
+          test_fail_count: 1,
+          test_completed_count: 2,
+          test_pass_count: 1,
+          test_outcome: "FAILED_THEN_PASSED",
         },
       ],
     }),
@@ -39,6 +42,11 @@ afterEach(() => {
 });
 
 describe("HotSessionsPage privacy labels", () => {
+  it("preserves completed-test observations from the API in the compact friction cell", async () => {
+    render(<HotSessionsPage onSelectSession={vi.fn()} />);
+    expect(await screen.findByText(/test fail then pass/)).toBeTruthy();
+  });
+
   it("shows a shortened session id without default-visible UUID text", async () => {
     render(<HotSessionsPage onSelectSession={vi.fn()} />);
     await waitFor(() => expect(screen.getByText("12345678…")).toBeTruthy());

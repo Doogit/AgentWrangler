@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import {
   UA11_SCENARIO,
+  mockEfficiencyHeadroom,
   mockGlobalOverview,
   mockHotSessions,
   mockLedger,
@@ -55,6 +56,29 @@ describe("UA11 fixture matrix", () => {
     );
     expect(directionalGroup?.total_savings_u_per_wk).toBe(0);
     expect(directionalCard?.modeled_savings_u_per_wk).toBeNull();
+
+    const recommendations = mockRecommendations().data?.active ?? [];
+    const efficiencyHeadroom = mockEfficiencyHeadroom().data;
+    if (efficiencyHeadroom === null) throw new Error("UA11 headroom fixture must contain data");
+    const modeledRecommendations = recommendations.flatMap((recommendation) =>
+      recommendation.modeled_savings_u_per_wk === null
+        ? []
+        : [
+            {
+              rec_id: recommendation.rec_id,
+              modeled_savings_u_per_wk: recommendation.modeled_savings_u_per_wk,
+            },
+          ],
+    );
+    expect(efficiencyHeadroom.opportunities).toEqual(modeledRecommendations);
+    expect(efficiencyHeadroom.headroom_u_per_wk).toBe(
+      modeledRecommendations.reduce(
+        (sum, recommendation) => sum + recommendation.modeled_savings_u_per_wk,
+        0,
+      ),
+    );
+    expect(efficiencyHeadroom.open_rec_count).toBe(modeledRecommendations.length);
+    expect(efficiencyHeadroom.headroom_pct).toBeNull();
   });
 
   it.each(["24h", "7d", "30d"] as const)(

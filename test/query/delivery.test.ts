@@ -129,6 +129,35 @@ describe("getDeliveryMetrics — all commit sessions", () => {
   });
 });
 
+describe("getDeliveryMetrics — reconciled no-commit activity", () => {
+  it("counts only reconciled qualifying activity while keeping LIVE spend in the denominator", () => {
+    insWs("ws-esf-activity");
+    insSess("reconciled-write", "ws-esf-activity");
+    insTurn("turn-reconciled-write", "reconciled-write", "ws-esf-activity", TS_IN, 1_000);
+    insToolEvent("tool-reconciled-write", "reconciled-write", TS_IN, "Write");
+
+    insSess("live-write", "ws-esf-activity");
+    db.prepare("UPDATE sessions SET state = 'LIVE' WHERE session_id = 'live-write'").run();
+    insTurn("turn-live-write", "live-write", "ws-esf-activity", TS_IN, 2_000);
+    insToolEvent("tool-live-write", "live-write", TS_IN, "Write");
+
+    insSess("reconciled-read", "ws-esf-activity");
+    insTurn("turn-reconciled-read", "reconciled-read", "ws-esf-activity", TS_IN, 3_000);
+    insToolEvent("tool-reconciled-read", "reconciled-read", TS_IN, "Read");
+
+    const response = getDeliveryMetrics(db, { workspaceId: "ws-esf-activity", from: FROM, to: TO });
+    const data = response.data;
+    if (data === null) throw new Error("expected data");
+
+    expect(data.no_commit_activity_session_count).toBe(1);
+    expect(data.no_commit_activity_spend_u).toBe(1_000);
+    expect(data.no_commit_activity_spend_share).toBeCloseTo(1 / 6, 10);
+    expect(data.live_session_excluded_from_no_commit_activity_count).toBe(1);
+    expect(data.abandoned_spend_u).toBe(data.no_commit_activity_spend_u);
+    expect(response.meta.metric_definition_version).toBe("esf-1");
+  });
+});
+
 // ── Mixed ─────────────────────────────────────────────────────────────────────
 
 describe("getDeliveryMetrics — mixed sessions", () => {

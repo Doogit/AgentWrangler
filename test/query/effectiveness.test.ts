@@ -181,6 +181,22 @@ describe("computeSessionDelivery — turns_to_first_commit", () => {
 // ── deep_abandoned ────────────────────────────────────────────────────────────
 
 describe("computeSessionDelivery — deep_abandoned", () => {
+  it.each([null, "Read"])(
+    "excludes research-only activity (%s) consistently with spend",
+    (tool) => {
+      insWs("ws-research");
+      insSess("sess-research", "ws-research", { userTurnCount: 12 });
+      insTurn("msg-research", "sess-research", "ws-research", TS_IN, 500);
+      if (tool !== null) insToolEvent("evt-research", "sess-research", TS_IN, tool);
+
+      expect(computeSessionDelivery(db, "sess-research").deep_abandoned).toBe(false);
+      expect(
+        getAbandonedSpendSplit(db, { workspaceId: "ws-research", from: FROM, to: TO }),
+      ).toEqual({ deep_abandoned_spend_u: 0, early_abandoned_spend_u: 0 });
+      expect(getSession("sess-research").data?.deep_abandoned).toBe(false);
+    },
+  );
+
   it("is true for RECONCILED with user_turn_count >= 10, no commit, has Write event", () => {
     insWs("ws-da");
     insSess("sess-da-true", "ws-da", { state: "RECONCILED", userTurnCount: 12 });
