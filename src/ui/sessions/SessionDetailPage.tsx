@@ -20,6 +20,7 @@ import {
   fetchSpendPercentile,
   fetchTurnTimeline,
 } from "../api/client";
+import { SessionObservedEvidence } from "../esf/ObservationEvidence";
 import { shortId } from "../lib/short-id";
 import { type WorkspaceLabelInput, workspaceLabel } from "../lib/workspace-label";
 import { CustomTooltip, gridProps, seriesPalette } from "../overview/chart-theme";
@@ -672,6 +673,8 @@ export default function SessionDetailPage({
       </div>
 
       <ContextGrowthChart turns={turns} compactionCount={session.compaction_count} />
+
+      <SessionObservedEvidence session={session} />
 
       <div className="card session-timeline">
         <div className="section-head">

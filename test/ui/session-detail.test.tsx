@@ -9,6 +9,10 @@ import LiveStrip from "../../src/ui/overview/LiveStrip";
 import SessionDetailPage from "../../src/ui/sessions/SessionDetailPage";
 
 vi.mock("../../src/ui/api/client");
+// Timeline tests have no observation fixture; observation behavior is covered separately.
+vi.mock("../../src/ui/api/esf-client", () => ({
+  fetchSessionEsfObservations: vi.fn().mockResolvedValue({ data: null }),
+}));
 // Stub the chart subtree used by ContextGrowthChart. Real recharts emits no
 // SVG geometry under jsdom (no layout), so assert the props the component
 // passes to each primitive instead of unrenderable `.recharts-*` DOM.

@@ -1,0 +1,67 @@
+.work-record-controls {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-block: 1rem;
+  overflow-wrap: anywhere;
+}
+.work-record-controls fieldset {
+  margin-block: 1rem;
+  border: 1px solid var(--line);
+  min-width: 0;
+}
+.work-record-controls label,
+.work-record-allocation label {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  margin-block: .5rem;
+}
+.work-record-controls input,
+.work-record-controls select,
+.work-record-allocation input {
+  max-width: 100%;
+  min-width: 0;
+  font: inherit;
+}
+.work-record-controls button,
+.work-record-allocation button {
+  margin: .25rem;
+  min-height: 2.75rem;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.work-record-controls :focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+.work-record-controls ul {
+  padding-inline-start: 1.25rem;
+}
+.work-record-allocation {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+  padding-top: .5rem;
+}
+
+.work-record-controls input,
+.work-record-controls select,
+.work-record-allocation input {
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: .5rem;
+  min-height: 2.75rem;
+}
+.work-record-controls button:disabled,
+.work-record-controls fieldset:disabled button,
+.work-record-allocation button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.work-record-controls button[aria-pressed="true"] {
+  border-color: var(--cyan);
+  color: var(--text);
+}

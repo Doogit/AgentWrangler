@@ -93,7 +93,7 @@ describe("runMigrations", () => {
       expect(rows.length).toBe(applied.length);
       // The first migration must be 001_observe.
       expect(rows[0]?.version).toBe("001_observe");
-      expect(rows.at(-1)?.version).toBe("018_effect_cycles");
+      expect(rows.at(-1)?.version).toBe("019_work_records");
     } finally {
       db.close();
     }
@@ -146,6 +146,7 @@ describe("runMigrations", () => {
         "016_ingest_offset_file_version",
         "017_ingest_metric_events",
         "018_effect_cycles",
+        "019_work_records",
       ]);
       const row = db
         .prepare(
@@ -188,7 +189,7 @@ describe("runMigrations", () => {
       const legacy = db.prepare("SELECT * FROM recommendation_effects").all();
       const recommendations = db.prepare("SELECT * FROM recommendations").all();
 
-      expect(runMigrations(db)).toEqual(["018_effect_cycles"]);
+      expect(runMigrations(db)).toEqual(["018_effect_cycles", "019_work_records"]);
       expect(db.prepare("SELECT * FROM recommendation_effects").all()).toEqual(legacy);
       expect(db.prepare("SELECT * FROM recommendations").all()).toEqual(recommendations);
       expect(db.prepare("SELECT * FROM effect_cycles").all()).toEqual([]);

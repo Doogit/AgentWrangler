@@ -1,6 +1,9 @@
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getEsfObservations } from "../../src/query/api/esf-observations.js";
+import {
+  getEsfObservations,
+  getSessionEsfObservations,
+} from "../../src/query/api/esf-observations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const FROM = "2026-08-01T00:00:00.000Z";
@@ -81,6 +84,59 @@ function cohort() {
 }
 
 describe("getEsfObservations", () => {
+  it("reads the complete session cohort without pagination, provisional cost or sibling leakage", () => {
+    session("session-complete", "ws-complete");
+    session("session-sibling", "ws-complete");
+    for (let i = 0; i < 205; i++)
+      turn(`complete-${i}`, "session-complete", "ws-complete", i < 202 ? 10 : null);
+    turn("provisional", "session-complete", "ws-complete", null, IN, 1);
+    turn("sibling", "session-sibling", "ws-complete", null);
+    tool("fail-one", "session-complete", IN, "TEST_FAIL", true, 1);
+    tool("fail-two", "session-complete", IN, "TEST_FAIL", true, 1);
+    tool("pass-last", "session-complete", "2026-08-05T12:01:00.000Z", "OK", true, 1);
+    const response = getSessionEsfObservations(db, "session-complete");
+    expect(response.data?.resource).toMatchObject({
+      selected_session_count: 1,
+      priced_cost_u: 2020,
+      priced_turn_count: 202,
+      unpriced_turn_count: 3,
+    });
+    expect(response.data?.observed_test_recovery.recovered_session_ids).toEqual([
+      "session-complete",
+    ]);
+    expect(response.meta).toMatchObject({
+      claim_kind: "OBS_PROXY",
+      metric_definition_version: "esf-1",
+      drilldown_ids: { session_id: "session-complete" },
+      qualification: { unpriced_turns: 3, provisional_excluded: true },
+      window: { from: IN, to: "2026-08-05T12:01:00.001Z" },
+    });
+  });
+
+  it("keeps missing sessions distinct from existing empty and LIVE sessions", () => {
+    expect(getSessionEsfObservations(db, "missing")).toMatchObject({
+      data: null,
+      meta: { n: 0, claim_kind: "N_A" },
+    });
+    session("empty", "ws-empty");
+    expect(getSessionEsfObservations(db, "empty").data?.resource.selected_session_count).toBe(0);
+    session("live", "ws-empty", "LIVE");
+    turn("live-priced", "live", "ws-empty", 50);
+    turn("live-unknown", "live", "ws-empty", null);
+    tool("live-tool", "live");
+    const live = getSessionEsfObservations(db, "live").data;
+    if (live === null) throw new Error("Expected live cohort");
+    expect(live.resource).toMatchObject({
+      priced_cost_u: 50,
+      unpriced_turn_count: 1,
+      live_priced_session_count: 1,
+    });
+    expect(live.no_commit_activity).toMatchObject({
+      session_ids: [],
+      live_session_excluded_count: 1,
+    });
+  });
+
   it("keeps FX-RECOVER-18 resource accounting exact while excluding LIVE from activity", () => {
     for (let n = 1; n <= 18; n++) {
       const id = `ses-a${String(n).padStart(2, "0")}`;

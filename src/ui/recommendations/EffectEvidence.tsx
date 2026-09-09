@@ -1,4 +1,9 @@
-import type { EffectCycle, GuardrailObservation, ObservationBundle } from "../../effects/types";
+import type {
+  AggregateEvidence,
+  EffectCycle,
+  GuardrailObservation,
+  ObservationBundle,
+} from "../../effects/types";
 
 function date(value: string | null): string {
   return value === null ? "not recorded" : value.slice(0, 10);
@@ -10,6 +15,31 @@ function value(value: number | null, unit: string): string {
 
 function evidenceFor(cycle: EffectCycle): ObservationBundle | null {
   return cycle.finalEvidence ?? cycle.provisionalEvidence;
+}
+
+function evidenceSummary(
+  label: string,
+  evidence: ObservationBundle | null,
+  aggregate: AggregateEvidence | null,
+  cycle: EffectCycle,
+) {
+  if (evidence === null || aggregate === null) return <p>{label}: unavailable.</p>;
+  const excluded = Object.entries(aggregate.excluded)
+    .map(([reason, count]) => `${reason}: ${count.toLocaleString()}`)
+    .join(", ");
+  return (
+    <>
+      <p>
+        {label}: observed aggregate value: {value(aggregate.value, cycle.targetDefinition.unit)}.
+        {" Numerator is not separately recorded. Denominator: "}
+        {aggregate.denominator === null ? "unavailable" : aggregate.denominator.toLocaleString()}.
+      </p>
+      <p>
+        Exclusions: {excluded || "none recorded"}. Method: {evidence.methodVersion}; query:{" "}
+        {evidence.queryDefinitionVersion}.
+      </p>
+    </>
+  );
 }
 
 function guardrailText(guardrail: GuardrailObservation | undefined, guardrailId: string): string {
@@ -59,6 +89,16 @@ export default function EffectEvidence({ cycle }: { cycle: EffectCycle }) {
             : `Baseline: ${value(evidence.before.value, cycle.targetDefinition.unit)} · Follow-up: ${value(evidence.after.value, cycle.targetDefinition.unit)}`}
         </span>
       </div>
+      <section className="rec-section" aria-label="Evidence and limits">
+        <h4 className="rec-section-label">Evidence and limits</h4>
+        <p>
+          Baseline window: [{cycle.baselineFrom}, {cycle.baselineTo}); observation window: [
+          {cycle.observationFrom}, {cycle.observationTo ?? cycle.scheduledObservationTo}). Boundary
+          rule: {cycle.targetDefinition.boundaryRule}.
+        </p>
+        {evidenceSummary("Baseline evidence", evidence, evidence?.before ?? null, cycle)}
+        {evidenceSummary("Follow-up evidence", evidence, evidence?.after ?? null, cycle)}
+      </section>
       <div className="ledger-row">
         <span className="ledger-key">Comparison</span>
         <span className="ledger-val">

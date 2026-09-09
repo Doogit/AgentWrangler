@@ -1,3 +1,4 @@
+import { getReportedWork } from "../query/api/reported-work.js";
 /**
  * src/daemon/router.ts — minimal API route dispatcher.
  *
@@ -25,6 +26,7 @@ import {
 } from "../query/api/effect-service.js";
 import { getClosureProxy } from "../query/api/effectiveness.js";
 import { getEfficiencyHeadroom } from "../query/api/efficiency-headroom.js";
+import { getEsfObservations, getSessionEsfObservations } from "../query/api/esf-observations.js";
 import { getHeadroomTrend } from "../query/api/headroom-trend.js";
 import { getHotSessions } from "../query/api/hot-sessions.js";
 import {
@@ -72,6 +74,25 @@ import {
 } from "../query/api/self-percentiles.js";
 import { getFlavorDecomposition } from "../query/api/spend-flavor.js";
 import { type BucketSize, getCacheWriteTrend, getTrends } from "../query/api/trends.js";
+import {
+  WorkRecordError,
+  attachWorkRecordContextRoute,
+  attachWorkRecordSessionRoute,
+  closeoutWorkRecordRoute,
+  createWorkRecordRoute,
+  deleteWorkRecordRoute,
+  detachWorkRecordContextRoute,
+  detachWorkRecordSessionRoute,
+  editWorkRecordRoute,
+  getWorkAllocation,
+  getWorkAllocationClaimKinds,
+  getWorkRecord,
+  issueWorkRecordId,
+  listWorkRecords,
+  recomputeWorkAllocationRoute,
+  setWorkRecordArchivedRoute,
+  workRecordResponse,
+} from "../query/api/work-records.js";
 import { getSettingsData } from "../query/settings-store.js";
 import { getScanStatus, isReady } from "./readiness.js";
 
@@ -187,6 +208,64 @@ function jobRoute(
   return { jobId: decodeURIComponent(m[1]), action };
 }
 
+function workRecordId(pathname: string): string | null {
+  const match = pathname.match(/^\/api\/work-records\/([^/]+)$/);
+  return match?.[1] === undefined ? null : decodeURIComponent(match[1]);
+}
+
+function workRecordAction(
+  pathname: string,
+): { recordId: string; action: string; relatedId?: string } | null {
+  const match = pathname.match(
+    /^\/api\/work-records\/([^/]+)\/(edit|closeout|archive|reopen|sessions|contexts|delete)(?:\/([^/]+)\/detach)?$/,
+  );
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  const result = { recordId: decodeURIComponent(match[1]), action: match[2] };
+  return match[3] === undefined ? result : { ...result, relatedId: decodeURIComponent(match[3]) };
+}
+
+function workRecordBody(
+  raw: string,
+  recordId?: string,
+  related?: { key: "session_id" | "context_ref_id"; value: string },
+): Record<string, unknown> {
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    throw new WorkRecordError(400, "INVALID_REQUEST", "Invalid JSON body");
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new WorkRecordError(400, "INVALID_REQUEST", "request body must be an object");
+  }
+  const result = { ...(body as Record<string, unknown>) };
+  if (recordId !== undefined) {
+    if (result.work_record_id !== undefined && result.work_record_id !== recordId) {
+      throw new WorkRecordError(400, "INVALID_REQUEST", "work_record_id must match the route");
+    }
+    result.work_record_id = recordId;
+  }
+  if (related !== undefined) {
+    if (result[related.key] !== undefined && result[related.key] !== related.value) {
+      throw new WorkRecordError(400, "INVALID_REQUEST", `${related.key} must match the route`);
+    }
+    result[related.key] = related.value;
+  }
+  return result;
+}
+
+function sendWorkRecordError(res: http.ServerResponse, error: unknown): void {
+  if (error instanceof EffectRequestError) {
+    sendJson(res, error.status, { error: error.message, code: "INVALID_REQUEST" });
+    return;
+  }
+  if (error instanceof WorkRecordError) {
+    sendJson(res, error.status, { error: error.message, code: error.code });
+    return;
+  }
+  sendJson(res, 500, { error: "Internal error" });
+}
+
 export function handleApiRequest(
   _db: Db,
   req: http.IncomingMessage,
@@ -197,6 +276,39 @@ export function handleApiRequest(
   // Strip query string for routing.
   const pathname = url.split("?")[0] ?? url;
   try {
+    if (method === "GET" && pathname === "/api/work-records/summary") {
+      const params = new URLSearchParams(url.split("?")[1] ?? "");
+      sendJson(res, 200, getReportedWork(_db, params.get("workspace_id") || null));
+      return;
+    }
+
+    // GET /api/esf/observations — complete selected-turn accounting cohort.
+    if (method === "GET" && pathname === "/api/esf/observations") {
+      const params = new URLSearchParams(url.split("?")[1] ?? "");
+      const window = resolveWindow(parseWindowFilter(url));
+      if (Date.parse(window.from) >= Date.parse(window.to)) {
+        sendJson(res, 400, { error: "from must precede to" });
+        return;
+      }
+      sendJson(
+        res,
+        200,
+        getEsfObservations(_db, {
+          workspaceId: params.get("workspace_id") || null,
+          ...window,
+        }),
+      );
+      return;
+    }
+
+    // Full-session aggregate: never derive this from a paginated timeline.
+    const sessionObservationId = pathname.match(/^\/api\/esf\/session-observations\/([^/]+)$/)?.[1];
+    if (method === "GET" && sessionObservationId !== undefined) {
+      const evidence = getSessionEsfObservations(_db, decodeURIComponent(sessionObservationId));
+      sendJson(res, evidence.data === null ? 404 : 200, evidence);
+      return;
+    }
+
     // GET /api/esf/effects — independently keyset-paged versioned and legacy evidence.
     if (method === "GET" && pathname === "/api/esf/effects") {
       const params = new URLSearchParams(url.split("?")[1] ?? "");
@@ -253,6 +365,191 @@ export function handleApiRequest(
                 : "Internal error reading request body",
           }),
         );
+      return;
+    }
+
+    // ESF3 work records are local-only, structured records.  The HTTP token gate
+    // in http.ts covers every mutation and ID issuance route below.
+    if (method === "GET" && pathname === "/api/work-records") {
+      const params = new URLSearchParams(url.split("?")[1] ?? "");
+      const workspaceId = params.get("workspace_id");
+      const includeArchived = params.get("include_archived");
+      if (
+        workspaceId === null ||
+        workspaceId.length === 0 ||
+        (includeArchived !== null && includeArchived !== "true" && includeArchived !== "false")
+      ) {
+        sendJson(res, 400, { error: "workspace_id and include_archived are invalid" });
+        return;
+      }
+      const records = listWorkRecords(_db, workspaceId, includeArchived === "true");
+      sendJson(res, 200, workRecordResponse(records, { n: records.length, workspaceId }));
+      return;
+    }
+
+    if (method === "GET" && pathname.startsWith("/api/work-records/allocations/")) {
+      const allocationId = pathname.slice("/api/work-records/allocations/".length);
+      if (allocationId.length === 0 || allocationId.includes("/")) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+      try {
+        const allocation = getWorkAllocation(_db, decodeURIComponent(allocationId));
+        sendJson(
+          res,
+          200,
+          workRecordResponse(allocation, {
+            n: allocation.eligible_session_count,
+            workspaceId: allocation.workspace_id,
+            claimKind: "EXPERIMENTAL",
+            meta: {
+              window: { from: allocation.cohort_from, to: allocation.cohort_to },
+              qualification: {
+                provisional_excluded: true,
+                unpriced_turns: allocation.unpriced_turn_count,
+                claim_kinds_count: getWorkAllocationClaimKinds(
+                  _db,
+                  allocation.allocation_revision_id,
+                ),
+                note: "Frozen ESF3 allocation; unpriced turns are not zero cost.",
+              },
+            },
+          }),
+        );
+      } catch (error) {
+        sendWorkRecordError(res, error);
+      }
+      return;
+    }
+
+    const recordId = workRecordId(pathname);
+    if (method === "GET" && recordId !== null) {
+      try {
+        const record = getWorkRecord(_db, recordId);
+        sendJson(res, 200, workRecordResponse(record, { workspaceId: record.workspace_id }));
+      } catch (error) {
+        sendWorkRecordError(res, error);
+      }
+      return;
+    }
+
+    if (method === "POST" && pathname === "/api/work-records/ids") {
+      readBody(req, 1024)
+        .then((raw) => {
+          try {
+            sendJson(res, 200, workRecordResponse(issueWorkRecordId(_db, workRecordBody(raw))));
+          } catch (error) {
+            sendWorkRecordError(res, error);
+          }
+        })
+        .catch((error) => sendWorkRecordError(res, error));
+      return;
+    }
+
+    if (method === "POST" && pathname === "/api/work-records") {
+      readBody(req, 4096)
+        .then((raw) => {
+          try {
+            const result = createWorkRecordRoute(_db, workRecordBody(raw));
+            sendJson(
+              res,
+              200,
+              workRecordResponse(result, { workspaceId: result.record.workspace_id }),
+            );
+          } catch (error) {
+            sendWorkRecordError(res, error);
+          }
+        })
+        .catch((error) => sendWorkRecordError(res, error));
+      return;
+    }
+
+    if (method === "POST" && pathname === "/api/work-records/allocations/recompute") {
+      readBody(req, 4096)
+        .then((raw) => {
+          try {
+            const result = recomputeWorkAllocationRoute(_db, workRecordBody(raw));
+            sendJson(
+              res,
+              200,
+              workRecordResponse(result, {
+                n: result.allocation.eligible_session_count,
+                workspaceId: result.allocation.workspace_id,
+                claimKind: "EXPERIMENTAL",
+                meta: {
+                  window: {
+                    from: result.allocation.cohort_from,
+                    to: result.allocation.cohort_to,
+                  },
+                  qualification: {
+                    provisional_excluded: true,
+                    unpriced_turns: result.allocation.unpriced_turn_count,
+                    claim_kinds_count: getWorkAllocationClaimKinds(
+                      _db,
+                      result.allocation.allocation_revision_id,
+                    ),
+                    note: "Frozen ESF3 allocation; unpriced turns are not zero cost.",
+                  },
+                },
+              }),
+            );
+          } catch (error) {
+            sendWorkRecordError(res, error);
+          }
+        })
+        .catch((error) => sendWorkRecordError(res, error));
+      return;
+    }
+
+    const recordAction = workRecordAction(pathname);
+    if (
+      recordAction !== null &&
+      ((method === "POST" && recordAction.action !== "delete") ||
+        (method === "DELETE" && recordAction.action === "delete"))
+    ) {
+      readBody(req, 4096)
+        .then((raw) => {
+          try {
+            const related: { key: "session_id" | "context_ref_id"; value: string } | undefined =
+              recordAction.relatedId === undefined
+                ? undefined
+                : {
+                    key: recordAction.action === "contexts" ? "context_ref_id" : "session_id",
+                    value: recordAction.relatedId,
+                  };
+            const body = workRecordBody(raw, recordAction.recordId, related);
+            const result =
+              recordAction.action === "edit"
+                ? editWorkRecordRoute(_db, body)
+                : recordAction.action === "closeout"
+                  ? closeoutWorkRecordRoute(_db, body)
+                  : recordAction.action === "archive"
+                    ? setWorkRecordArchivedRoute(_db, body, true)
+                    : recordAction.action === "reopen"
+                      ? setWorkRecordArchivedRoute(_db, body, false)
+                      : recordAction.action === "sessions" && recordAction.relatedId === undefined
+                        ? attachWorkRecordSessionRoute(_db, body)
+                        : recordAction.action === "sessions"
+                          ? detachWorkRecordSessionRoute(_db, body)
+                          : recordAction.action === "contexts" &&
+                              recordAction.relatedId === undefined
+                            ? attachWorkRecordContextRoute(_db, body)
+                            : recordAction.action === "contexts"
+                              ? detachWorkRecordContextRoute(_db, body)
+                              : deleteWorkRecordRoute(_db, body);
+            const workspaceId = "record" in result ? result.record.workspace_id : undefined;
+            sendJson(
+              res,
+              200,
+              workspaceId === undefined
+                ? workRecordResponse(result)
+                : workRecordResponse(result, { workspaceId }),
+            );
+          } catch (error) {
+            sendWorkRecordError(res, error);
+          }
+        })
+        .catch((error) => sendWorkRecordError(res, error));
       return;
     }
     // GET /api/overview

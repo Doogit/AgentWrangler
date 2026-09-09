@@ -146,6 +146,16 @@ function requiresSessionToken(pathname: string): boolean {
   if (/^\/api\/recommendations\/jobs\/[^/]+\/(confirm|rollback)$/.test(pathname)) return true;
   if (/^\/api\/esf\/effects\/(track|stop|close|rollback|attest-rollback)$/.test(pathname))
     return true;
+  if (pathname === "/api/work-records" || pathname === "/api/work-records/ids") return true;
+  if (
+    /^\/api\/work-records\/[^/]+\/(edit|closeout|archive|reopen|sessions|contexts|delete)$/.test(
+      pathname,
+    )
+  )
+    return true;
+  if (/^\/api\/work-records\/[^/]+\/(sessions|contexts)\/[^/]+\/detach$/.test(pathname))
+    return true;
+  if (pathname === "/api/work-records/allocations/recompute") return true;
   return false;
 }
 
