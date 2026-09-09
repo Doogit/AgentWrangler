@@ -40,44 +40,64 @@ The process-startup timer is separately `startup-to-ready`.
 
 ## Acceptance budgets by phase
 
-`TBD` fields are numeric threshold slots: replace each with a number and keep
-the stated unit and comparison when freezing the baseline. A later unit passes
-only when its matched scenario remains within the frozen value (and preserves
-the response/counter contract).
+**Baseline campaign 2026-09-08 (PROPOSED — pending operator sign-off).** Filled
+from 3 repeated sequential runs of all three tools on commit `d8f7dad` (private
+main; browser navigation fix included). Platform: Windows 11 Pro 10.0.26200,
+i7-12700H (20 logical) / 32 GB, Node v24.14.0, SQLite 3.53.2 (better-sqlite3),
+Chrome headless=new, production Vite assets, `tsx` loader. Fixture: the frozen
+synthetic fixture at 1k/10k/100k turns (deterministic window anchor
+2026-01-01..15); daemon values are the worst case across 12 routes x 3 runs;
+warm/preset distributions are 30 samples each. Budgets are worst-observed with
+~1.5x headroom (throughput floors ~0.7x the observed minimum). Scale-qualified
+cells read `1k / 10k / 100k`.
+
+Caveats recorded with this campaign:
+- **Cold phases have 1 sample per boot**, so cold budgets rest on 3 boot
+  samples per scale, not 30-sample distributions — structurally unavoidable;
+  tighten them after more boots accumulate.
+- **SQLite query count is BLOCKED**: the harness child protocol does not expose
+  trace/EXPLAIN output (`query_instrumentation.available=false`). Those cells
+  stay TBD until the child protocol grows query instrumentation.
+- **NFR-105 gap**: warm 100k route p95 observed 839.9 ms breaches the retained
+  <=250 ms dashboard-query target. Per the architecture addendum this is an
+  identified gap for PERF1/PERF2 to close, not a relaxed target; the 100k warm
+  budget below bounds regression only and does not supersede NFR-105.
+- **Browser measurements run at the tool's fixed 1k-turn fixture** and one
+  viewport; warm navigation showed high spread (38.6–109.1 ms across runs).
 
 ### cold-process
 
-| Metric | Acceptance budget |
-|---|---|
-| Startup-to-ready | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| Process CPU through ready | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| RSS at ready | <= **TBD — fill from >=3 repeated 30-sample runs** MiB p95 |
-| Ingest catch-up throughput | >= **TBD — fill from >=3 repeated 30-sample runs** turns/s p50 |
-| Event-loop delay during startup/catch-up | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
+| Metric | Observed worst (1k / 10k / 100k) | Proposed budget |
+|---|---|---|
+| Startup-to-ready | 956.2 / 597.7 / 5590.1 ms | <= 1500 / 1500 / 8500 ms p95 |
+| Process CPU through ready (controller) | <=16 ms (Windows ~15.6 ms timer granularity) | <= 150 ms p95 |
+| RSS at ready | 147.4 / 153.6 / 182.9 MiB | <= 225 / 235 / 280 MiB p95 |
+| Ingest catch-up throughput (seed insert) | 47017 / 14519 / 10552 turns/s min | >= 30000 / 10000 / 7000 turns/s p50 |
+| Event-loop delay during startup/catch-up | 16.3 / 23.1 / 40.2 ms p95 | <= 30 / 40 / 60 ms p95 |
 
 ### cold-query
 
-| Metric | Acceptance budget |
-|---|---|
-| Route service time (first request after child boot/seed) | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| End-to-end loopback HTTP time | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| SQLite query count | <= **TBD — fill from >=3 repeated 30-sample runs** queries/request |
-| Response bytes | <= **TBD — fill from >=3 repeated 30-sample runs** bytes/request |
-| `getEsfObservations` CPU / RSS at each scale | <= **TBD — fill from >=3 repeated 30-sample runs** ms CPU p95 / **TBD — fill from >=3 repeated 30-sample runs** MiB RSS p95 |
+| Metric | Observed worst (1k / 10k / 100k) | Proposed budget |
+|---|---|---|
+| Route service time (first request after child boot/seed; controller-observed loopback HTTP) | 31.9 / 139.9 / 3342.8 ms | <= 50 / 210 / 5000 ms |
+| End-to-end loopback HTTP time | same vantage as above (single controller-observed measure) | same cells |
+| SQLite query count | BLOCKED — child protocol exposes no trace/EXPLAIN | TBD (instrumentation follow-up) |
+| Response bytes | <= 56351 bytes max (all phases) | <= 131072 bytes/request |
+| `getEsfObservations` elapsed / CPU / RSS | 8.0 / 71.5 / 1358.3 ms p95 · 16 / 78 / 1532 ms CPU · 89.7 / 108.5 / 259.3 MiB | <= 15 / 120 / 2100 ms p95 · <= 30 / 120 / 2300 ms CPU · <= 135 / 165 / 390 MiB |
 
 ### warm-explicit-window
 
 This phase uses a fixed, explicit historical `from`/`to` window. Record cache
 misses and hits separately; a hit does not stand in for a cold-query result.
 
-| Metric | Acceptance budget |
-|---|---|
-| Route service time | <= **TBD — fill from >=3 repeated 30-sample runs** ms p50 / **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| End-to-end loopback HTTP time | <= **TBD — fill from >=3 repeated 30-sample runs** ms p50 / **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| SQLite query count | <= **TBD — fill from >=3 repeated 30-sample runs** queries/request |
-| Response bytes | <= **TBD — fill from >=3 repeated 30-sample runs** bytes/request |
-| Browser warm navigation | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| Browser request count / retained cache entries | <= **TBD — fill from >=3 repeated 30-sample runs** requests/navigation / **TBD — fill from >=3 repeated 30-sample runs** entries |
+| Metric | Observed worst (1k / 10k / 100k) | Proposed budget |
+|---|---|---|
+| Route service time (controller-observed loopback HTTP) | p50 15.5 / 64.7 / 594.4 ms · p95 22.5 / 84.5 / 839.9 ms | <= 25 / 100 / 900 ms p50 · <= 35 / 130 / 1300 ms p95 |
+| End-to-end loopback HTTP time | same vantage as above | same cells |
+| SQLite query count | BLOCKED — see cold-query | TBD (instrumentation follow-up) |
+| Response bytes | <= 56351 bytes max | <= 131072 bytes/request |
+| Browser warm navigation (1k fixture) | 38.6–109.1 ms across runs | <= 170 ms p95 |
+| Browser request count / retained cache entries | 35 max / 10 | <= 45 requests/navigation / <= 32 entries |
 
 ### moving-preset
 
@@ -85,15 +105,15 @@ This phase resolves a rolling/current preset at the recorded clock anchor. It
 must exercise advancing effective windows rather than pretending that a new
 timestamp is an explicit-window cache hit.
 
-| Metric | Acceptance budget |
-|---|---|
-| Route service time / loopback HTTP time | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 / **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| SQLite query count / response bytes | <= **TBD — fill from >=3 repeated 30-sample runs** queries/request / **TBD — fill from >=3 repeated 30-sample runs** bytes/request |
-| Browser cold and warm navigation | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 / **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| Browser request count / retained cache entries | <= **TBD — fill from >=3 repeated 30-sample runs** requests/navigation / **TBD — fill from >=3 repeated 30-sample runs** entries |
-| Long tasks | <= **TBD — fill from >=3 repeated 30-sample runs** tasks/navigation and **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| React commit duration | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| Concurrent-read event-loop delay / RSS | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 / **TBD — fill from >=3 repeated 30-sample runs** MiB p95 |
+| Metric | Observed worst (1k / 10k / 100k) | Proposed budget |
+|---|---|---|
+| Route service time / loopback HTTP time | p95 9.5 / 5.6 / 26.7 ms | <= 15 / 15 / 45 ms p95 |
+| SQLite query count / response bytes | BLOCKED / <= 56351 bytes | TBD / <= 131072 bytes/request |
+| Browser cold and warm navigation (1k fixture) | cold <= 65.9 ms / warm <= 109.1 ms | <= 100 ms p95 / <= 170 ms p95 |
+| Browser request count / retained cache entries | 35 max / 10 | <= 45 requests/navigation / <= 32 entries |
+| Long tasks | 0 observed | <= 2 tasks/navigation and <= 100 ms p95 |
+| React commit duration | <= 18.5 ms | <= 50 ms p95 |
+| Concurrent-read event-loop delay / RSS | 24.6 ms p95 / 182.4 MiB | <= 40 ms p95 / <= 280 MiB p95 |
 
 ## Reproducible measurement commands
 
