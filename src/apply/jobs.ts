@@ -434,7 +434,10 @@ function completeApplyPhase(
   let runId: string | null = null;
   const completedAt = rt.now();
   try {
-    adoptRecommendation(job.rec_id, completedAt.getTime());
+    adoptRecommendation(job.rec_id, completedAt.getTime(), {
+      machineConfirmed: true,
+      actionRevision: job.job_id,
+    });
     runId = randomUUID();
     const evidencePackHash = createHash("sha256")
       .update(JSON.stringify(rec.evidence))
@@ -601,6 +604,11 @@ export function rollbackApplyJob(jobId: string): ApiResponse<{ ok: true; rolled_
   if (row === null) throw new Error(`job ${jobId} not found`);
   if (row.status !== "APPLIED" && row.status !== "CONFIRMING") {
     throw new Error("job cannot be rolled back from this state");
+  }
+  if (db.prepare("SELECT 1 FROM effect_cycles WHERE rec_id=? LIMIT 1").get(row.rec_id)) {
+    throw new Error(
+      "Whole-file backup rollback is not a supported effect inverse. Revert manually and attest the rollback in the effect ledger.",
+    );
   }
   if (row.backup_path === null) throw new Error("no backup available");
   fs.copyFileSync(row.backup_path, row.file_ref);

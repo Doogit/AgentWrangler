@@ -16,6 +16,13 @@ import {
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
+const gate = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../../src/effects/gate.js", () => ({
+  get ESF_EFFECT_WRITER_ENABLED() {
+    return gate.enabled;
+  },
+}));
+
 let db: Database.Database;
 let tmpDir: string;
 let workspaceCwd: string;
@@ -55,6 +62,7 @@ async function waitForStatus(
 }
 
 beforeEach(() => {
+  gate.enabled = true;
   db = createInMemoryFixtureDb();
   setQueryDb(db);
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-apply-test-"));
@@ -156,6 +164,14 @@ describe("apply jobs", () => {
       .get("rec-apply-success") as { state: string; adopted_at: string | null };
     expect(rec.state).toBe("ADOPTED");
     expect(rec.adopted_at).not.toBeNull();
+    expect(
+      db
+        .prepare("SELECT application_source,action_revision FROM effect_cycles WHERE rec_id=?")
+        .get("rec-apply-success"),
+    ).toEqual({ application_source: "MACHINE_CONFIRMED", action_revision: started.job_id });
+    expect(
+      db.prepare("SELECT * FROM recommendation_effects WHERE rec_id=?").all("rec-apply-success"),
+    ).toHaveLength(0);
   });
 
   it("rejects absent file_ref without spawning", () => {
@@ -206,6 +222,8 @@ describe("apply jobs", () => {
   });
 
   it("rolls back an applied job to the pre-apply backup", async () => {
+    // Preserve the pre-ESF installed-action compatibility regression.
+    gate.enabled = false;
     insertRec("rec-rollback");
 
     const started = startApplyJob("rec-rollback", workspaceCwd).data;
@@ -219,6 +237,21 @@ describe("apply jobs", () => {
 
     expect(rolledBack.status).toBe("ROLLED_BACK");
     expect(fs.readFileSync(fileRef, "utf-8")).toBe("original\n");
+  });
+
+  it("refuses a whole-file backup inverse for a versioned cycle without changing files or evidence", async () => {
+    insertRec("rec-versioned-rollback");
+    const started = startApplyJob("rec-versioned-rollback", workspaceCwd).data;
+    if (!started) throw new Error("missing start response");
+    await waitForStatus(started.job_id, ["DRY_DONE"]);
+    confirmApplyJob(started.job_id);
+    await waitForStatus(started.job_id, ["APPLIED"]);
+    fs.writeFileSync(fileRef, "later user edit\n");
+    const before = db.prepare("SELECT * FROM effect_cycles").all();
+    expect(() => rollbackApplyJob(started.job_id)).toThrow(/Revert manually/);
+    expect(fs.readFileSync(fileRef, "utf-8")).toBe("later user edit\n");
+    expect(db.prepare("SELECT * FROM effect_cycles").all()).toEqual(before);
+    expect(getApplyJob(started.job_id).data?.status).toBe("APPLIED");
   });
 
   it("marks the job failed before spawn when settings JSON is invalid", async () => {

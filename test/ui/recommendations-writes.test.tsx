@@ -15,6 +15,7 @@ import {
 } from "../../src/ui/api/fixtures";
 import { __resetHookInstallCache } from "../../src/ui/recommendations/RecCard";
 import RecommendationsPage from "../../src/ui/recommendations/RecommendationsPage";
+import { makeEffectCycle } from "./effect-cycle-fixture";
 
 vi.mock("../../src/ui/api/client");
 
@@ -25,7 +26,7 @@ beforeEach(() => {
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
   });
   window.location.hash = "#/recommendations";
-  vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
+  vi.mocked(client.fetchRecommendations).mockResolvedValue(trackableRecommendations());
   vi.mocked(client.fetchLedger).mockResolvedValue(mockLedger());
   vi.mocked(client.fetchPractices).mockResolvedValue(mockPractices());
   vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
@@ -46,6 +47,31 @@ function response(status = 200, body: unknown = undefined): Response {
     status,
     json: async () => body,
   } as Response;
+}
+
+function trackedEffectResponse(recId: string) {
+  return response(200, {
+    supported: true,
+    cycle: makeEffectCycle({ recId }),
+  });
+}
+
+function trackableRecommendations() {
+  const view = mockRecommendations();
+  if (view.data === null) throw new Error("missing recommendation fixture");
+  return {
+    ...view,
+    data: {
+      ...view.data,
+      active: view.data.active.map((rec) => ({
+        ...rec,
+        effect_capability: { mode: "TRACKABLE" as const, reason: null },
+      })),
+      // The page derives these groups from active cards. Retaining pre-ESF
+      // group projections would leave the guided card without its capability.
+      active_groups: [],
+    },
+  };
 }
 
 async function loaded() {
@@ -75,7 +101,7 @@ function lifecycleCard(): HTMLElement {
 
 async function commit(action: "Track this change" | "Dismiss") {
   fireEvent.click(within(lifecycleCard()).getByRole("button", { name: action }));
-  const pending = action === "Track this change" ? "Adopt" : action;
+  const pending = action === "Track this change" ? "Track" : action;
   expect(screen.getAllByText(`${pending} pending \u2014 Undo`).length).toBeGreaterThan(0);
   await act(async () => {
     vi.advanceTimersByTime(5_000);
@@ -98,7 +124,10 @@ async function settle() {
 function tokenAndPostCalls(fetchMock: ReturnType<typeof vi.fn>) {
   return fetchMock.mock.calls.filter(
     ([url]) =>
-      typeof url === "string" && (url === "/api/token" || url.startsWith("/api/recommendations/")),
+      typeof url === "string" &&
+      (url === "/api/token" ||
+        url.startsWith("/api/recommendations/") ||
+        url.startsWith("/api/esf/effects/")),
   );
 }
 
@@ -139,16 +168,26 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
       .mockResolvedValueOnce(response(200, { token: "stale-token" }))
       .mockResolvedValueOnce(response(409))
       .mockResolvedValueOnce(response(200, { token: "fresh-token" }))
-      .mockResolvedValueOnce(response(200));
+      .mockResolvedValueOnce(trackedEffectResponse("rec-D2-global-mock000000000000"));
     vi.stubGlobal("fetch", fetchMock);
-    const refreshed = mockRecommendations();
+    const refreshed = trackableRecommendations();
     const adopted = refreshed.data?.active[0];
     if (!refreshed.data || !adopted) throw new Error("missing recommendation fixture");
     refreshed.data.active = [];
     refreshed.data.active_groups = [];
-    refreshed.data.adopted = [{ ...adopted, state: "ADOPTED" }];
+    refreshed.data.adopted = [
+      {
+        ...adopted,
+        state: "ADOPTED",
+        effect_cycle: makeEffectCycle({
+          recId: adopted.rec_id,
+          detectorId: adopted.detector_id,
+          metricId: adopted.target_metric,
+        }),
+      },
+    ];
     vi.mocked(client.fetchRecommendations)
-      .mockResolvedValueOnce(mockRecommendations())
+      .mockResolvedValueOnce(trackableRecommendations())
       .mockResolvedValue(refreshed);
     await loaded();
     vi.useFakeTimers();
@@ -156,10 +195,10 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     await commit("Track this change");
     expect(saveAlert()).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(screen.queryAllByText("Adopt pending \u2014 Undo")).toHaveLength(0);
+    expect(screen.queryAllByText("Track pending \u2014 Undo")).toHaveLength(0);
     await settle();
 
-    expect(screen.queryByRole("button", { name: "Track this change" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Stop measurement" })).toBeTruthy();
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "/api/token",
@@ -167,7 +206,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "/api/recommendations/adopt",
+      "/api/esf/effects/track",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ "X-AgentWrangler-Token": "stale-token" }),
@@ -181,13 +220,13 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
-      "/api/recommendations/adopt",
+      "/api/esf/effects/track",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ "X-AgentWrangler-Token": "fresh-token" }),
       }),
     );
-    expect(screen.queryAllByText("Adopt pending \u2014 Undo")).toHaveLength(0);
+    expect(screen.queryAllByText("Track pending \u2014 Undo")).toHaveLength(0);
     expect(vi.mocked(client.fetchRecommendations).mock.calls.length).toBeGreaterThan(1);
   });
 
@@ -200,7 +239,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
       .fn()
       .mockResolvedValueOnce(badToken)
       .mockResolvedValueOnce(response(200, { token: "replacement-token" }))
-      .mockResolvedValueOnce(response(200));
+      .mockResolvedValueOnce(trackedEffectResponse("rec-D2-global-mock000000000000"));
     vi.stubGlobal("fetch", fetchMock);
     await loaded();
     vi.useFakeTimers();
@@ -224,7 +263,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "/api/recommendations/adopt",
+      "/api/esf/effects/track",
       expect.objectContaining({
         headers: expect.objectContaining({ "X-AgentWrangler-Token": "replacement-token" }),
       }),
@@ -240,7 +279,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
       .mockResolvedValueOnce(response(200, { token: "dismiss-retry" }))
       .mockResolvedValueOnce(response(200));
     vi.stubGlobal("fetch", fetchMock);
-    const refreshed = mockRecommendations();
+    const refreshed = trackableRecommendations();
     const dismissed = refreshed.data?.active[0];
     if (!refreshed.data || !dismissed) throw new Error("missing recommendation fixture");
     refreshed.data.active = [];
@@ -249,7 +288,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
       { ...dismissed, state: "DISMISSED", dismissed_until: "2026-10-05T00:00:00.000Z" },
     ];
     vi.mocked(client.fetchRecommendations)
-      .mockResolvedValueOnce(mockRecommendations())
+      .mockResolvedValueOnce(trackableRecommendations())
       .mockResolvedValue(refreshed);
     const { container } = await loaded();
     vi.useFakeTimers();
@@ -307,7 +346,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     vi.useFakeTimers();
 
     fireEvent.click(screen.getByRole("button", { name: "Track this change" }));
-    expect(screen.getAllByText("Adopt pending \u2014 Undo").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Track pending \u2014 Undo").length).toBeGreaterThan(0);
     first.unmount();
     await act(async () => {
       vi.advanceTimersByTime(5_000);

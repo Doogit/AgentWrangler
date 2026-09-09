@@ -24,7 +24,6 @@ import { openDb } from "../db/open.js";
 import { configGet as bptConfigGet, calibrateBytesPerToken } from "../detector/calibration.js";
 import { runContextProbe } from "../detector/context-probe.js";
 import { runDetectors } from "../detector/index.js";
-import { runMeasurementPass } from "../detector/measurement.js";
 import { installHook, uninstallHook } from "../hook/install.js";
 import { collectSessionChurn } from "../ingest/churn-collector.js";
 import { runPostProbeHook, setPostIngestHook, setPostProbeHook } from "../ingest/detector-hook.js";
@@ -44,6 +43,7 @@ import {
   setRuntimeResetHook,
 } from "../query/settings-store.js";
 import { loadConfig } from "./config.js";
+import { runEffectMeasurementPass } from "./effect-pass.js";
 import { createServer } from "./http.js";
 import { type OutcomesPassResult, createOutcomesPassRunner } from "./outcomes-pass.js";
 import { setReady, setScanRoots, setScanState } from "./readiness.js";
@@ -124,6 +124,10 @@ if (isSmoke) {
     "review_findings",
     "recommendations",
     "recommendation_effects",
+    "effect_cycles",
+    "effect_guardrail_results",
+    "effect_rollback_operations",
+    "effect_mutation_keys",
     "apply_jobs",
     "analysis_runs",
     "ingest_quarantine",
@@ -179,18 +183,16 @@ function runProbePass(label: string): void {
     const now = new Date();
     const { rows } = runContextProbe(db, now);
     console.log(`ContextProbe[${label}]: ${rows} row(s) upserted`);
-    // W4: measurement pass after each probe (best-effort; the seam never throws
-    // through, and runMeasurementPass itself is guarded/log-not-throw).
+    // Best-effort measurement after each probe, using the same observation clock.
     runPostProbeHook(db, now);
   } catch (e) {
     console.log(`ContextProbe[${label}]: skipped — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
-// Wire the W4 Impact Ledger measurement pass onto the post-probe seam. The pass
-// receives the probe's clock (deterministic; NFR-107), is throttled internally.
+// Versioned measurement owns new cycles; W4 history stays read-only under the code gate.
 setPostProbeHook((probeDb, now) => {
-  runMeasurementPass(probeDb, now);
+  runEffectMeasurementPass(probeDb, now);
 });
 
 runProbePass("boot");

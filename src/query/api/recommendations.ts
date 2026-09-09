@@ -17,9 +17,18 @@ import {
   snapshotBeforeValue,
 } from "../../detector/measurement.js";
 import type { BeforeSnapshot, MeasurementRecRow } from "../../detector/measurement.js";
+import type { EffectProjection } from "../../effects/api-contract.js";
+import { ESF_EFFECT_WRITER_ENABLED } from "../../effects/gate.js";
 import { getQueryDb } from "../db-context.js";
 import type { ApiResponse } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
+import {
+  EffectRequestError,
+  capabilityForRecommendation,
+  latestEffectCycle,
+  trackCompletedChange,
+  trackMachineConfirmedChange,
+} from "./effect-service.js";
 
 /**
  * Bounded step shapes for recommendation action items.
@@ -46,7 +55,7 @@ export interface HeadroomBlock {
   tokens_per_session_freed: number | null;
 }
 
-export interface RecommendationCard {
+export interface RecommendationCard extends EffectProjection {
   rec_id: string;
   detector_id: string; // 'D1' | 'D2' | 'D5'
   category: string; // 'CONTEXT' | 'LIMIT' | 'CACHE'
@@ -351,6 +360,8 @@ function toCard(r: RecRow, sessionsPerWeek: number | null): RecommendationCard {
     cross_workspace: r.scope_workspace_id === null,
     workspace_multiplier,
     file_ref: typeof evidence.file_ref === "string" ? evidence.file_ref : null,
+    effect_capability: capabilityForRecommendation(getQueryDb(), r.rec_id),
+    effect_cycle: latestEffectCycle(getQueryDb(), r.rec_id),
   };
 }
 
@@ -480,6 +491,7 @@ export function dismissRecommendation(
 export function adoptRecommendation(
   rec_id: string,
   nowMs: number = Date.now(),
+  options?: { completedChange?: boolean; machineConfirmed?: boolean; actionRevision?: string },
 ): ApiResponse<{ ok: true }> {
   const db = getQueryDb();
   const adoptedAt = new Date(nowMs).toISOString();
@@ -492,6 +504,33 @@ export function adoptRecommendation(
          FROM recommendations WHERE rec_id = ?`,
     )
     .get(rec_id) as (MeasurementRecRow & { state: RecommendationCard["state"] }) | undefined;
+
+  if (ESF_EFFECT_WRITER_ENABLED) {
+    if (rec === undefined || rec.state !== "PROPOSED")
+      throw new EffectRequestError(400, `rec ${rec_id} not found or not in PROPOSED state`);
+    if (!isWarningClass(rec)) {
+      if (!options?.completedChange && !options?.machineConfirmed)
+        throw new EffectRequestError(400, "Confirm that the change is complete before tracking.");
+      const result = options?.machineConfirmed
+        ? trackMachineConfirmedChange(db, rec_id, new Date(nowMs), options.actionRevision)
+        : trackCompletedChange(
+            db,
+            { rec_id, idempotency_key: `legacy-adopt:${rec_id}`, completed_change: true },
+            new Date(nowMs),
+          );
+      if (!result.supported && !options?.machineConfirmed)
+        throw new EffectRequestError(400, "Manual measurement: no supported effect handler.");
+    }
+    // Compatibility state describes adoption only. Versioned cycles own measurement truth.
+    db.prepare("UPDATE recommendations SET state='ADOPTED',adopted_at=? WHERE rec_id=?").run(
+      adoptedAt,
+      rec_id,
+    );
+    return buildResponse<{ ok: true }>(
+      { ok: true },
+      { claim_kind: "EXPERIMENTAL", n: 1, drilldown_ids: {} },
+    );
+  }
 
   const tx = db.transaction(() => {
     const result = db

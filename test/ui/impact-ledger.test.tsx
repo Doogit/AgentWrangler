@@ -9,10 +9,12 @@
 
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ObservationBundle } from "../../src/effects/types";
 import type { LedgerEntry } from "../../src/query/api/recommendations-ledger";
 import * as client from "../../src/ui/api/client";
 import { mockEfficiencyHeadroom, mockLedger } from "../../src/ui/api/fixtures";
 import ImpactLedger from "../../src/ui/recommendations/ImpactLedger";
+import { makeEffectCycle } from "./effect-cycle-fixture";
 
 vi.mock("../../src/ui/api/client");
 
@@ -85,18 +87,121 @@ describe("ImpactLedger — honesty rails", () => {
     expect((container.textContent ?? "").toLowerCase()).not.toMatch(/\bsaved\b/);
   });
 
-  it("MEASURING shows the clock + probe-check date, never a zero-like placeholder", async () => {
+  it("legacy measuring rows stay read-only and never invent a deadline", async () => {
     const measuring = mockLedger().data?.entries[1];
     if (measuring === undefined) throw new Error("mock ledger missing measuring entry");
     mockOk([measuring]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
-      expect(container.textContent ?? "").toContain("Local check due after");
+      expect(container.textContent ?? "").toContain("Legacy measurement (read-only)");
     });
-    expect(container.textContent ?? "").toContain("2026-09-04");
-    // No bare em-dash / zero placeholder on the realized line.
-    expect(container.textContent ?? "").not.toContain("Realized (observed)—");
-    expect(container.textContent ?? "").toContain("Measuring");
+    expect(container.textContent ?? "").not.toContain("Local check due after");
+    expect(container.textContent ?? "").toContain("[MEASURING]");
+  });
+
+  it("gives a versioned cycle precedence over legacy state and effects", async () => {
+    const entry = entryWith({ state: "ADOPTED" });
+    entry.effect_cycle = makeEffectCycle({ state: "OPEN_MEASURING" });
+    mockOk([entry]);
+    const { container } = render(<ImpactLedger />);
+    await waitFor(() => expect(container.textContent ?? "").toContain("OPEN MEASURING"));
+    expect(container.textContent ?? "").toContain("Scheduled check: 2026-09-30");
+    expect(container.textContent ?? "").not.toContain("Legacy target-metric result");
+  });
+
+  it("renders final versioned evidence, guardrails, comparison and lifecycle state", async () => {
+    const mix = { available: true, total: 1, counts: {} };
+    const aggregate = { value: 100, denominator: null, exposureN: 3, sessionN: 3, excluded: {} };
+    const finalEvidence: ObservationBundle = {
+      metricId: "avg_context_per_turn",
+      methodVersion: "esf-1",
+      queryDefinitionVersion: "esf-1",
+      scopeFingerprint: "opaque",
+      parserVersions: [],
+      parserMix: { before: mix, after: mix },
+      before: aggregate,
+      after: { ...aggregate, value: 80 },
+      modelMix: { before: mix, after: mix },
+      toolMix: { before: mix, after: mix },
+      taskMix: { before: mix, after: mix },
+      guardrails: [
+        {
+          guardrailId: "latency",
+          methodVersion: "esf-1",
+          availability: "SUPPORTED",
+          unit: "ms",
+          before: aggregate,
+          after: aggregate,
+          direction: "ADVERSE",
+          reasonCodes: [],
+          evidence: {},
+        },
+        {
+          guardrailId: "cost",
+          methodVersion: "esf-1",
+          availability: "UNSUPPORTED",
+          unit: "usd",
+          before: aggregate,
+          after: aggregate,
+          direction: "INSUFFICIENT_DATA",
+          reasonCodes: [],
+          evidence: {},
+        },
+        {
+          guardrailId: "quality",
+          methodVersion: "esf-1",
+          availability: "SUPPORTED",
+          unit: "score",
+          before: aggregate,
+          after: aggregate,
+          direction: "INSUFFICIENT_DATA",
+          reasonCodes: [],
+          evidence: {},
+        },
+      ],
+    };
+    const entry = entryWith({ state: "ADOPTED", effects: [] });
+    entry.effect_cycle = makeEffectCycle({
+      state: "FINALIZED",
+      finalEvidence,
+      guardrailDefinitions: [
+        { guardrailId: "latency", methodVersion: "esf-1", unit: "ms" },
+        { guardrailId: "cost", methodVersion: "esf-1", unit: "usd" },
+        { guardrailId: "quality", methodVersion: "esf-1", unit: "score" },
+        { guardrailId: "coverage", methodVersion: "esf-1", unit: "ratio" },
+      ],
+      targetDirection: "IMPROVED",
+      comparisonStatus: "CONFOUNDED",
+      comparisonReasons: ["ROLLBACK_IN_WINDOW"],
+      rollbackStatus: "USER_ATTESTED",
+      rollbackAt: "2026-09-16T00:00:00.000Z",
+      attributionClosedAt: "2026-09-17T00:00:00.000Z",
+    });
+    mockOk([entry]);
+    const { container } = render(<ImpactLedger />);
+    await waitFor(() => expect(container.textContent ?? "").toContain("Follow-up: 80 tokens"));
+    expect(container.textContent ?? "").toContain("latency: adverse");
+    expect(container.textContent ?? "").toContain("cost: unsupported");
+    expect(container.textContent ?? "").toContain("quality: insufficient data");
+    expect(container.textContent ?? "").toContain("coverage: visibility unavailable");
+    expect(container.textContent ?? "").toContain("CONFOUNDED · ROLLBACK_IN_WINDOW");
+    expect(container.textContent ?? "").toContain(
+      "Rollback: USER_ATTESTED (2026-09-16) · Attribution: closed 2026-09-17",
+    );
+  });
+
+  it("keeps unsupported versioned evidence read-only without interpreting it", async () => {
+    const entry = entryWith({ effects: [] });
+    entry.effect_cycle = makeEffectCycle({
+      versionStatus: "UNSUPPORTED_VERSION",
+      state: "FINALIZED",
+    });
+    mockOk([entry]);
+    const { container } = render(<ImpactLedger />);
+    await waitFor(() =>
+      expect(container.textContent ?? "").toContain("unsupported version (read-only)"),
+    );
+    expect(container.textContent ?? "").not.toContain("Target direction");
   });
 
   it("labels D5 acknowledgments as not measured and suppresses measurement rows", async () => {

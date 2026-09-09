@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Db } from "../db/open.js";
+import { cycleFromRow } from "../effects/store.js";
 import { GLOBAL_WORKSPACE_ID } from "./context-probe.js";
 import { isD1SourceBackedRecommendation, parseD1SourceIdentity } from "./d1-source-identity.js";
 import { AFTER_WINDOW_DAYS } from "./measurement.js";
@@ -157,11 +159,16 @@ function validateHistoryRows(db: Db): ValidHistoryRow[] {
 }
 
 function readOpenEffects(db: Db): OpenEffect[] {
+  const hasVersioned = db.prepare("SELECT 1 FROM sqlite_master WHERE name='effect_cycles'").get();
+  const versionedExclusion = hasVersioned
+    ? "AND NOT EXISTS (SELECT 1 FROM effect_cycles c WHERE c.rec_id=recommendations.rec_id)"
+    : "";
   const recs = db
     .prepare(
       `SELECT rec_id, detector_id, scope_workspace_id, evidence_json, target_metric, adopted_at
          FROM recommendations
         WHERE state IN ('ADOPTED', 'MEASURING')
+          ${versionedExclusion}
         ORDER BY rec_id ASC`,
     )
     .all() as Array<{
@@ -245,6 +252,53 @@ function readOpenEffects(db: Db): OpenEffect[] {
   }
 
   if (malformedN > 0) throw new RetentionPlanError("invalid_open_effect", malformedN);
+  if (hasVersioned) {
+    const rows = db
+      .prepare(`SELECT c.*,r.evidence_json,r.scope_workspace_id
+      FROM effect_cycles c JOIN recommendations r ON r.rec_id=c.rec_id
+      WHERE c.detector_id='D1' AND c.state IN ('OPEN_SETTLING','OPEN_MEASURING')`)
+      .all() as Array<Record<string, string | number | null>>;
+    for (const row of rows) {
+      const cycle = cycleFromRow(row);
+      const identity = parseD1SourceIdentity(String(row.evidence_json));
+      const workspaceId =
+        row.scope_workspace_id === null ? GLOBAL_WORKSPACE_ID : String(row.scope_workspace_id);
+      const beforeToMs = canonicalTimestamp(cycle.baselineTo);
+      const afterFromMs = canonicalTimestamp(cycle.observationFrom);
+      const afterToMs = canonicalTimestamp(cycle.scheduledObservationTo);
+      if (
+        !identity ||
+        !COMPONENTS.has(identity.component as Component) ||
+        !identity.fileRef ||
+        cycle.versionStatus !== "SUPPORTED" ||
+        beforeToMs === null ||
+        afterFromMs === null ||
+        afterToMs === null ||
+        beforeToMs !== afterFromMs ||
+        afterToMs < afterFromMs
+      ) {
+        throw new RetentionPlanError("invalid_open_effect", 1);
+      }
+      // Same opaque tuple encoding as the service; a moved/reassigned source is not reinterpreted.
+      const digest = createHash("sha256")
+        .update(
+          JSON.stringify({
+            workspaceId,
+            component: identity.component,
+            fileRef: identity.fileRef,
+          }),
+        )
+        .digest("hex");
+      if (digest !== cycle.scope.sourceIdentity)
+        throw new RetentionPlanError("invalid_open_effect", 1);
+      effects.push({
+        sourceKey: sourceKey(workspaceId, identity.component as Component, identity.fileRef),
+        beforeToMs,
+        afterFromMs,
+        afterToMs,
+      });
+    }
+  }
   return effects;
 }
 

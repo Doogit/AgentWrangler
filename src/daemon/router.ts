@@ -17,6 +17,12 @@ import { endSession, getAgentsLiveness } from "../query/api/agents-liveness.js";
 import { getBurnStatus } from "../query/api/burn-status.js";
 import { getCostPerSuccess } from "../query/api/cost-per-success.js";
 import { getDeliveryMetrics } from "../query/api/delivery.js";
+import {
+  EffectRequestError,
+  listEffectEvidence,
+  mutateEffectCycle,
+  trackCompletedChange,
+} from "../query/api/effect-service.js";
 import { getClosureProxy } from "../query/api/effectiveness.js";
 import { getEfficiencyHeadroom } from "../query/api/efficiency-headroom.js";
 import { getHeadroomTrend } from "../query/api/headroom-trend.js";
@@ -78,10 +84,19 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(payload);
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(req: http.IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (maxBytes !== undefined && size > maxBytes) {
+        reject(new EffectRequestError(400, "Request body is too large."));
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });
@@ -182,6 +197,64 @@ export function handleApiRequest(
   // Strip query string for routing.
   const pathname = url.split("?")[0] ?? url;
   try {
+    // GET /api/esf/effects — independently keyset-paged versioned and legacy evidence.
+    if (method === "GET" && pathname === "/api/esf/effects") {
+      const params = new URLSearchParams(url.split("?")[1] ?? "");
+      const workspaceId = params.get("workspace_id");
+      sendJson(
+        res,
+        200,
+        listEffectEvidence(
+          _db,
+          workspaceId,
+          params.get("rec_id") ?? undefined,
+          params.get("limit") ?? undefined,
+          params.get("cycle_cursor") ?? undefined,
+          params.get("legacy_cursor") ?? undefined,
+        ),
+      );
+      return;
+    }
+
+    const effectAction = pathname.match(
+      /^\/api\/esf\/effects\/(track|stop|close|rollback|attest-rollback)$/,
+    )?.[1];
+    if (method === "POST" && effectAction !== undefined) {
+      readBody(req, 4096)
+        .then((raw) => {
+          let body: unknown;
+          try {
+            body = JSON.parse(raw);
+          } catch {
+            sendJson(res, 400, { error: "Invalid JSON body." });
+            return;
+          }
+          try {
+            const result =
+              effectAction === "track"
+                ? trackCompletedChange(_db, body)
+                : mutateEffectCycle(_db, effectAction, body);
+            sendJson(res, 200, result);
+          } catch (error) {
+            const status = error instanceof EffectRequestError ? error.status : 409;
+            sendJson(res, status, {
+              error:
+                error instanceof EffectRequestError
+                  ? error.message
+                  : "Effect request conflicts with the current cycle.",
+            });
+          }
+        })
+        .catch((error) =>
+          sendJson(res, error instanceof EffectRequestError ? error.status : 500, {
+            error:
+              error instanceof EffectRequestError
+                ? error.message
+                : "Internal error reading request body",
+          }),
+        );
+      return;
+    }
     // GET /api/overview
     if (method === "GET" && pathname === "/api/overview") {
       sendJson(res, 200, getGlobalOverview(parseWindowFilter(url)));
@@ -629,13 +702,19 @@ export function handleApiRequest(
             sendJson(res, 400, { error: "Invalid JSON body" });
             return;
           }
-          const { rec_id } = body as Record<string, unknown>;
+          const { rec_id, completed_change } = body as Record<string, unknown>;
           if (typeof rec_id !== "string" || rec_id.length === 0) {
             sendJson(res, 400, { error: "rec_id is required" });
             return;
           }
           try {
-            sendJson(res, 200, adoptRecommendation(rec_id));
+            sendJson(
+              res,
+              200,
+              adoptRecommendation(rec_id, Date.now(), {
+                completedChange: completed_change === true,
+              }),
+            );
           } catch (e) {
             sendJson(res, 400, { error: e instanceof Error ? e.message : "Adopt failed" });
           }
@@ -887,7 +966,11 @@ export function handleApiRequest(
 
     // 404 for everything else.
     sendJson(res, 404, { error: "Not found", path: pathname });
-  } catch {
+  } catch (error) {
+    if (error instanceof EffectRequestError) {
+      sendJson(res, error.status, { error: error.message });
+      return;
+    }
     // Do not leak internal exception text into a cross-origin-readable 500 body
     // (GET routes are not CSRF-gated). Validation errors on POST routes still
     // return their message via the 400 paths above.

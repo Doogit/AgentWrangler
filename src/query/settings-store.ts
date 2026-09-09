@@ -496,6 +496,10 @@ export async function calibrateLimit(
 export const RESET_DATA_TABLES = [
   "reports",
   "apply_jobs",
+  "effect_mutation_keys",
+  "effect_rollback_operations",
+  "effect_guardrail_results",
+  "effect_cycles",
   "recommendation_effects",
   "recommendations",
   "analysis_runs",

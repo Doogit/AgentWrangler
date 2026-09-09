@@ -30,6 +30,10 @@ const V2_TABLES = [
   "review_findings",
   "recommendations",
   "recommendation_effects",
+  "effect_cycles",
+  "effect_guardrail_results",
+  "effect_rollback_operations",
+  "effect_mutation_keys",
   "apply_jobs",
   "tool_event_metadata",
   "analysis_runs",
@@ -89,7 +93,7 @@ describe("runMigrations", () => {
       expect(rows.length).toBe(applied.length);
       // The first migration must be 001_observe.
       expect(rows[0]?.version).toBe("001_observe");
-      expect(rows.at(-1)?.version).toBe("017_ingest_metric_events");
+      expect(rows.at(-1)?.version).toBe("018_effect_cycles");
     } finally {
       db.close();
     }
@@ -141,6 +145,7 @@ describe("runMigrations", () => {
       expect(runMigrations(db)).toEqual([
         "016_ingest_offset_file_version",
         "017_ingest_metric_events",
+        "018_effect_cycles",
       ]);
       const row = db
         .prepare(
@@ -165,6 +170,30 @@ describe("runMigrations", () => {
         file_mtime_ms: null,
         file_ctime_ms: null,
       });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("adds effect storage without changing populated legacy W4 results", () => {
+    const db = openDb(dbPath);
+    try {
+      runMigrations(db, "017_ingest_metric_events");
+      db.prepare(`INSERT INTO recommendations
+        (rec_id,provenance,detector_id,category,lever,modeled_formula_json,evidence_json,target_metric,state,created_at)
+        VALUES('legacy-upgrade','RULE','D2','CONTEXT','fixture','{}','{}','avg_context_per_turn','MEASURED_NO_EFFECT','2026-01-01')`).run();
+      db.prepare(`INSERT INTO recommendation_effects
+        (rec_id,measured_at,before_from,before_to,after_from,after_to,before_value,after_value,before_n,after_n,delta_pct,verdict)
+        VALUES('legacy-upgrade','2026-02-01','2026-01-01','2026-02-01','2026-02-01','2026-02-15',100,84,9,10,-16,'INCONCLUSIVE')`).run();
+      const legacy = db.prepare("SELECT * FROM recommendation_effects").all();
+      const recommendations = db.prepare("SELECT * FROM recommendations").all();
+
+      expect(runMigrations(db)).toEqual(["018_effect_cycles"]);
+      expect(db.prepare("SELECT * FROM recommendation_effects").all()).toEqual(legacy);
+      expect(db.prepare("SELECT * FROM recommendations").all()).toEqual(recommendations);
+      expect(db.prepare("SELECT * FROM effect_cycles").all()).toEqual([]);
+      expect(db.pragma("foreign_key_check")).toEqual([]);
+      expect(runMigrations(db)).toEqual([]);
     } finally {
       db.close();
     }

@@ -9,12 +9,21 @@
  */
 
 import type Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMeasurementPass } from "../../src/detector/measurement.js";
 import { listLedger } from "../../src/query/api/recommendations-ledger.js";
 import { adoptRecommendation } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
+
+// Exercise the archived W4 writer explicitly. Enabled-writer isolation and
+// read-only legacy preservation are covered in effect-writers.test.ts.
+const gate = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../../src/effects/gate.js", () => ({
+  get ESF_EFFECT_WRITER_ENABLED() {
+    return gate.enabled;
+  },
+}));
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const T0 = Date.UTC(2026, 0, 1);
@@ -22,6 +31,7 @@ const T0 = Date.UTC(2026, 0, 1);
 let db: Database.Database;
 
 beforeEach(() => {
+  gate.enabled = false;
   db = createInMemoryFixtureDb();
   setQueryDb(db);
 });
@@ -123,6 +133,30 @@ describe("adoptRecommendation — W4 baseline snapshot", () => {
 // ---------------------------------------------------------------------------
 
 describe("listLedger", () => {
+  it("caps legacy history at the latest 25 rows with the versioned writer enabled", () => {
+    insertProposedRec("rec-many", { scopeWorkspaceId: "ws-alpha" });
+    adoptRecommendation("rec-many", T0);
+    const insert = db.prepare(`INSERT INTO recommendation_effects
+      (rec_id,measured_at,before_from,before_to,after_from,after_to,verdict)
+      VALUES ('rec-many',?,'a','b','c','d','INCONCLUSIVE')`);
+    for (let i = 1; i <= 30; i++) insert.run(new Date(T0 + i * MS_PER_DAY).toISOString());
+    const before = db
+      .prepare("SELECT * FROM recommendation_effects WHERE rec_id='rec-many' ORDER BY measured_at")
+      .all();
+    gate.enabled = true;
+    const entry = listLedger().data?.entries.find((row) => row.rec_id === "rec-many");
+    expect(entry?.effects).toHaveLength(25);
+    expect(entry?.effects[0]?.measured_at).toBe(new Date(T0 + 30 * MS_PER_DAY).toISOString());
+    expect(entry?.effects.at(-1)?.measured_at).toBe(new Date(T0 + 6 * MS_PER_DAY).toISOString());
+    expect(
+      db
+        .prepare(
+          "SELECT * FROM recommendation_effects WHERE rec_id='rec-many' ORDER BY measured_at",
+        )
+        .all(),
+    ).toEqual(before);
+  });
+
   it("returns distinct cap-weighted modeled and realized after_value fields (never summed)", () => {
     insertHistoryRow(1000, T0 - MS_PER_DAY);
     insertProposedRec("rec-led-d1", { scopeWorkspaceId: "ws-alpha" });

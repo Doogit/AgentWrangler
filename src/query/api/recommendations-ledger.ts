@@ -15,10 +15,12 @@
  * Claim kind: EXPERIMENTAL.
  */
 
+import type { EffectProjection } from "../../effects/api-contract.js";
 import { resolveCapReadCoeff } from "../cap-weighted.js";
 import { getQueryDb } from "../db-context.js";
 import type { ApiResponse } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
+import { capabilityForRecommendation, latestEffectCycle } from "./effect-service.js";
 import type { RecommendationCard } from "./recommendations.js";
 
 export interface EffectRow {
@@ -41,7 +43,7 @@ export interface EffectRow {
   qualification: "NOT_ENOUGH_DATA" | "EXPERIMENTAL" | null;
 }
 
-export interface LedgerEntry {
+export interface LedgerEntry extends EffectProjection {
   rec_id: string;
   detector_id: string;
   lever: string;
@@ -141,19 +143,13 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
           .all()
   ) as RecSqlRow[];
 
-  const effectRows = db
-    .prepare(
-      `SELECT rec_id, measured_at, before_from, before_to, after_from, after_to,
-              before_value, after_value, before_n, after_n, delta_pct, verdict
-         FROM recommendation_effects`,
-    )
-    .all() as EffectSqlRow[];
-  const effectsByRec = new Map<string, EffectSqlRow[]>();
-  for (const e of effectRows) {
-    const list = effectsByRec.get(e.rec_id);
-    if (list !== undefined) list.push(e);
-    else effectsByRec.set(e.rec_id, [e]);
-  }
+  // Read legacy rows only for the eligible ledger entries. Versioned evidence
+  // has precedence in the projection and is read as one latest cycle per rec.
+  const legacyByRec = db.prepare(
+    `SELECT rec_id, measured_at, before_from, before_to, after_from, after_to,
+            before_value, after_value, before_n, after_n, delta_pct, verdict
+       FROM recommendation_effects WHERE rec_id=? ORDER BY measured_at DESC LIMIT 25`,
+  );
 
   // Confounded-window flag: another ADOPTED+ rec within ±86400s of this adoption.
   const adoptedTimes = recRows.map((r) => ({
@@ -173,7 +169,7 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
           Math.abs(o.ms - self.ms) <= CONFOUND_WINDOW_MS,
       );
 
-    const effects: EffectRow[] = (effectsByRec.get(r.rec_id) ?? []).map((e) => ({
+    const effects: EffectRow[] = (legacyByRec.all(r.rec_id) as EffectSqlRow[]).map((e) => ({
       ...e,
       qualification: qualificationFor(e, r.detector_id ?? "", r.target_metric),
     }));
@@ -191,6 +187,8 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
       modeled_cap_weighted_u_per_wk:
         r.modeled_savings_u_per_wk === null ? null : r.modeled_savings_u_per_wk * coeff,
       effects,
+      effect_capability: capabilityForRecommendation(db, r.rec_id),
+      effect_cycle: latestEffectCycle(db, r.rec_id),
       confounded_window: confounded,
     };
   });
