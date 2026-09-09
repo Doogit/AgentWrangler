@@ -491,8 +491,10 @@ async function browserSample(
     }>(
       "Runtime.evaluate",
       {
+        // loadEventEnd stays 0 until the load handler finishes, so poll before sampling.
         expression:
-          "(() => ({ navigation: performance.getEntriesByType('navigation'), resources: performance.getEntriesByType('resource').map(({ duration, transferSize, initiatorType }) => ({ duration, transferSize, initiatorType })), longTasks: window.__awBrowserMeasure?.longTasks ?? [] }))()",
+          "new Promise((resolve) => { let tries = 0; const check = () => { const nav = performance.getEntriesByType('navigation')[0]; if ((nav && nav.loadEventEnd > 0) || tries >= 100) resolve({ navigation: performance.getEntriesByType('navigation').map(({ duration, startTime, loadEventEnd }) => ({ duration, startTime, loadEventEnd })), resources: performance.getEntriesByType('resource').map(({ duration, transferSize, initiatorType }) => ({ duration, transferSize, initiatorType })), longTasks: window.__awBrowserMeasure?.longTasks ?? [] }); else { tries += 1; setTimeout(check, 10); } }; check(); })",
+        awaitPromise: true,
         returnByValue: true,
       },
       sessionId,
