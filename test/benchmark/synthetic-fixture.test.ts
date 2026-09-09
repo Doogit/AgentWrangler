@@ -2,9 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { seedSyntheticHistory } from "../../scripts/benchmark/synthetic-fixture.js";
+import {
+  seedSyntheticHistory,
+  writeSyntheticIngestCorpus,
+} from "../../scripts/benchmark/synthetic-fixture.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { type Db, openDb } from "../../src/db/open.js";
+import { runBackscan } from "../../src/ingest/index.js";
 
 const roots: string[] = [];
 const databases: Db[] = [];
@@ -77,5 +81,24 @@ describe("synthetic benchmark fixture", () => {
     expect(count(db, "SELECT COUNT(*) AS count FROM context_inventory")).toBeGreaterThan(0);
     expect(count(db, "SELECT COUNT(*) AS count FROM ingest_offsets")).toBeGreaterThan(0);
     expect(count(db, "SELECT COUNT(*) AS count FROM ingest_metric_baselines")).toBeGreaterThan(0);
+  });
+
+  it("writes an ingest corpus whose real backscan ingests every corpus turn", () => {
+    const db = createSyntheticDb();
+    seedSyntheticHistory(db, 1_000);
+    const root = roots[roots.length - 1] as string;
+    const corpusDir = path.join(root, "ingest-corpus");
+    const corpus = writeSyntheticIngestCorpus(corpusDir, 1_200);
+
+    expect(corpus.files).toBe(3); // 500 turns per file
+    const counters = runBackscan(db, [corpusDir], {
+      now: () => new Date("2026-01-15T12:00:00.000Z"),
+    });
+
+    expect(counters.turnsIngested).toBe(1_200);
+    expect(counters.filesParsed).toBe(3);
+    expect(counters.linesQuarantined).toBe(3); // one malformed line per file
+    expect(counters.duplicateDrops).toBe(0);
+    expect(count(db, "SELECT COUNT(*) AS count FROM turns")).toBe(1_000 + 1_200);
   });
 });

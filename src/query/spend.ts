@@ -280,21 +280,38 @@ export function hotSessionsByCost(
   // (preserves the /api/hot-sessions default). Matches the `t.ts >= ? AND t.ts < ?`
   // string-bound convention used by globalSpend and the other spend queries.
   const turnWindow = window === undefined ? "" : "AND t.ts >= @from AND t.ts < @to";
+  // Rank a bounded candidate set from the turns aggregation alone, then run the
+  // per-session enrichment subqueries against only the selected rows (PERF1).
+  // The CTE's ORDER BY/LIMIT must stay identical to the outer ordering so the
+  // selected set and tie order match the previous single-query form exactly.
   const rows = db
     .prepare(
-      `SELECT s.session_id                                                   AS session_id,
+      `WITH candidate AS (
+         SELECT t.session_id                                                  AS session_id,
+                COUNT(*)                                                       AS turns,
+                COALESCE(SUM(t.cost_equiv_u), 0)                               AS cost_equiv_u,
+                COALESCE(SUM(t.output_tokens), 0)                              AS total_output_tokens,
+                COALESCE(SUM(t.context_tokens), 0)                             AS total_context_tokens,
+                MAX(t.ts)                                                      AS max_ts
+           FROM turns t
+          WHERE 1 = 1 ${turnWindow}
+          GROUP BY t.session_id
+          ORDER BY cost_equiv_u DESC, t.session_id ASC
+          LIMIT @limit
+       )
+       SELECT s.session_id                                                   AS session_id,
               s.workspace_id                                                 AS workspace_id,
-              COUNT(*)                                                        AS turns,
-              COALESCE(SUM(t.cost_equiv_u), 0)                                AS cost_equiv_u,
-              COALESCE(SUM(t.output_tokens), 0)                               AS total_output_tokens,
-              ROUND(COALESCE(SUM(t.output_tokens), 0) * 1.0 / COUNT(*))       AS avg_output_tokens,
-              COALESCE(SUM(t.context_tokens), 0)                              AS total_context_tokens,
-              ROUND(COALESCE(SUM(t.context_tokens), 0) * 1.0 / COUNT(*))      AS avg_context_tokens,
+              c.turns                                                         AS turns,
+              c.cost_equiv_u                                                  AS cost_equiv_u,
+              c.total_output_tokens                                           AS total_output_tokens,
+              ROUND(c.total_output_tokens * 1.0 / c.turns)                    AS avg_output_tokens,
+              c.total_context_tokens                                          AS total_context_tokens,
+              ROUND(c.total_context_tokens * 1.0 / c.turns)                   AS avg_context_tokens,
               COALESCE((SELECT tm.model FROM turns tm
                          WHERE tm.session_id = s.session_id
                          GROUP BY tm.model
                          ORDER BY COUNT(*) DESC, tm.model ASC LIMIT 1), '')   AS model,
-              COALESCE(s.last_turn_at, MAX(t.ts))                             AS last_turn_at,
+              COALESCE(s.last_turn_at, c.max_ts)                              AS last_turn_at,
               s.api_error_count                                                AS api_error_count,
               s.compaction_count                                               AS compaction_count,
               s.interrupt_count                                                AS interrupt_count,
@@ -363,11 +380,8 @@ export function hotSessionsByCost(
               s.gap_p90_s                                                      AS gap_p90_s,
               s.long_gap_count                                                 AS long_gap_count,
               s.gap_n                                                          AS gap_n
-         FROM sessions s JOIN turns t ON t.session_id = s.session_id
-        WHERE 1 = 1 ${turnWindow}
-        GROUP BY s.session_id, s.workspace_id, s.last_turn_at
-        ORDER BY cost_equiv_u DESC, s.session_id ASC
-        LIMIT @limit`,
+         FROM candidate c JOIN sessions s ON s.session_id = c.session_id
+        ORDER BY c.cost_equiv_u DESC, s.session_id ASC`,
     )
     .all(window === undefined ? { limit } : { limit, from: window.from, to: window.to });
   return (

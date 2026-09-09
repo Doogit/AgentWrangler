@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  type ChildRouteMetric,
   type RoutePhase,
   type RoutePhaseSamples,
   movingWindowPath,
+  summarizeChildRoutePhases,
   summarizePhase,
   summarizeRoutePhases,
 } from "../../scripts/benchmark/synthetic-history.js";
@@ -40,6 +42,31 @@ describe("synthetic history benchmark summaries", () => {
     ]);
     expect(summary.warm_explicit_window.elapsed_ms).toMatchObject({ p50_ms: 2, p95_ms: 4 });
     expect(summary.moving_window.elapsed_ms).toMatchObject({ p50_ms: 6, p95_ms: 8 });
+  });
+
+  it("summarizes child service time and query counts per phase with overlap flags", () => {
+    const metric = (service: number, queries: number, overlapped = false): ChildRouteMetric => ({
+      path: "/api/overview",
+      service_ms: service,
+      query_count: queries,
+      status: 200,
+      overlapped,
+    });
+    const summary = summarizeChildRoutePhases({
+      cold_process: [metric(50, 9)],
+      cold_query: [metric(40, 9)],
+      warm_explicit_window: [metric(1, 1), metric(2, 1), metric(3, 1), metric(4, 1)],
+      moving_window: [metric(5, 9), metric(6, 9), metric(7, 9, true)],
+    });
+
+    expect(summary.warm_explicit_window?.service_time_ms).toMatchObject({ p50_ms: 2, p95_ms: 4 });
+    expect(summary.warm_explicit_window?.sqlite_query_count).toMatchObject({
+      count: 4,
+      p95_queries: 1,
+      max_queries: 1,
+    });
+    expect(summary.moving_window?.overlapped_samples).toBe(1);
+    expect(summary.cold_process?.sqlite_query_count).toMatchObject({ max_queries: 9 });
   });
 
   it("advances fixture-anchored explicit windows instead of clock-relative presets", () => {

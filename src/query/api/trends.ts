@@ -16,14 +16,13 @@ import {
   type CapWeightedBucketRow,
   type ModelBucketRow,
   type SessionCostRow,
+  type SpendBucketModelWorkspaceRow,
   type SpendBucketRow,
   type WorkspaceBucketRow,
   cacheWriteByBucket,
   capWeightedByBucket,
   sessionCostSeries,
-  spendByBucket,
-  spendByBucketAndModel,
-  spendByBucketAndWorkspace,
+  spendByBucketModelWorkspace,
 } from "../trends.js";
 import { cachedQuery } from "./overview.js";
 import type { WindowFilter } from "./overview.js";
@@ -130,6 +129,91 @@ function adoptionMarkers(
   return db.prepare(`${base} ${tail}`).all(from, to) as AdoptionMarker[];
 }
 
+/** SQLite BINARY collation (UTF-8 byte order) — keeps derived orderings identical to the previous per-series ORDER BY. */
+function binaryCompare(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
+/**
+ * Roll the finest-grained scan up into the three trend series (PERF2).
+ * Sums are integers, so each rollup is exact — identical to the values the
+ * separate spendByBucket / spendByBucketAndModel / spendByBucketAndWorkspace
+ * scans produced. Input rows are ordered bucket ASC, model ASC, workspace ASC;
+ * buckets/by_model emit in first-seen order (already their contract order) and
+ * by_workspace re-sorts workspaces per bucket under BINARY collation.
+ */
+function rollupTrendSeries(rows: SpendBucketModelWorkspaceRow[]): {
+  buckets: SpendBucketRow[];
+  by_model: ModelBucketRow[];
+  by_workspace: WorkspaceBucketRow[];
+} {
+  const buckets: SpendBucketRow[] = [];
+  const by_model: ModelBucketRow[] = [];
+  const workspaceByBucket = new Map<string, Map<string, WorkspaceBucketRow>>();
+
+  for (const row of rows) {
+    const lastBucket = buckets[buckets.length - 1];
+    if (lastBucket !== undefined && lastBucket.bucket === row.bucket) {
+      lastBucket.cost_equiv_u += row.cost_equiv_u;
+      lastBucket.turns += row.turns;
+    } else {
+      buckets.push({ bucket: row.bucket, cost_equiv_u: row.cost_equiv_u, turns: row.turns });
+    }
+
+    const lastModel = by_model[by_model.length - 1];
+    if (
+      lastModel !== undefined &&
+      lastModel.bucket === row.bucket &&
+      lastModel.model === row.model
+    ) {
+      lastModel.cost_equiv_u += row.cost_equiv_u;
+      lastModel.turns += row.turns;
+    } else {
+      by_model.push({
+        bucket: row.bucket,
+        model: row.model,
+        cost_equiv_u: row.cost_equiv_u,
+        turns: row.turns,
+      });
+    }
+
+    // Unregistered workspaces (LEFT JOIN miss) stay out of the by-workspace
+    // series, matching the previous INNER JOIN.
+    if (row.project_slug !== null) {
+      let perBucket = workspaceByBucket.get(row.bucket);
+      if (perBucket === undefined) {
+        perBucket = new Map();
+        workspaceByBucket.set(row.bucket, perBucket);
+      }
+      const existing = perBucket.get(row.workspace_id);
+      if (existing !== undefined) {
+        existing.cost_equiv_u += row.cost_equiv_u;
+        existing.turns += row.turns;
+      } else {
+        perBucket.set(row.workspace_id, {
+          bucket: row.bucket,
+          workspace_id: row.workspace_id,
+          project_slug: row.project_slug,
+          cost_equiv_u: row.cost_equiv_u,
+          turns: row.turns,
+        });
+      }
+    }
+  }
+
+  const by_workspace: WorkspaceBucketRow[] = [];
+  for (const bucketRow of buckets) {
+    const perBucket = workspaceByBucket.get(bucketRow.bucket);
+    if (perBucket === undefined) continue;
+    for (const workspaceId of [...perBucket.keys()].sort(binaryCompare)) {
+      const entry = perBucket.get(workspaceId);
+      if (entry !== undefined) by_workspace.push(entry);
+    }
+  }
+
+  return { buckets, by_model, by_workspace };
+}
+
 function resolveWindow(filter: WindowFilter, now: Date = new Date()): QueryWindow {
   const nowIso = now.toISOString();
   if (filter.preset !== undefined) {
@@ -215,18 +299,21 @@ export function getTrends(
   const coeff = cachedQuery(db, "resolveCapReadCoeff", from, to, workspaceId, () =>
     resolveCapReadCoeff(db),
   );
-  const buckets = cachedQuery(db, `spendByBucket:${bucket}`, from, to, workspaceId, () =>
-    spendByBucket(db, from, to, bucket, workspaceId),
+  // One scan replaces the separate bucket / bucket×model / bucket×workspace
+  // scans; rollupTrendSeries derives all three series exactly (PERF2).
+  const combined = cachedQuery(
+    db,
+    `spendByBucketModelWorkspace:${bucket}`,
+    from,
+    to,
+    workspaceId,
+    () => spendByBucketModelWorkspace(db, from, to, bucket, workspaceId),
   );
-  const by_model = cachedQuery(db, `spendByBucketAndModel:${bucket}`, from, to, workspaceId, () =>
-    spendByBucketAndModel(db, from, to, bucket, workspaceId),
-  );
-  const by_workspace =
-    workspaceId === undefined
-      ? cachedQuery(db, `spendByBucketAndWorkspace:${bucket}`, from, to, undefined, () =>
-          spendByBucketAndWorkspace(db, from, to, bucket),
-        )
-      : [];
+  const series = rollupTrendSeries(combined);
+  const buckets = series.buckets;
+  const by_model = series.by_model;
+  // The by-workspace series is global-scope only (unchanged contract).
+  const by_workspace = workspaceId === undefined ? series.by_workspace : [];
   const sessions = cachedQuery(db, "sessionCostSeries", from, to, workspaceId, () =>
     sessionCostSeries(db, from, to, workspaceId),
   );

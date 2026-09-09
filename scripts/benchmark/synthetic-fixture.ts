@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Db } from "../../src/db/open.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -259,4 +261,102 @@ export function seedSyntheticHistory(db: Db, turns: number): void {
       insertEffect.run(recId, "2026-01-15T12:00:00.000Z", "2025-12-01T00:00:00.000Z", "2025-12-15T00:00:00.000Z", SYNTHETIC_WINDOW_FROM, SYNTHETIC_WINDOW_TO, 100, verdict === "EFFECTIVE" ? 60 : 100, 4, 4, verdict === "EFFECTIVE" ? -40 : 0, verdict);
     }
   })();
+}
+
+const CORPUS_TURNS_PER_FILE = 500;
+const CORPUS_SLUGS = 3;
+
+/**
+ * Write a synthetic transcript corpus (`<dir>/<slug>/<session>.jsonl`) for the
+ * real ingest catch-up measurement. Every field is fabricated (SEC-101): fake
+ * ids, zero-content messages, no cwd/repository fields, no operator paths.
+ * Session/message ids are disjoint from seedSyntheticHistory's so a backscan
+ * into a seeded database ingests every corpus turn (no duplicate drops).
+ */
+export function writeSyntheticIngestCorpus(
+  corpusDir: string,
+  turns: number,
+): { files: number; lines: number } {
+  const baseMs = Date.parse(SYNTHETIC_WINDOW_FROM);
+  let files = 0;
+  let lines = 0;
+  let written = 0;
+  while (written < turns) {
+    const fileTurns = Math.min(CORPUS_TURNS_PER_FILE, turns - written);
+    const fileIndex = files;
+    const sessionId = `synthetic-ingest-session-${fileIndex}`;
+    const slug = `synthetic-ingest-project-${fileIndex % CORPUS_SLUGS}`;
+    const records: string[] = [];
+    for (let offset = 0; offset < fileTurns; offset += 1) {
+      const globalTurn = written + offset;
+      const ts = new Date(baseMs + (globalTurn % (13 * 24 * 60)) * 60_000).toISOString();
+      if (offset % 10 === 0) {
+        records.push(
+          JSON.stringify({
+            type: "user",
+            timestamp: ts,
+            sessionId,
+            promptSource: "typed",
+            message: { role: "user", content: "SYNTHETIC_INGEST_CONTENT_DO_NOT_STORE" },
+          }),
+        );
+      }
+      const content =
+        offset % 25 === 0
+          ? [
+              {
+                type: "tool_use",
+                id: `synthetic-ingest-tool-${globalTurn}`,
+                name: "Read",
+                input: { file_path: `synthetic://ingest-corpus/file-${globalTurn % 7}` },
+              },
+            ]
+          : undefined;
+      records.push(
+        JSON.stringify({
+          type: "assistant",
+          timestamp: ts,
+          sessionId,
+          message: {
+            id: `synthetic-ingest-msg-${globalTurn}`,
+            model: "claude-sonnet-4-6",
+            ...(content === undefined ? {} : { content }),
+            usage: {
+              input_tokens: 1_000,
+              output_tokens: 100,
+              cache_read_input_tokens: 4_000,
+              cache_creation_input_tokens: 300,
+            },
+          },
+        }),
+      );
+      if (offset % 25 === 0) {
+        records.push(
+          JSON.stringify({
+            type: "user",
+            timestamp: ts,
+            sessionId,
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: `synthetic-ingest-tool-${globalTurn}`,
+                  content: "SYNTHETIC_INGEST_RESULT",
+                },
+              ],
+            },
+          }),
+        );
+      }
+    }
+    // One malformed line per file keeps the quarantine path in the measurement.
+    records.push("{synthetic-ingest-not-json");
+    const dir = path.join(corpusDir, slug);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), `${records.join("\n")}\n`, "utf8");
+    files += 1;
+    lines += records.length;
+    written += fileTurns;
+  }
+  return { files, lines };
 }

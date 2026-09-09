@@ -18,9 +18,15 @@ import {
   runPowerShell,
 } from "../../src/outcomes/github/credential.js";
 
+// Keep platform fallback coverage synthetic: never read operator credentials or
+// depend on the duration of a real PowerShell/C# startup.
+const { execFileMock } = vi.hoisted(() => ({ execFileMock: vi.fn() }));
+vi.mock("node:child_process", () => ({ execFile: execFileMock }));
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  execFileMock.mockReset();
 });
 
 describe("runPowerShell hard-timeout guard", () => {
@@ -63,12 +69,17 @@ describe("readGithubToken clean degradation", () => {
 
   it("skips a whitespace-only AW_GITHUB_TOKEN", async () => {
     vi.stubEnv("AW_GITHUB_TOKEN", "   ");
+    execFileMock.mockImplementation((_file, _args, _options, callback) => {
+      callback(null, "", "");
+      return { on: vi.fn() };
+    });
 
     const result = await readGithubToken();
     if (os.platform() !== "win32") {
       expect(result).toEqual({ ok: false, reason: "non-windows-platform" });
     } else {
-      expect(result).not.toEqual({ ok: true, data: "   " });
+      expect(result).toEqual({ ok: false, reason: "github-token-not-found" });
+      expect(execFileMock).toHaveBeenCalledOnce();
     }
   });
 

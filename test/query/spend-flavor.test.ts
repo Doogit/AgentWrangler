@@ -79,6 +79,34 @@ describe("T1 — FlavorDecomposition internal weighted-total consistency", () =>
     expect(weightedTotal).toBe(capTotal);
   });
 
+  it("T1c — reconciles with the cap meter under a fractional configured coefficient", () => {
+    // 0.3 is not binary-representable; parity must hold through the shared
+    // capWeightExprSql expression, not a re-derived coeff * SUM(cr) shortcut.
+    db.prepare(
+      "INSERT INTO user_config (key, value, updated_at) VALUES ('cap_read_coeff', '0.3', ?)",
+    ).run(FROM);
+    const fd = getFlavorDecomposition(WIN).data;
+    if (!fd) throw new Error("Expected non-null data");
+    const capRows = capWeightedTokens(db, { fromIso: FROM, toIso: TO });
+    expect(fd.coeff_used).toBe(0.3);
+    expect(fd.cap_weighted_tokens).toBe(capRows[0]?.cap_weighted_tokens ?? 0);
+  });
+
+  it("T1d — provisional turns stay excluded from both flavor sums and the cap total", () => {
+    // sess-b2's turn is provisional=1; adding a large provisional turn must not move either side.
+    db.prepare(
+      `INSERT INTO turns (message_id, session_id, workspace_id, ts, model, input_tokens,
+        output_tokens, cache_read_tokens, provisional, parser_version)
+       VALUES ('msg-prov-x', 'sess-b2', 'ws-beta', '2026-01-01T06:00:00.000Z', 'claude-haiku',
+               1000000, 500000, 2000000, 1, 'test-v1')`,
+    ).run();
+    const fd = getFlavorDecomposition(WIN).data;
+    if (!fd) throw new Error("Expected non-null data");
+    const capRows = capWeightedTokens(db, { fromIso: FROM, toIso: TO });
+    expect(fd.cap_weighted_tokens).toBe(capRows[0]?.cap_weighted_tokens ?? 0);
+    expect(fd.total_weighted_tokens).toBe(fd.cap_weighted_tokens);
+  });
+
   it("flavors are in canonical order: fresh_input → output → cw5m → cw1h → cache_read", () => {
     const resp = getFlavorDecomposition(WIN);
     if (!resp.data) throw new Error("Expected non-null data");

@@ -117,6 +117,12 @@ export interface DaemonStatus {
  */
 export const responseCache = new Map<string, ResponseCacheEntry<unknown>>();
 
+// Local-only debug/benchmark handle: lets the PERF0 browser harness (and a
+// devtools console) read retained cache cardinality without shipping new API.
+if (typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__awResponseCache = responseCache;
+}
+
 export function getResponseCacheKey(endpoint: string, params?: unknown): string {
   return `${endpoint}${JSON.stringify(params)}`;
 }

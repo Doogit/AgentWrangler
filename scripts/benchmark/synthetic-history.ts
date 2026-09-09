@@ -23,6 +23,7 @@ import {
   SYNTHETIC_WINDOW_FROM,
   SYNTHETIC_WINDOW_TO,
   seedSyntheticHistory,
+  writeSyntheticIngestCorpus,
 } from "./synthetic-fixture.js";
 
 const SCALES = [1_000, 10_000, 100_000] as const;
@@ -31,6 +32,11 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const COMMAND_TIMEOUT_MS = 60_000;
 const IDLE_MS = 1_000;
 const CONCURRENT_READS = 2;
+// A synchronous backscan can block the child event loop far longer than a
+// normal request; interference reads and the completion event wait it out.
+const INGEST_EVENT_TIMEOUT_MS = 300_000;
+const INTERFERENCE_REQUEST_TIMEOUT_MS = 120_000;
+const QUERY_PLAN_STATEMENT_CAP = 40;
 
 const WINDOW_FROM = SYNTHETIC_WINDOW_FROM;
 const WINDOW_TO = SYNTHETIC_WINDOW_TO;
@@ -45,10 +51,15 @@ type Pending = {
   timer: NodeJS.Timeout;
 };
 
-interface ChildHarness {
+export interface ChildHarness {
   port: number;
   startupToReadyMs: number;
-  command(command: Record<string, unknown>): Promise<ChildEvent>;
+  /** Child-reported process CPU/RSS at server-ready (daemon-vantage startup cost). */
+  readyCpuMs: number;
+  readyRssMb: number;
+  command(command: Record<string, unknown>, timeoutMs?: number): Promise<ChildEvent>;
+  /** Await the next unsolicited child event without writing a command. */
+  wait(timeoutMs?: number): Promise<ChildEvent>;
   close(): Promise<void>;
 }
 
@@ -157,11 +168,15 @@ export function summarizeRoutePhases(
   };
 }
 
-function request(port: number, route: string): Promise<HttpResult> {
+function request(
+  port: number,
+  route: string,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
     const started = performance.now();
     const req = http.get(
-      { hostname: "127.0.0.1", port, path: route, timeout: REQUEST_TIMEOUT_MS },
+      { hostname: "127.0.0.1", port, path: route, timeout: timeoutMs },
       (response) => {
         const chunks: Buffer[] = [];
         response.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -177,9 +192,7 @@ function request(port: number, route: string): Promise<HttpResult> {
         response.on("error", reject);
       },
     );
-    req.on("timeout", () =>
-      req.destroy(new Error(`${route} timed out after ${REQUEST_TIMEOUT_MS}ms`)),
-    );
+    req.on("timeout", () => req.destroy(new Error(`${route} timed out after ${timeoutMs}ms`)));
     req.on("error", reject);
   });
 }
@@ -240,7 +253,7 @@ function requireRouteSuccess(route: string, result: HttpResult, expectedTurns: n
     throw new Error("flavor response was unexpectedly empty for synthetic history");
 }
 
-function removeSyntheticDirectory(tempDir: string): void {
+export function removeSyntheticDirectory(tempDir: string): void {
   const resolved = path.resolve(tempDir);
   if (
     path.dirname(resolved) !== path.resolve(os.tmpdir()) ||
@@ -250,7 +263,7 @@ function removeSyntheticDirectory(tempDir: string): void {
   fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 3 });
 }
 
-function startChild(dbPath: string, claudeDir: string): Promise<ChildHarness> {
+export function startChild(dbPath: string, claudeDir: string): Promise<ChildHarness> {
   return new Promise((resolve, reject) => {
     const startupStarted = performance.now();
     const childScript = path.join(
@@ -339,28 +352,39 @@ function startChild(dbPath: string, claudeDir: string): Promise<ChildHarness> {
           ready = true;
           settled = true;
           clearTimeout(startupTimer);
+          const enqueue = (
+            label: string,
+            timeoutMs: number,
+            write?: string,
+          ): Promise<ChildEvent> => {
+            return new Promise((eventResolve, eventReject) => {
+              const timer = setTimeout(() => {
+                const index = pending.findIndex((entry) => entry.reject === eventReject);
+                if (index >= 0) pending.splice(index, 1);
+                void terminate().then(
+                  () => eventReject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+                  (error: unknown) =>
+                    eventReject(error instanceof Error ? error : new Error(String(error))),
+                );
+              }, timeoutMs);
+              pending.push({ resolve: eventResolve, reject: eventReject, timer });
+              if (write !== undefined) child.stdin.write(write);
+            });
+          };
           resolve({
             port,
             startupToReadyMs: performance.now() - startupStarted,
-            command(command): Promise<ChildEvent> {
-              return new Promise((commandResolve, commandReject) => {
-                const timer = setTimeout(() => {
-                  const index = pending.findIndex((entry) => entry.reject === commandReject);
-                  if (index >= 0) pending.splice(index, 1);
-                  void terminate().then(
-                    () =>
-                      commandReject(
-                        new Error(
-                          `Child command ${String(command.command)} timed out after ${COMMAND_TIMEOUT_MS}ms`,
-                        ),
-                      ),
-                    (error: unknown) =>
-                      commandReject(error instanceof Error ? error : new Error(String(error))),
-                  );
-                }, COMMAND_TIMEOUT_MS);
-                pending.push({ resolve: commandResolve, reject: commandReject, timer });
-                child.stdin.write(`${JSON.stringify(command)}\n`);
-              });
+            readyCpuMs: Number(event.cpu_ms ?? 0),
+            readyRssMb: Number(event.rss_mb ?? 0),
+            command(command, timeoutMs = COMMAND_TIMEOUT_MS): Promise<ChildEvent> {
+              return enqueue(
+                `Child command ${String(command.command)}`,
+                timeoutMs,
+                `${JSON.stringify(command)}\n`,
+              );
+            },
+            wait(timeoutMs = COMMAND_TIMEOUT_MS): Promise<ChildEvent> {
+              return enqueue("Child event wait", timeoutMs);
             },
             async close(): Promise<void> {
               if (!exited) child.stdin.write('{"command":"shutdown"}\n');
@@ -442,6 +466,61 @@ function requireHttpSuccess(route: string, result: HttpResult): void {
   if (result.status !== 200) throw new Error(`${route} returned HTTP ${result.status}`);
 }
 
+/** Child-reported per-request metrics (service time + executed-query delta). */
+export interface ChildRouteMetric {
+  path: string;
+  service_ms: number;
+  query_count: number;
+  status: number;
+  overlapped: boolean;
+}
+
+function renameSummaryUnit(summary: PhaseSummary, unit: string): Record<string, number> {
+  return {
+    count: summary.count,
+    [`p50_${unit}`]: summary.p50_ms,
+    [`p95_${unit}`]: summary.p95_ms,
+    [`min_${unit}`]: summary.min_ms,
+    [`max_${unit}`]: summary.max_ms,
+    [`mean_${unit}`]: summary.mean_ms,
+    [`stddev_${unit}`]: summary.stddev_ms,
+  };
+}
+
+/** Purely summarize child-observed service time and query counts per phase. */
+export function summarizeChildRoutePhases(
+  phases: Record<RoutePhase, readonly ChildRouteMetric[]>,
+): Record<RoutePhase, Record<string, unknown>> {
+  const summarize = (samples: readonly ChildRouteMetric[]): Record<string, unknown> => ({
+    service_time_ms: summarizePhase(samples.map((sample) => sample.service_ms)),
+    sqlite_query_count: renameSummaryUnit(
+      summarizePhase(samples.map((sample) => sample.query_count)),
+      "queries",
+    ),
+    overlapped_samples: samples.filter((sample) => sample.overlapped).length,
+  });
+  return {
+    cold_process: summarize(phases.cold_process),
+    cold_query: summarize(phases.cold_query),
+    warm_explicit_window: summarize(phases.warm_explicit_window),
+    moving_window: summarize(phases.moving_window),
+  };
+}
+
+async function drainRouteMetrics(
+  child: ChildHarness,
+  expected: number,
+  context: string,
+): Promise<ChildRouteMetric[]> {
+  const event = await child.command({ command: "route-metrics" });
+  const samples = Array.isArray(event.samples) ? (event.samples as ChildRouteMetric[]) : [];
+  if (samples.length !== expected)
+    throw new Error(
+      `${context}: expected ${expected} child route metric samples, received ${samples.length}`,
+    );
+  return samples;
+}
+
 function summarizeRouteMetric(
   phases: Record<RoutePhase, readonly RouteSample[]>,
   sample: (value: RouteSample) => number,
@@ -520,20 +599,36 @@ async function sampleChildCommand(
   }
 }
 
+interface ColdProcessSample {
+  request: RouteSample;
+  startupToReadyMs: number;
+  readyCpuMs: number;
+  readyRssMb: number;
+  childMetric: ChildRouteMetric;
+}
+
 async function sampleColdProcess(
   dbPath: string,
   claudeDir: string,
   route: { name: string; path: string },
   expectedTurns: number,
-): Promise<{ request: RouteSample; startupToReadyMs: number }> {
+): Promise<ColdProcessSample> {
   let child: ChildHarness | undefined;
   let sampleError: unknown;
-  let sample: { request: RouteSample; startupToReadyMs: number } | undefined;
+  let sample: ColdProcessSample | undefined;
   try {
     child = await startChild(dbPath, claudeDir);
     const requestResult = await sampleRouteRequest(child.port, route.path);
     requireRouteSuccess(route.name, requestResult, expectedTurns);
-    sample = { request: requestResult, startupToReadyMs: child.startupToReadyMs };
+    const childMetric = (await drainRouteMetrics(child, 1, `${route.name} cold-process`))[0];
+    if (!childMetric) throw new Error(`${route.name} cold-process child metric missing`);
+    sample = {
+      request: requestResult,
+      startupToReadyMs: child.startupToReadyMs,
+      readyCpuMs: child.readyCpuMs,
+      readyRssMb: child.readyRssMb,
+      childMetric,
+    };
   } catch (error) {
     sampleError = error;
   }
@@ -575,18 +670,26 @@ async function profile(scale: number): Promise<Record<string, unknown>> {
       const coldProcess = await sampleColdProcess(dbPath, claudeDir, route, scale);
       const coldQuery = await sampleRouteRequest(child.port, route.path);
       requireRouteSuccess(route.name, coldQuery, scale);
+      const coldQueryChild = (await drainRouteMetrics(child, 1, `${route.name} cold-query`))[0];
+      if (!coldQueryChild) throw new Error(`${route.name} cold-query child metric missing`);
       const warmExplicit: RouteSample[] = [];
       for (let index = 0; index < WARM_SAMPLES; index += 1) {
         const sample = await sampleRouteRequest(child.port, route.path);
         requireRouteSuccess(route.name, sample, scale);
         warmExplicit.push(sample);
       }
+      const warmChild = await drainRouteMetrics(
+        child,
+        WARM_SAMPLES,
+        `${route.name} warm-explicit-window`,
+      );
       const movingWindow: RouteSample[] = [];
       for (let index = 0; index < WARM_SAMPLES; index += 1) {
         const sample = await sampleRouteRequest(child.port, movingWindowPath(route.path, index));
         requireHttpSuccess(route.name, sample);
         movingWindow.push(sample);
       }
+      const movingChild = await drainRouteMetrics(child, WARM_SAMPLES, `${route.name} moving`);
       const phaseSamples: Record<RoutePhase, readonly RouteSample[]> = {
         cold_process: [coldProcess.request],
         cold_query: [coldQuery],
@@ -627,17 +730,94 @@ async function profile(scale: number): Promise<Record<string, unknown>> {
           "ms",
         ),
         startup_to_ready_ms: Number(coldProcess.startupToReadyMs.toFixed(3)),
-        concurrent_reads: await sampleConcurrentReads(child.port, route),
+        child_ready: {
+          cpu_ms: coldProcess.readyCpuMs,
+          rss_mb: coldProcess.readyRssMb,
+          vantage: "Child-reported at server-ready for this route's dedicated fresh boot.",
+        },
+        child_phases: summarizeChildRoutePhases({
+          cold_process: [coldProcess.childMetric],
+          cold_query: [coldQueryChild],
+          warm_explicit_window: warmChild,
+          moving_window: movingChild,
+        }),
+        concurrent_reads: {
+          ...(await sampleConcurrentReads(child.port, route)),
+          child_samples: await (async () => {
+            const samples = await drainRouteMetrics(
+              child,
+              CONCURRENT_READS,
+              `${route.name} concurrent reads`,
+            );
+            return {
+              service_time_ms: summarizePhase(samples.map((sample) => sample.service_ms)),
+              overlapped_samples: samples.filter((sample) => sample.overlapped).length,
+              query_count_note:
+                "Overlapping requests share one execution counter; overlapped query counts are not per-request attributable.",
+            };
+          })(),
+        },
         query_instrumentation: {
-          available: false,
-          query_count: null,
-          query_plan: null,
-          reason: "The existing child protocol does not expose SQLite trace or EXPLAIN output.",
+          available: true,
+          vantage:
+            "Child-side: service time spans request arrival to response finish; query counts are prepared-statement executions between those points. Plans are reported once per scale in query_plans.",
         },
       });
     }
+    const queryPlansEvent = await child.command({ command: "query-plans" });
+    const planStatements = Array.isArray(queryPlansEvent.statements)
+      ? (queryPlansEvent.statements as Record<string, unknown>[])
+      : [];
     const safeJobs = await sampleChildCommand(child, { command: "safe-jobs" });
     const idle = await child.command({ command: "idle", durationMs: IDLE_MS });
+
+    // Real populated ingest catch-up with concurrent HTTP interference: the
+    // backscan is synchronous in the child, so sequential reads issued while it
+    // runs measure how long HTTP service stalls behind ingest work.
+    const corpusDir = path.join(tempDir, "ingest-corpus");
+    const corpus = writeSyntheticIngestCorpus(corpusDir, scale);
+    const startedEvent = await child.command({ command: "ingest-catchup", corpusDir });
+    if (startedEvent.event !== "ingest-catchup-started")
+      throw new Error(`Unexpected ingest-catchup acknowledgement: ${String(startedEvent.event)}`);
+    let catchupEvent: ChildEvent | undefined;
+    let catchupError: unknown;
+    let catchupSettled = false;
+    const catchupTracked = child
+      .wait(INGEST_EVENT_TIMEOUT_MS)
+      .then(
+        (event) => {
+          catchupEvent = event;
+        },
+        (error: unknown) => {
+          catchupError = error;
+        },
+      )
+      .finally(() => {
+        catchupSettled = true;
+      });
+    const interferenceRoute = routes("synthetic-ws-0", "synthetic-session-0")[0];
+    if (!interferenceRoute) throw new Error("Interference route unavailable");
+    const interference: HttpResult[] = [];
+    while (!catchupSettled) {
+      const read = await request(
+        child.port,
+        interferenceRoute.path,
+        INTERFERENCE_REQUEST_TIMEOUT_MS,
+      );
+      requireHttpSuccess(`${interferenceRoute.name} interference read`, read);
+      interference.push(read);
+    }
+    await catchupTracked;
+    if (catchupError !== undefined)
+      throw catchupError instanceof Error ? catchupError : new Error(String(catchupError));
+    if (!catchupEvent || catchupEvent.event !== "ingest-catchup")
+      throw new Error(`Unexpected ingest-catchup completion: ${String(catchupEvent?.event)}`);
+    const interferenceChild = await drainRouteMetrics(
+      child,
+      interference.length,
+      "ingest interference",
+    );
+    const { event: _catchupEventName, ...catchupMetrics } = catchupEvent;
     const childJobs = Array.isArray(safeJobs.event.jobs) ? safeJobs.event.jobs : [];
     result = {
       scale_turns: scale,
@@ -662,6 +842,28 @@ async function profile(scale: number): Promise<Record<string, unknown>> {
         method: "seedSyntheticHistory writes into the fresh temporary SQLite database; this does not measure a daemon HTTP ingest path",
         turns_per_second: Number(((scale / seedElapsedMs) * 1_000).toFixed(3)),
         elapsed_ms: Number(seedElapsedMs.toFixed(3)),
+      },
+      query_plans: {
+        scope:
+          "Cumulative distinct statements executed through the route phases (before safe jobs and ingest catch-up), with EXPLAIN QUERY PLAN using each statement's first observed bindings.",
+        total_queries: queryPlansEvent.total_queries,
+        statements_total: planStatements.length,
+        statements: planStatements.slice(0, QUERY_PLAN_STATEMENT_CAP),
+      },
+      ingest_catchup: {
+        available: true,
+        method:
+          "runBackscan over a synthetic JSONL corpus beside the synthetic database; the child event loop is blocked for the synchronous scan",
+        corpus: { turns: scale, ...corpus },
+        child: catchupMetrics,
+        concurrent_http_interference: {
+          requests: interference.length,
+          http_elapsed_ms: summarizePhase(interference.map((read) => read.elapsedMs)),
+          child_service_time_ms: summarizePhase(
+            interferenceChild.map((sample) => sample.service_ms),
+          ),
+          note: "Sequential full-window overview reads while the backscan runs; max latency approximates the HTTP stall behind ingest. Query counts during this phase include ingest statements and are not per-request attributable.",
+        },
       },
       idle: idle.sample,
     };
@@ -710,11 +912,11 @@ async function main(): Promise<void> {
         moving_window_limitation:
           "This benchmark does not measure real-time preset resolution: presets resolve against the host clock while the fixture is fixed historical data. Some routes do not accept window filters, so their moving-window samples measure the unchanged route contract.",
         measurement_vantage:
-          "Route timings and bytes are controller-observed HTTP metrics. Safe-job CPU/RSS and idle delay are child-reported. Concurrent-read event-loop delay is controller-observed.",
+          "Route timings and bytes are controller-observed HTTP metrics; child_phases adds child-observed route service time and per-request SQLite statement-execution counts. Safe-job CPU/RSS, idle delay, and ingest catch-up cost are child-reported. Concurrent-read event-loop delay is controller-observed.",
         idle_definition: `${IDLE_MS}ms after safe jobs complete; no production interval timers are started`,
         excluded: [
           "src/daemon/index.ts",
-          "ingestion/tailers and scan roots",
+          "ingestion tail/discovery interval timers (a one-shot catch-up backscan over a synthetic corpus IS measured per scale)",
           "credential discovery and GitHub outcomes",
           "git churn collector",
           "operator settings/config",

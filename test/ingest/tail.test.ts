@@ -8,11 +8,13 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/db/open.js";
 import {
+  MAX_TAIL_LINE_BYTES,
   type Offset,
   fileVersion,
   loadOffset,
   saveOffset,
   tailFile,
+  tailFileChunk,
 } from "../../src/ingest/tail.js";
 import { migratedMemDb } from "./dbutil.js";
 
@@ -151,6 +153,137 @@ describe("tailFile", () => {
     );
     expect(second.event).toBe("ROTATION");
     expect(second.lines).toEqual(["old-id", "new-id"]);
+  });
+});
+
+describe("tailFileChunk", () => {
+  it("reassembles a multi-chunk file to the one-shot line sequence", () => {
+    fs.writeFileSync(fp, "one\ntwo\nthree\nfour\n");
+    const oneShot = tailFile(fp, null);
+    const lines: string[] = [];
+    let stored: Offset | null = null;
+    let result: ReturnType<typeof tailFileChunk>;
+    do {
+      result = tailFileChunk(fp, stored, 7);
+      lines.push(...result.lines);
+      stored = {
+        offset: result.newOffset,
+        headHash: result.newHeadHash,
+        fileVersion: fileVersion(fs.statSync(fp)),
+      };
+    } while (result.hasMore);
+    expect(lines).toEqual(oneShot.lines);
+    expect(result.newOffset).toBe(oneShot.newOffset);
+  });
+
+  it("does not split UTF-8 lines when a chunk ends inside a code point", () => {
+    fs.writeFileSync(fp, "a\n😀\nz\n");
+    const first = tailFileChunk(fp, null, 3);
+    expect(first.lines).toEqual(["a"]);
+    const second = tailFileChunk(
+      fp,
+      {
+        offset: first.newOffset,
+        headHash: first.newHeadHash,
+        fileVersion: fileVersion(fs.statSync(fp)),
+      },
+      3,
+    );
+    expect(second.lines).toEqual(["😀"]);
+  });
+
+  it("preserves CRLF content and holds a partial trailing line", () => {
+    fs.writeFileSync(fp, "one\r\ntwo\r\npartial");
+    const first = tailFileChunk(fp, null, 9);
+    expect(first.lines).toEqual(["one\r"]);
+    expect(first.newOffset).toBe(5);
+    expect(first.hasMore).toBe(true);
+    const second = tailFileChunk(
+      fp,
+      {
+        offset: first.newOffset,
+        headHash: first.newHeadHash,
+        fileVersion: fileVersion(fs.statSync(fp)),
+      },
+      9,
+    );
+    expect(second.lines).toEqual(["two\r"]);
+    expect(second.newOffset).toBe(10);
+    expect(second.hasMore).toBe(true);
+  });
+
+  it("frames an oversized line below the hard cap and emits it once", () => {
+    const line = "x".repeat(65);
+    fs.writeFileSync(fp, `${line}\nnext\n`);
+    const first = tailFileChunk(fp, null, 8);
+    expect(first.lines).toEqual([line]);
+    expect(first.hasMore).toBe(true);
+    const second = tailFileChunk(
+      fp,
+      {
+        offset: first.newOffset,
+        headHash: first.newHeadHash,
+        fileVersion: fileVersion(fs.statSync(fp)),
+      },
+      8,
+    );
+    expect(second.lines).toEqual(["next"]);
+  });
+
+  it("returns a recoverable outcome for a line above the hard cap", () => {
+    fs.writeFileSync(fp, "x".repeat(MAX_TAIL_LINE_BYTES + 1));
+    const first = tailFileChunk(fp, null, MAX_TAIL_LINE_BYTES);
+    expect(first.event).toBe("OVERSIZED_LINE");
+    expect(first.newOffset).toBe(0);
+    expect(first.hasMore).toBe(true);
+    const retry = tailFileChunk(fp, null, MAX_TAIL_LINE_BYTES);
+    expect(retry).toMatchObject({ event: "OVERSIZED_LINE", newOffset: 0, hasMore: true });
+  });
+
+  it("detects truncation and rotation between chunks", () => {
+    fs.writeFileSync(fp, "one\ntwo\nthree\n");
+    const first = tailFileChunk(fp, null, 7);
+    const before = fileVersion(fs.statSync(fp));
+    fs.writeFileSync(fp, "x\n");
+    const truncated = tailFileChunk(
+      fp,
+      {
+        offset: first.newOffset,
+        headHash: first.newHeadHash,
+        fileVersion: before,
+      },
+      4,
+    );
+    expect(truncated).toMatchObject({ event: "TRUNCATION", wasReset: true, lines: ["x"] });
+
+    fs.writeFileSync(fp, "fresh\ncontent\n");
+    const rotated = tailFileChunk(
+      fp,
+      {
+        offset: truncated.newOffset,
+        headHash: truncated.newHeadHash,
+        fileVersion: fileVersion(fs.statSync(fp)),
+      },
+      4,
+      { ...fileVersion(fs.statSync(fp)), ino: "replacement" },
+    );
+    expect(rotated).toMatchObject({ event: "ROTATION", wasReset: true, lines: ["fresh"] });
+  });
+
+  it("reports hasMore only while unread bytes remain past the committed offset", () => {
+    fs.writeFileSync(fp, "a\nb\n");
+    const first = tailFileChunk(fp, null, 2);
+    expect(first).toMatchObject({ lines: ["a"], hasMore: true });
+    const second = tailFileChunk(
+      fp,
+      {
+        offset: first.newOffset,
+        headHash: first.newHeadHash,
+        fileVersion: fileVersion(fs.statSync(fp)),
+      },
+      2,
+    );
+    expect(second).toMatchObject({ lines: ["b"], hasMore: false });
   });
 });
 

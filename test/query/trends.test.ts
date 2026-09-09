@@ -30,6 +30,69 @@ const T_TO = "2027-01-01T00:00:00.000Z";
 
 // ── Direct query tests ────────────────────────────────────────────────────────
 
+describe("getTrends combined-scan rollup parity (PERF2)", () => {
+  it.each(["day", "week", "month"] as const)(
+    "%s bucket: buckets/by_model/by_workspace equal the separate per-series scans",
+    (bucket) => {
+      const db = createInMemoryFixtureDb();
+      setQueryDb(db);
+      try {
+        const data = getTrends({ from: T_FROM, to: T_TO }, bucket).data;
+        expect(data?.buckets).toEqual(spendByBucket(db, T_FROM, T_TO, bucket));
+        expect(data?.by_model).toEqual(spendByBucketAndModel(db, T_FROM, T_TO, bucket));
+        expect(data?.by_workspace).toEqual(spendByBucketAndWorkspace(db, T_FROM, T_TO, bucket));
+      } finally {
+        resetQueryDb();
+        db.close();
+      }
+    },
+  );
+
+  it("workspace-scoped: buckets/by_model scope to the workspace and by_workspace stays empty", () => {
+    const db = createInMemoryFixtureDb();
+    setQueryDb(db);
+    try {
+      const data = getTrends({ from: T_FROM, to: T_TO }, "day", "ws-alpha").data;
+      expect(data?.buckets).toEqual(spendByBucket(db, T_FROM, T_TO, "day", "ws-alpha"));
+      expect(data?.by_model).toEqual(spendByBucketAndModel(db, T_FROM, T_TO, "day", "ws-alpha"));
+      expect(data?.by_workspace).toEqual([]);
+    } finally {
+      resetQueryDb();
+      db.close();
+    }
+  });
+
+  it("turns with an unregistered workspace_id stay in buckets/by_model but out of by_workspace", () => {
+    const db = createInMemoryFixtureDb();
+    setQueryDb(db);
+    try {
+      // turns.workspace_id has no FK to workspaces; a turn can reference an
+      // unregistered workspace. The old separate scans counted it in the
+      // unjoined bucket/model series but not the INNER JOINed workspace series.
+      db.prepare(
+        `INSERT INTO sessions (session_id, workspace_id, file_path, state)
+         VALUES ('sess-ghost', 'ws-alpha', '/fake/ghost.jsonl', 'RECONCILED')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO turns (message_id, session_id, workspace_id, ts, model, cost_equiv_u,
+                            provisional, parser_version)
+         VALUES ('msg-ghost', 'sess-ghost', 'ws-unregistered', '2026-01-01T03:00:00.000Z',
+                 'claude-sonnet', 777, 0, 'test-v1')`,
+      ).run();
+      const data = getTrends({ from: T_FROM, to: T_TO }, "day").data;
+      expect(data?.buckets).toEqual(spendByBucket(db, T_FROM, T_TO, "day"));
+      expect(data?.by_model).toEqual(spendByBucketAndModel(db, T_FROM, T_TO, "day"));
+      expect(data?.by_workspace).toEqual(spendByBucketAndWorkspace(db, T_FROM, T_TO, "day"));
+      const totalTurns = data?.buckets.reduce((s, r) => s + r.turns, 0);
+      const workspaceTurns = data?.by_workspace.reduce((s, r) => s + r.turns, 0);
+      expect(totalTurns).toBe((workspaceTurns ?? 0) + 1);
+    } finally {
+      resetQueryDb();
+      db.close();
+    }
+  });
+});
+
 describe("spendByBucket", () => {
   it("day bucket: all fixture turns fall in at most 2 local-day buckets (UTC offset boundary)", () => {
     // Turns span 2026-01-01T00:00Z–2026-01-01T05:05Z UTC.

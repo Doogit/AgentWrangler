@@ -168,6 +168,54 @@ export function spendByBucketAndWorkspace(
 }
 
 // ---------------------------------------------------------------------------
+// Spend by bucket × model × workspace — one scan for all three trend series
+// ---------------------------------------------------------------------------
+
+export interface SpendBucketModelWorkspaceRow {
+  bucket: string;
+  model: string;
+  workspace_id: string;
+  /** From the workspaces mapping; null when the turn's workspace is unregistered. */
+  project_slug: string | null;
+  cost_equiv_u: number;
+  turns: number;
+}
+
+/**
+ * Finest-grained spend rollup over [tFrom, tTo), reconciled turns only (PERF2).
+ * One scan whose integer sums roll up exactly to spendByBucket,
+ * spendByBucketAndModel and spendByBucketAndWorkspace for the same window.
+ * LEFT JOIN keeps turns with unregistered workspace_ids in the bucket/model
+ * rollups (matching the unjoined queries); such rows carry project_slug=null
+ * and are excluded from the by-workspace rollup (matching its INNER JOIN).
+ */
+export function spendByBucketModelWorkspace(
+  db: Db,
+  tFrom: string,
+  tTo: string,
+  bucket: BucketSize,
+  workspaceId?: string,
+): SpendBucketModelWorkspaceRow[] {
+  const bk = aliasedBucketExpr(bucket);
+  const base = `SELECT ${bk}                              AS bucket,
+                       t.model                            AS model,
+                       t.workspace_id                     AS workspace_id,
+                       w.project_slug                     AS project_slug,
+                       COALESCE(SUM(t.cost_equiv_u), 0)   AS cost_equiv_u,
+                       COUNT(*)                            AS turns
+                  FROM turns t LEFT JOIN workspaces w ON w.workspace_id = t.workspace_id
+                 WHERE t.ts >= ? AND t.ts < ? AND t.provisional = 0`;
+  const tail = `GROUP BY bucket, t.model, t.workspace_id
+                ORDER BY bucket ASC, t.model ASC, t.workspace_id ASC`;
+  if (workspaceId !== undefined) {
+    return db
+      .prepare(`${base} AND t.workspace_id = ? ${tail}`)
+      .all(tFrom, tTo, workspaceId) as SpendBucketModelWorkspaceRow[];
+  }
+  return db.prepare(`${base} ${tail}`).all(tFrom, tTo) as SpendBucketModelWorkspaceRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Per-session cost series — from sessions table
 // ---------------------------------------------------------------------------
 
