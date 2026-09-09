@@ -50,6 +50,8 @@ describe("SettingsPage context-budget hook", () => {
     render(<SettingsPage />);
     expect(await screen.findByRole("heading", { name: "In-session guards" })).toBeTruthy();
     const installBtn = await screen.findByRole("button", { name: /Install directly — writes/i });
+    // The button is visible before the asynchronous hook configuration enables it.
+    await waitFor(() => expect((installBtn as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(installBtn);
     await waitFor(() => expect(client.installHook).toHaveBeenCalledTimes(1));
     // The install result is surfaced (previously there was zero feedback).
