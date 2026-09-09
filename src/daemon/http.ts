@@ -144,6 +144,8 @@ function requiresSessionToken(pathname: string): boolean {
   if (/^\/api\/recommendations\/[^/]+\/apply$/.test(pathname)) return true;
   if (/^\/api\/recommendations\/[^/]+\/open-terminal$/.test(pathname)) return true;
   if (/^\/api\/recommendations\/jobs\/[^/]+\/(confirm|rollback)$/.test(pathname)) return true;
+  if (/^\/api\/esf\/effects\/(track|stop|close|rollback|attest-rollback)$/.test(pathname))
+    return true;
   return false;
 }
 

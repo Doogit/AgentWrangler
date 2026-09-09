@@ -25,6 +25,10 @@ import { adoptRecommendation } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
+// Preserve the original W4 writer regressions under the explicit legacy code gate.
+// Enabled-writer isolation and lifecycle behavior are covered by effect-writers.test.ts.
+vi.mock("../../src/effects/gate.js", () => ({ ESF_EFFECT_WRITER_ENABLED: false }));
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // Fixed base instant: 2026-06-15T00:00:00Z — far from the fixture DB's own
 // seeded sessions (2026-01-01) so D2 window aggregates only see test-seeded rows.

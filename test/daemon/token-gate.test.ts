@@ -103,6 +103,7 @@ beforeEach(() => {
   // W4: adopted recs now carry a child recommendation_effects row (FK to
   // recommendations) — clear it before deleting the parent row.
   db.prepare("DELETE FROM recommendation_effects WHERE rec_id=?").run(REC_ID);
+  db.prepare("DELETE FROM effect_cycles WHERE rec_id=?").run(REC_ID);
   db.prepare("DELETE FROM recommendations WHERE rec_id=?").run(REC_ID);
   db.prepare(PROPOSED_REC_SQL).run(REC_ID);
 });
@@ -224,7 +225,7 @@ describe("POST /api/recommendations/adopt — token gate", () => {
         "Content-Type": "application/json",
         "X-AgentWrangler-Token": FIXED_TOKEN,
       },
-      body: JSON.stringify({ rec_id: REC_ID }),
+      body: JSON.stringify({ rec_id: REC_ID, completed_change: true }),
     });
     expect(res.status).toBe(200);
     const body = JSON.parse(res.body) as { data?: { ok: boolean } };
@@ -363,4 +364,121 @@ describe("W3-A apply routes — token gate", () => {
     });
     expect(res.status).toBe(401);
   });
+});
+
+describe("enabled ESF2 HTTP contract", () => {
+  function post(action: string, body: unknown) {
+    return makeRequest(port, {
+      method: "POST",
+      path: `/api/esf/effects/${action}`,
+      headers: {
+        host: `127.0.0.1:${port}`,
+        "Sec-Fetch-Site": "same-origin",
+        "Content-Type": "application/json",
+        "X-AgentWrangler-Token": FIXED_TOKEN,
+      },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  }
+
+  const request = () => ({ rec_id: REC_ID, idempotency_key: "http-track", completed_change: true });
+
+  it("tracks once, returns server provenance, and replays the same cycle", async () => {
+    const first = await post("track", request());
+    expect(first.status).toBe(200);
+    const tracked = JSON.parse(first.body);
+    expect(tracked).toMatchObject({
+      supported: true,
+      replayed: false,
+      cycle: { recId: REC_ID, applicationSource: "USER_ATTESTED" },
+    });
+    const replay = await post("track", request());
+    expect(replay.status).toBe(200);
+    expect(JSON.parse(replay.body)).toMatchObject({ replayed: true, cycle: tracked.cycle });
+    expect(db.prepare("SELECT adopted_at FROM recommendations WHERE rec_id=?").get(REC_ID)).toEqual(
+      { adopted_at: tracked.cycle.appliedAt },
+    );
+    expect(db.prepare("SELECT * FROM effect_cycles WHERE rec_id=?").all(REC_ID)).toHaveLength(1);
+    expect(
+      db.prepare("SELECT * FROM recommendation_effects WHERE rec_id=?").all(REC_ID),
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    ["applied_at", "2020-01-01"],
+    ["scope", { workspaceId: "forged" }],
+    ["application_source", "MACHINE_CONFIRMED"],
+    ["action_revision", "forged-job"],
+  ])("rejects injected %s without writing", async (field, value) => {
+    const response = await post("track", { ...request(), [field as string]: value });
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body)).toEqual({ error: "Unknown request field." });
+    expect(db.prepare("SELECT * FROM effect_cycles WHERE rec_id=?").all(REC_ID)).toHaveLength(0);
+  });
+
+  it("requires completed-change attestation", async () => {
+    const response = await post("track", { ...request(), completed_change: false });
+    expect(response.status).toBe(400);
+    expect(db.prepare("SELECT state FROM recommendations WHERE rec_id=?").get(REC_ID)).toEqual({
+      state: "PROPOSED",
+    });
+  });
+
+  it("rejects malformed JSON and oversized bodies before writing", async () => {
+    const malformed = await post("track", "{");
+    expect(malformed.status).toBe(400);
+    expect(JSON.parse(malformed.body)).toEqual({ error: "Invalid JSON body." });
+    const oversized = await post("track", { ...request(), padding: "x".repeat(4096) });
+    expect(oversized.status).toBe(400);
+    expect(JSON.parse(oversized.body)).toEqual({ error: "Request body is too large." });
+    expect(db.prepare("SELECT * FROM effect_cycles WHERE rec_id=?").all(REC_ID)).toHaveLength(0);
+  });
+
+  it("returns 404 for missing cycles and 409 for an open-cycle close", async () => {
+    const missing = await post("stop", { cycle_id: "missing", idempotency_key: "stop" });
+    expect(missing.status).toBe(404);
+    const tracked = JSON.parse((await post("track", request())).body);
+    const conflict = await post("close", {
+      cycle_id: tracked.cycle.cycleId,
+      idempotency_key: "close",
+    });
+    expect(conflict.status).toBe(409);
+    expect(JSON.parse(conflict.body)).toEqual({
+      error: "Effect request conflicts with the current cycle.",
+    });
+    const stopped = await post("stop", {
+      cycle_id: tracked.cycle.cycleId,
+      idempotency_key: "stop",
+    });
+    expect(stopped.status).toBe(200);
+    expect(JSON.parse(stopped.body)).toMatchObject({ state: "STOPPED" });
+  });
+
+  it("returns validation errors for invalid history cursors and page sizes", async () => {
+    for (const query of ["cycle_cursor=invalid", "legacy_cursor=invalid", "limit=101"]) {
+      const response = await makeRequest(port, {
+        path: `/api/esf/effects?${query}`,
+        headers: { host: `127.0.0.1:${port}` },
+      });
+      expect(response.status).toBe(400);
+    }
+  });
+});
+
+describe("POST /api/esf/effects token gate", () => {
+  for (const action of ["track", "stop", "close", "rollback", "attest-rollback"]) {
+    it(`${action} requires the daemon session token`, async () => {
+      const res = await makeRequest(port, {
+        method: "POST",
+        path: `/api/esf/effects/${action}`,
+        headers: {
+          host: `127.0.0.1:${port}`,
+          "Sec-Fetch-Site": "same-origin",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(res.status).toBe(401);
+    });
+  }
 });

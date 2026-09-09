@@ -22,6 +22,7 @@ import type { ApiResponse } from "../../query/envelope";
 import { fetchEfficiencyHeadroom, fetchLedger } from "../api/client";
 import Chip from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
+import EffectEvidence from "./EffectEvidence";
 import { DETECTOR_GROUP_LABELS } from "./RecCard";
 
 type LoadState =
@@ -43,8 +44,6 @@ const INCONCLUSIVE_NOTE =
 const CONFOUNDED_BANNER =
   "Other recommendations were adopted within one day. Each source is shown separately, but their combined estimated value cannot be separated reliably.";
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
-
 function fmtUsdPerWk(microUsd: number): string {
   const dollars = microUsd / 1_000_000;
   const abs = Math.abs(dollars);
@@ -57,6 +56,9 @@ function fmtTokens(n: number): string {
 }
 
 function stateChipText(entry: LedgerEntry): string {
+  if (entry.effect_cycle !== null && entry.effect_cycle !== undefined) {
+    return `[${entry.effect_cycle.state}]`;
+  }
   switch (entry.state) {
     case "MEASURED_EFFECTIVE":
       return "[MEASURED: EFFECTIVE]";
@@ -101,17 +103,24 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
     );
   }
 
-  if (entry.state === "ADOPTED" || entry.state === "MEASURING") {
-    // Clock + deadline. Deadline comes from the effect row when present,
-    // else derived from adopted_at + 14d.
-    const deadline =
-      effect?.after_to ?? new Date(Date.parse(entry.adopted_at) + 14 * MS_PER_DAY).toISOString();
+  if (effect === null) {
     return (
       <div className="ledger-row">
         <span className="ledger-key">Observed result</span>
         <span className="ledger-val">
-          <span aria-hidden="true">⏱</span> Measuring — Local check due after{" "}
-          {deadline.slice(0, 10)}
+          Legacy measurement (read-only) is unavailable. No versioned measurement deadline was
+          recorded.
+        </span>
+      </div>
+    );
+  }
+
+  if (entry.state === "MEASURING" || effect.verdict === null) {
+    return (
+      <div className="ledger-row">
+        <span className="ledger-key">Observed result</span>
+        <span className="ledger-val">
+          Legacy measurement (read-only); no versioned deadline is recorded.
         </span>
       </div>
     );
@@ -126,7 +135,7 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
     );
   }
 
-  if (effect === null || effect.verdict === null) {
+  if (effect.verdict === null) {
     return (
       <div className="ledger-row">
         <span className="ledger-key">Observed result</span>
@@ -209,6 +218,7 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
 
 function LedgerRow({ entry }: { entry: LedgerEntry }) {
   const isRoutingAdvisory = isRoutingEntry(entry);
+  const cycle = entry.effect_cycle ?? null;
   return (
     <div className="card ledger-entry">
       <div className="ledger-head">
@@ -239,9 +249,19 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
         </div>
       )}
 
-      <RealizedLine entry={entry} />
+      {cycle === null ? <RealizedLine entry={entry} /> : <EffectEvidence cycle={cycle} />}
 
-      {entry.detector_id !== "D5" && entry.effects[0] !== undefined && (
+      {cycle === null &&
+        entry.effects.map((effect) =>
+          effect.verdict === null ? null : (
+            <div key={`${effect.rec_id}:${effect.measured_at}`} className="ledger-row">
+              <span className="ledger-key">Legacy target-metric result</span>
+              <span className="ledger-val">{effect.verdict}</span>
+            </div>
+          ),
+        )}
+
+      {cycle === null && entry.detector_id !== "D5" && entry.effects[0] !== undefined && (
         <div className="ledger-row ledger-sample-counts">
           <span className="ledger-key">Compared activity</span>
           <span className="ledger-val">
@@ -257,11 +277,13 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
         </p>
       )}
 
-      {entry.state === "MEASURED_NO_EFFECT" && entry.effects.some((e) => e.verdict !== null) && (
-        <p className="kpi-off-hint ledger-note">{NO_EFFECT_NOTE}</p>
-      )}
+      {cycle === null &&
+        entry.state === "MEASURED_NO_EFFECT" &&
+        entry.effects.some((e) => e.verdict !== null) && (
+          <p className="kpi-off-hint ledger-note">{NO_EFFECT_NOTE}</p>
+        )}
 
-      {entry.effects.length > 1 && (
+      {cycle === null && entry.effects.length > 1 && (
         <p className="kpi-off-hint">
           Per-source windows:{" "}
           {entry.effects

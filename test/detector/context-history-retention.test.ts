@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../../src/db/open.js";
 import {
   CONTEXT_HISTORY_RETENTION_VERSION,
@@ -14,6 +14,9 @@ import { AFTER_WINDOW_DAYS, runMeasurementPass } from "../../src/detector/measur
 import { adoptRecommendation } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { createFixtureDb, createInMemoryFixtureDb } from "../fixtures/seed.js";
+
+// These populated-history fixtures exercise legacy W4 retention and upgrade fidelity.
+vi.mock("../../src/effects/gate.js", () => ({ ESF_EFFECT_WRITER_ENABLED: false }));
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-08-26T12:00:00.000Z");

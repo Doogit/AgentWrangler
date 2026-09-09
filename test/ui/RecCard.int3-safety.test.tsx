@@ -29,6 +29,7 @@ function makeRec(): RecommendationCard {
     cross_workspace: false,
     workspace_multiplier: null,
     file_ref: "C:\\repo\\.claude\\CLAUDE.md",
+    effect_capability: { mode: "TRACKABLE", reason: null },
   };
 }
 
@@ -89,7 +90,7 @@ describe("RecCard INT-3 safety controls", () => {
     fireEvent.click(getByRole("button", { name: "Track this change" }));
 
     expect(container.querySelector(".rec-action-toast")?.textContent).toContain(
-      "Adopt pending — Undo",
+      "Track pending — Undo",
     );
     expect(fetchMock).not.toHaveBeenCalledWith("/api/recommendations/adopt", expect.anything());
 

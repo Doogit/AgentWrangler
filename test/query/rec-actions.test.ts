@@ -112,7 +112,7 @@ describe("adoptRecommendation", () => {
     if (rec === undefined) throw new Error("no active rec");
 
     const nowMs = Date.now();
-    adoptRecommendation(rec.rec_id, nowMs);
+    adoptRecommendation(rec.rec_id, nowMs, { completedChange: true });
 
     const row = db
       .prepare<string>("SELECT state, adopted_at FROM recommendations WHERE rec_id=?")
@@ -127,7 +127,7 @@ describe("adoptRecommendation", () => {
     const rec = view?.active[0];
     if (rec === undefined) throw new Error("no active rec");
 
-    adoptRecommendation(rec.rec_id);
+    adoptRecommendation(rec.rec_id, undefined, { completedChange: true });
 
     const after = listRecommendations().data;
     expect(after?.active.find((r) => r.rec_id === rec.rec_id)).toBeUndefined();

@@ -96,6 +96,7 @@ beforeEach(() => {
   // W4: adopted recs now carry a child recommendation_effects row (FK to
   // recommendations) — clear it before deleting the parent row.
   db.prepare("DELETE FROM recommendation_effects WHERE rec_id=?").run(REC_ID);
+  db.prepare("DELETE FROM effect_cycles WHERE rec_id=?").run(REC_ID);
   db.prepare("DELETE FROM recommendations WHERE rec_id=?").run(REC_ID);
   db.prepare(PROPOSED_REC_SQL).run(REC_ID);
 });
@@ -163,7 +164,7 @@ describe("POST /api/recommendations/adopt", () => {
       method: "POST",
       path: "/api/recommendations/adopt",
       headers: { "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" },
-      body: JSON.stringify({ rec_id: REC_ID }),
+      body: JSON.stringify({ rec_id: REC_ID, completed_change: true }),
     });
     expect(res.status).toBe(200);
     const body = JSON.parse(res.body) as { data: { ok: boolean }; meta: { claim_kind: string } };

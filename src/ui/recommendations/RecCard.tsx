@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useId, useRef, useState } from "react";
+import type { EffectEvidencePage } from "../../effects/api-contract";
 import { buildSeededPrompt } from "../../query/api/rec-prompt"; // browser-safe; avoids pulling server-side graph
 import type {
   BoundedStep,
@@ -23,10 +24,20 @@ import type {
   RecommendationGroup,
 } from "../../query/api/recommendations";
 import { fetchHookConfig, installHook } from "../api/client";
+import {
+  attestRollbackEffect,
+  closeEffect,
+  createEffectIdempotencyKey,
+  fetchEffectEvidence,
+  rollbackEffect,
+  stopEffect,
+  trackEffect,
+} from "../api/effect-client";
 import { useExperimentalActions } from "../hooks/useExperimentalActions";
 import { workspaceLabel } from "../lib/workspace-label";
 import Chip from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
+import EffectEvidence from "./EffectEvidence";
 import {
   type GeneratedSnippet,
   buildPromptArtifact,
@@ -77,9 +88,171 @@ type ApplyUiState =
   | { status: "rolled_back" }
   | { status: "failed"; message: string };
 
-type PendingRecommendationAction = "adopt" | "dismiss" | null;
+type PendingRecommendationAction = "adopt" | "dismiss" | "track" | null;
+type CycleAction = "stop" | "close" | "rollback" | "attest-rollback";
+type WriteAction = Exclude<PendingRecommendationAction, null> | CycleAction;
 
 const ACTION_UNDO_WINDOW_MS = 5_000;
+
+function EffectHistory({ recId }: { recId: string }) {
+  const [state, setState] = useState<
+    | { status: "loading"; cycles: never[]; legacy: never[]; nextCycle: null; nextLegacy: null }
+    | {
+        status: "ready" | "loading_more" | "error";
+        cycles: EffectEvidencePage["cycles"];
+        legacy: EffectEvidencePage["legacy"];
+        nextCycle: string | null;
+        nextLegacy: string | null;
+        message?: string;
+      }
+  >({ status: "loading", cycles: [], legacy: [], nextCycle: null, nextLegacy: null });
+
+  function load(more: boolean) {
+    const previous = state;
+    if (
+      more &&
+      (previous.status === "loading" ||
+        (previous.nextCycle === null && previous.nextLegacy === null))
+    )
+      return;
+    setState(
+      more && previous.status !== "loading"
+        ? (() => {
+            const { message: _message, ...history } = previous;
+            return { ...history, status: "loading_more" as const };
+          })()
+        : { status: "loading", cycles: [], legacy: [], nextCycle: null, nextLegacy: null },
+    );
+    void fetchEffectEvidence(
+      recId,
+      more && previous.status !== "loading"
+        ? { cycle: previous.nextCycle, legacy: previous.nextLegacy }
+        : {},
+    )
+      .then((page) => {
+        const existingCycles = more && previous.status !== "loading" ? previous.cycles : [];
+        const existingLegacy = more && previous.status !== "loading" ? previous.legacy : [];
+        const cycles = [...existingCycles, ...page.cycles].filter(
+          (item, index, items) =>
+            items.findIndex((candidate) => candidate.cycleId === item.cycleId) === index,
+        );
+        const legacy = [...existingLegacy, ...page.legacy].filter(
+          (item, index, items) =>
+            items.findIndex((candidate) => candidate.cycleId === item.cycleId) === index,
+        );
+        setState({
+          status: "ready",
+          cycles,
+          legacy,
+          // A stream that was already exhausted must remain exhausted when the
+          // other stream advances independently.
+          nextCycle:
+            more && previous.status !== "loading" && previous.nextCycle === null
+              ? null
+              : page.next_cycle_cursor,
+          nextLegacy:
+            more && previous.status !== "loading" && previous.nextLegacy === null
+              ? null
+              : page.next_legacy_cursor,
+        });
+      })
+      .catch((error: unknown) => {
+        const message =
+          error instanceof Error ? error.message : "Could not load measurement history.";
+        setState(
+          more && previous.status !== "loading"
+            ? { ...previous, status: "error", message }
+            : {
+                status: "error",
+                cycles: [],
+                legacy: [],
+                nextCycle: null,
+                nextLegacy: null,
+                message,
+              },
+        );
+      });
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "loading", cycles: [], legacy: [], nextCycle: null, nextLegacy: null });
+    void fetchEffectEvidence(recId)
+      .then((page) => {
+        if (cancelled) return;
+        setState({
+          status: "ready",
+          cycles: page.cycles,
+          legacy: page.legacy,
+          nextCycle: page.next_cycle_cursor,
+          nextLegacy: page.next_legacy_cursor,
+        });
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setState({
+          status: "error",
+          cycles: [],
+          legacy: [],
+          nextCycle: null,
+          nextLegacy: null,
+          message: error instanceof Error ? error.message : "Could not load measurement history.",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [recId]);
+
+  const canLoadMore =
+    state.status !== "loading" && (state.nextCycle !== null || state.nextLegacy !== null);
+  return (
+    <section className="rec-effect-history" aria-label="Measurement history">
+      <h4>Measurement history</h4>
+      {state.status === "loading" && <p aria-busy="true">Loading measurement history…</p>}
+      {state.status === "error" && (
+        <div role="alert">
+          Could not load measurement history: {state.message}{" "}
+          <button
+            type="button"
+            className="rec-action-btn"
+            onClick={() => load(state.cycles.length > 0 || state.legacy.length > 0)}
+          >
+            Retry loading history
+          </button>
+        </div>
+      )}
+      {state.status !== "loading" && (state.cycles.length > 0 || state.legacy.length > 0) && (
+        <ul>
+          {state.cycles.map((item) => (
+            <li key={item.cycleId}>
+              <EffectEvidence cycle={item} />
+            </li>
+          ))}
+          {state.legacy.map((item) => (
+            <li key={item.cycleId}>
+              Legacy target-metric result: {item.verdict ?? item.state.replaceAll("_", " ")} (
+              {item.measuredAt.slice(0, 10)}) — read-only
+            </li>
+          ))}
+        </ul>
+      )}
+      {state.status === "ready" && state.cycles.length === 0 && state.legacy.length === 0 && (
+        <p>No recorded measurement history.</p>
+      )}
+      {(canLoadMore || state.status === "loading_more") && (
+        <button
+          type="button"
+          className="rec-action-btn"
+          onClick={() => load(true)}
+          disabled={state.status === "loading_more"}
+        >
+          {state.status === "loading_more" ? "Loading…" : "Load more history"}
+        </button>
+      )}
+    </section>
+  );
+}
 
 interface ApplyJobPayload {
   job_id: string;
@@ -759,6 +932,7 @@ interface SingleRecCardProps {
   onDismissFocus?: () => void;
   onDismiss?: (recId: string) => void | Promise<void>;
   onAdopt?: (recId: string) => void | Promise<void>;
+  onEffectMutated?: () => void;
 }
 
 function SingleRecCard({
@@ -771,6 +945,7 @@ function SingleRecCard({
   onDismissFocus,
   onDismiss,
   onAdopt,
+  onEffectMutated,
 }: SingleRecCardProps) {
   const experimental = useExperimentalActions();
   const focused = focusRecId !== null && focusRecId === rec.rec_id;
@@ -792,6 +967,16 @@ function SingleRecCard({
   // Local evidence deliberately does not persist until the existing adopt endpoint is used.
   const [actionEvidence, setActionEvidence] = useState<"none" | "supported" | "manual">("none");
   const [manualAttested, setManualAttested] = useState(false);
+  const capability = rec.effect_capability;
+  const [cycle, setCycle] = useState(rec.effect_cycle ?? null);
+  useEffect(() => {
+    setCycle(rec.effect_cycle ?? null);
+  }, [rec.effect_cycle]);
+  const trackKey = useRef<string | null>(null);
+  const lifecycleKeys = useRef(new Map<string, string>());
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [retrackConfirmation, setRetrackConfirmation] = useState(false);
+  const [retrackAttested, setRetrackAttested] = useState(false);
   const [openTerminalMsg, setOpenTerminalMsg] = useState<{ ok: boolean; text: string } | null>(
     null,
   );
@@ -803,8 +988,8 @@ function SingleRecCard({
   const savingRef = useRef(false);
   const [writeState, setWriteState] = useState<
     | { status: "idle" | "saving" }
-    | { status: "saved"; action: "adopt" | "dismiss" }
-    | { status: "failed"; action: "adopt" | "dismiss"; message: string }
+    | { status: "saved"; action: WriteAction }
+    | { status: "failed"; action: WriteAction; message: string }
   >({ status: "idle" });
   const detailsId = useId();
   const chipOverflowId = useId();
@@ -828,7 +1013,21 @@ function SingleRecCard({
         <Chip key="list-equiv" kind="LIST_EQUIV" label="LIST_EQUIV · modeled USD" />,
       ]
     : [];
-  const isAdopted = rec.state !== "PROPOSED" || pendingAction === "adopt";
+  const isAdopted =
+    rec.state !== "PROPOSED" ||
+    cycle !== null ||
+    pendingAction === "adopt" ||
+    pendingAction === "track";
+  const terminalCycle =
+    cycle !== null &&
+    (cycle.state === "STOPPED" || cycle.state === "FINALIZED" || cycle.state === "UNSUPPORTED");
+  const unsupportedCycle = cycle !== null && cycle.versionStatus !== "SUPPORTED";
+  const canStartCycle = capability?.mode === "TRACKABLE" && !unsupportedCycle;
+  const canMutateCycle =
+    cycle !== null &&
+    !unsupportedCycle &&
+    (capability?.mode === "TRACKABLE" || capability?.mode === "MANUAL");
+  const canRetrack = terminalCycle && canStartCycle && cycle?.rollbackStatus !== "PENDING";
   const displayGroup = groupLabel(rec);
   const workspaceCwd = inferWorkspaceCwd(rec.file_ref);
   const canAssistedApply = canAssistedApplyForRec(rec);
@@ -915,9 +1114,39 @@ function SingleRecCard({
     }
   }
 
+  async function commitTrack() {
+    if (savingRef.current || !canStartCycle) return;
+    savingRef.current = true;
+    setWriteState({ status: "saving" });
+    try {
+      trackKey.current ??= createEffectIdempotencyKey(rec.rec_id, "track");
+      const result = await trackEffect(rec.rec_id, trackKey.current);
+      if (!result.supported || result.cycle === undefined) {
+        throw new Error(result.reason ?? "Measurement is not supported for this change.");
+      }
+      setCycle(result.cycle);
+      setHistoryRefreshKey((key) => key + 1);
+      setWriteState({ status: "saved", action: "track" });
+      onEffectMutated?.();
+    } catch (error: unknown) {
+      setWriteState({
+        status: "failed",
+        action: "track",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      savingRef.current = false;
+    }
+  }
+
   function scheduleAction(action: Exclude<PendingRecommendationAction, null>) {
-    const commit = action === "adopt" ? onAdopt : onDismiss;
-    if (commit === undefined || pendingTimeoutRef.current !== null || savingRef.current) return;
+    const commit = action === "adopt" ? onAdopt : action === "dismiss" ? onDismiss : undefined;
+    if (
+      (action !== "track" && commit === undefined) ||
+      pendingTimeoutRef.current !== null ||
+      savingRef.current
+    )
+      return;
 
     setWriteState({ status: "idle" });
     setPendingAction(action);
@@ -925,10 +1154,79 @@ function SingleRecCard({
       pendingTimeoutRef.current = null;
       setPendingTimeoutId(null);
       setPendingAction(null);
-      void commitAction(action);
+      if (action === "track") void commitTrack();
+      else void commitAction(action);
     }, ACTION_UNDO_WINDOW_MS);
     pendingTimeoutRef.current = timeoutId;
     setPendingTimeoutId(timeoutId);
+  }
+
+  function requestTrack() {
+    if (terminalCycle) {
+      if (!canRetrack) return;
+      setRetrackAttested(false);
+      setRetrackConfirmation(true);
+      return;
+    }
+    scheduleAction("track");
+  }
+
+  function confirmRetrack() {
+    if (!canRetrack || !retrackAttested || savingRef.current || pendingAction !== null) return;
+    trackKey.current = null;
+    setRetrackConfirmation(false);
+    scheduleAction("track");
+  }
+
+  function lifecycleKey(action: CycleAction, cycleId: string): string {
+    const intent = `${action}:${cycleId}`;
+    const existing = lifecycleKeys.current.get(intent);
+    if (existing !== undefined) return existing;
+    const created = createEffectIdempotencyKey(rec.rec_id, intent);
+    lifecycleKeys.current.set(intent, created);
+    return created;
+  }
+
+  async function runCycleAction(action: CycleAction) {
+    if (cycle === null || !canMutateCycle || savingRef.current || pendingAction !== null) return;
+    const currentCycle = cycle;
+    savingRef.current = true;
+    setWriteState({ status: "saving" });
+    try {
+      const key = lifecycleKey(action, currentCycle.cycleId);
+      if (action === "stop" || action === "close") {
+        const result = await (action === "stop" ? stopEffect : closeEffect)(
+          currentCycle.cycleId,
+          key,
+        );
+        setCycle(result);
+      } else {
+        const operation = await (action === "rollback" ? rollbackEffect : attestRollbackEffect)(
+          currentCycle.cycleId,
+          key,
+        );
+        // Rollback responses describe an operation; re-read its cycle so terminal
+        // state, comparison evidence and attribution boundaries remain authoritative.
+        const page = await fetchEffectEvidence(rec.rec_id);
+        const updated = page.cycles.find((item) => item.cycleId === operation.cycleId);
+        if (updated === undefined)
+          throw new Error(
+            "Change recorded, but its measurement could not be refreshed. Retry to reload it.",
+          );
+        setCycle(updated);
+      }
+      setHistoryRefreshKey((key) => key + 1);
+      setWriteState({ status: "saved", action });
+      onEffectMutated?.();
+    } catch (error: unknown) {
+      setWriteState({
+        status: "failed",
+        action,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      savingRef.current = false;
+    }
   }
 
   useEffect(() => {
@@ -1086,6 +1384,10 @@ function SingleRecCard({
       });
   }
 
+  function requestManualRollback() {
+    void runCycleAction("rollback");
+  }
+
   const rootClass = grouped ? "rec-session-row" : "card rec-card";
   const highlightClass = focused && !grouped ? " rec-focus-highlight" : "";
 
@@ -1187,7 +1489,12 @@ function SingleRecCard({
             Dismiss
           </button>
           {(rec.detector_id === "D5" ||
-            (actionEvidence !== "none" && (actionEvidence === "supported" || manualAttested))) && (
+            (capability?.mode === "TRACKABLE" &&
+              !unsupportedCycle &&
+              ((cycle === null &&
+                actionEvidence !== "none" &&
+                (actionEvidence === "supported" || manualAttested)) ||
+                canRetrack))) && (
             <button
               type="button"
               className="rec-action-btn"
@@ -1196,10 +1503,18 @@ function SingleRecCard({
                   ? "Records the calibration warning as acknowledged without impact tracking."
                   : "Records a baseline for this completed change; it changes no files."
               }
-              onClick={() => scheduleAction("adopt")}
-              disabled={!onAdopt || pendingAction !== null || writeState.status === "saving"}
+              onClick={() => (rec.detector_id === "D5" ? scheduleAction("adopt") : requestTrack())}
+              disabled={
+                (rec.detector_id === "D5" && !onAdopt) ||
+                pendingAction !== null ||
+                writeState.status === "saving"
+              }
             >
-              {rec.detector_id === "D5" ? "Acknowledge" : "Track this change"}
+              {rec.detector_id === "D5"
+                ? "Acknowledge"
+                : terminalCycle
+                  ? "Track another change"
+                  : "Track this change"}
             </button>
           )}
           {experimental && canOpenTerminal && (
@@ -1322,14 +1637,111 @@ function SingleRecCard({
           </div>
         )}
         {rec.detector_id !== "D5" &&
+          capability !== undefined &&
+          capability.mode !== "TRACKABLE" && (
+            <p className="rec-tracking-gate">
+              {capability.mode === "READ_ONLY"
+                ? "This recommendation is read-only; measurement cannot be started."
+                : capability.mode === "MANUAL"
+                  ? "Measurement is manual for this recommendation; no countdown or result is being recorded."
+                  : "This recommendation is acknowledged without impact measurement."}
+              {capability.reason ? ` ${capability.reason}` : ""}
+            </p>
+          )}
+        {rec.detector_id !== "D5" && capability === undefined && (
+          <p className="rec-tracking-gate">
+            Measurement availability is unknown for this older recommendation. It remains manual and
+            no countdown is shown.
+          </p>
+        )}
+        {rec.detector_id !== "D5" &&
           actionEvidence !== "none" &&
           (actionEvidence === "supported" || manualAttested) &&
           !isAdopted && (
             <p className="rec-tracking-gate">
-              Tracking records a baseline; it does not prove effectiveness. There is no untrack or
-              post-track rollback in this version.
+              Tracking records a baseline; it does not prove effectiveness. You can stop measurement
+              later without changing your file.
             </p>
           )}
+        {cycle !== null && (
+          <div className="rec-tracking-gate">
+            <EffectEvidence cycle={cycle} />
+            {!canMutateCycle ? (
+              <p>This measurement is read-only; lifecycle controls are unavailable.</p>
+            ) : (
+              <div className="rec-actions-secondary">
+                {(cycle.state === "OPEN_SETTLING" || cycle.state === "OPEN_MEASURING") && (
+                  <button
+                    type="button"
+                    className="rec-action-btn"
+                    onClick={() => void runCycleAction("stop")}
+                    disabled={writeState.status === "saving" || pendingAction !== null}
+                  >
+                    Stop measurement
+                  </button>
+                )}
+                {cycle.state === "FINALIZED" && cycle.attributionClosedAt === null && (
+                  <button
+                    type="button"
+                    className="rec-action-btn"
+                    onClick={() => void runCycleAction("close")}
+                    disabled={writeState.status === "saving" || pendingAction !== null}
+                  >
+                    Close attribution
+                  </button>
+                )}
+              </div>
+            )}
+            {canMutateCycle &&
+              cycle.rollbackStatus !== "PENDING" &&
+              cycle.rollbackStatus !== "SUCCEEDED" &&
+              cycle.rollbackStatus !== "USER_ATTESTED" && (
+                <div>
+                  <p>
+                    To undo the file change, revert it manually. Stopping measurement alone does not
+                    revert files.
+                  </p>
+                  <button
+                    type="button"
+                    className="rec-action-btn"
+                    disabled={writeState.status === "saving" || pendingAction !== null}
+                    onClick={() => void runCycleAction("attest-rollback")}
+                  >
+                    I reverted the change
+                  </button>
+                </div>
+              )}
+            <EffectHistory key={`${rec.rec_id}:${historyRefreshKey}`} recId={rec.rec_id} />
+          </div>
+        )}
+        {retrackConfirmation && (
+          <div className="rec-tracking-gate">
+            <p>This starts a new measurement cycle. Earlier cycles stay in the history above.</p>
+            <label>
+              <input
+                type="checkbox"
+                checked={retrackAttested}
+                onChange={(event) => setRetrackAttested(event.target.checked)}
+              />
+              I completed another change and want to measure it.
+            </label>
+            <button
+              type="button"
+              className="rec-action-btn"
+              onClick={confirmRetrack}
+              disabled={!retrackAttested || !canRetrack || writeState.status === "saving"}
+            >
+              Confirm retrack
+            </button>
+            <button
+              type="button"
+              className="rec-action-btn"
+              onClick={() => setRetrackConfirmation(false)}
+            >
+              Cancel retrack
+            </button>
+          </div>
+        )}
         {!grouped && route === "copy" && (
           <p className="rec-actions-hint">
             {experimental && canOpenTerminal
@@ -1340,7 +1752,11 @@ function SingleRecCard({
         {pendingAction !== null && pendingTimeoutId !== null && (
           <output className="rec-action-toast">
             <span>
-              {pendingAction === "adopt" ? "Adopt pending — Undo" : "Dismiss pending — Undo"}
+              {pendingAction === "adopt"
+                ? "Adopt pending — Undo"
+                : pendingAction === "track"
+                  ? "Track pending — Undo"
+                  : "Dismiss pending — Undo"}
             </span>
             <button type="button" className="rec-action-toast-undo" onClick={clearPendingAction}>
               Undo
@@ -1354,7 +1770,19 @@ function SingleRecCard({
               ? rec.detector_id === "D5"
                 ? "Acknowledgment saved"
                 : "Tracking saved"
-              : "Dismissal saved"}
+              : writeState.action === "track"
+                ? "Tracking saved"
+                : writeState.action === "stop"
+                  ? cycle?.state === "STOPPED"
+                    ? "Measurement stopped"
+                    : "Measurement refreshed"
+                  : writeState.action === "close"
+                    ? "Attribution closed"
+                    : writeState.action === "rollback"
+                      ? "Manual rollback request recorded; no files changed"
+                      : writeState.action === "attest-rollback"
+                        ? "Rollback attestation recorded; actual rollback time is unknown"
+                        : "Dismissal saved"}
           </output>
         )}
         {writeState.status === "failed" && (
@@ -1363,7 +1791,13 @@ function SingleRecCard({
             <button
               type="button"
               className="rec-action-btn"
-              onClick={() => void commitAction(writeState.action)}
+              onClick={() =>
+                writeState.action === "track"
+                  ? void commitTrack()
+                  : writeState.action === "adopt" || writeState.action === "dismiss"
+                    ? void commitAction(writeState.action)
+                    : void runCycleAction(writeState.action)
+              }
             >
               Retry
             </button>
@@ -1404,11 +1838,36 @@ function SingleRecCard({
             {applyState.diffApplied !== null && (
               <pre className="rec-apply-preview">{applyState.diffApplied}</pre>
             )}
-            <div className="rec-actions-secondary">
-              <button type="button" className="rec-action-btn" onClick={handleRollbackApply}>
-                Roll back
-              </button>
-            </div>
+            {capability === undefined && cycle === null ? (
+              <div className="rec-actions-secondary">
+                <button type="button" className="rec-action-btn" onClick={handleRollbackApply}>
+                  Roll back
+                </button>
+              </div>
+            ) : (
+              <div className="rec-tracking-gate">
+                <p>
+                  This versioned recommendation has no safe whole-file rollback. Revert the change
+                  manually; that does not erase its measurement history.
+                </p>
+                {cycle === null ? (
+                  <p>
+                    Start tracking the completed change before recording a rollback attestation.
+                  </p>
+                ) : cycle.rollbackStatus === "MANUAL" || cycle.rollbackStatus === "UNSUPPORTED" ? (
+                  <p>After reverting the file, use “I reverted the change” above.</p>
+                ) : (
+                  <button
+                    type="button"
+                    className="rec-action-btn"
+                    disabled={!canMutateCycle || writeState.status === "saving"}
+                    onClick={requestManualRollback}
+                  >
+                    Revert manually
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
         {experimental && applyState.status === "rolled_back" && (
@@ -1642,6 +2101,7 @@ function GroupedRecCard({
   onDismissFocus,
   onDismiss,
   onAdopt,
+  onEffectMutated,
 }: {
   group: RecommendationGroup;
   rank: number;
@@ -1650,6 +2110,7 @@ function GroupedRecCard({
   onDismissFocus?: () => void;
   onDismiss?: (recId: string) => void | Promise<void>;
   onAdopt?: (recId: string) => void | Promise<void>;
+  onEffectMutated?: () => void;
 }) {
   const [artifactCopied, setArtifactCopied] = useState(false);
   const [guidedShown, setGuidedShown] = useState(false);
@@ -1710,6 +2171,7 @@ function GroupedRecCard({
       focusRecId={focusRecId}
       {...(onDismiss === undefined ? {} : { onDismiss })}
       {...(onAdopt === undefined ? {} : { onAdopt })}
+      {...(onEffectMutated === undefined ? {} : { onEffectMutated })}
     />
   ));
 
@@ -1884,6 +2346,7 @@ interface RecCardProps {
   onDismissFocus?: () => void;
   onDismiss?: (recId: string) => void | Promise<void>;
   onAdopt?: (recId: string) => void | Promise<void>;
+  onEffectMutated?: () => void;
 }
 
 export default function RecCard({
@@ -1895,6 +2358,7 @@ export default function RecCard({
   onDismissFocus,
   onDismiss,
   onAdopt,
+  onEffectMutated,
 }: RecCardProps) {
   if (group !== undefined) {
     return (
@@ -1906,6 +2370,7 @@ export default function RecCard({
         {...(onDismissFocus === undefined ? {} : { onDismissFocus })}
         {...(onDismiss === undefined ? {} : { onDismiss })}
         {...(onAdopt === undefined ? {} : { onAdopt })}
+        {...(onEffectMutated === undefined ? {} : { onEffectMutated })}
       />
     );
   }
@@ -1920,6 +2385,7 @@ export default function RecCard({
       {...(onDismissFocus === undefined ? {} : { onDismissFocus })}
       {...(onDismiss === undefined ? {} : { onDismiss })}
       {...(onAdopt === undefined ? {} : { onAdopt })}
+      {...(onEffectMutated === undefined ? {} : { onEffectMutated })}
     />
   );
 }

@@ -32,6 +32,7 @@ import { setExperimentalActions } from "../../src/ui/hooks/useExperimentalAction
 import ImpactLedger from "../../src/ui/recommendations/ImpactLedger";
 import RecCard, { __resetHookInstallCache } from "../../src/ui/recommendations/RecCard";
 import RecommendationsPage from "../../src/ui/recommendations/RecommendationsPage";
+import { makeEffectCycle as effectCycle } from "./effect-cycle-fixture";
 
 vi.mock("../../src/ui/api/client");
 
@@ -86,7 +87,27 @@ function makeRec(overrides: Partial<RecommendationCard> = {}): RecommendationCar
     cross_workspace: true,
     workspace_multiplier: null,
     file_ref: null,
+    // ESF2 fixtures opt into tracking explicitly. Missing capability remains
+    // a conservative manual state and is covered below.
+    effect_capability: { mode: "TRACKABLE", reason: null },
     ...overrides,
+  };
+}
+
+function withTrackableCapabilities(view: ReturnType<typeof mockRecommendations>) {
+  if (view.data === null) return view;
+  return {
+    ...view,
+    data: {
+      ...view.data,
+      active: view.data.active.map((rec) => ({
+        ...rec,
+        effect_capability: { mode: "TRACKABLE" as const, reason: null },
+      })),
+      // Groups are derived from active cards when their pre-ESF payload lacks
+      // the matching lifecycle projection.
+      active_groups: [],
+    },
   };
 }
 
@@ -123,8 +144,19 @@ describe("RecCard — action buttons", () => {
 
   it("requires manual completion attestation before tracking a copied action", async () => {
     vi.useFakeTimers();
-    const onAdopt = vi.fn();
-    const { getByRole } = render(<RecCard rec={makeRec()} onAdopt={onAdopt} />);
+    const mockFetch = vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === "/api/token")
+        return Promise.resolve({ ok: true, json: async () => ({ token: "tok" }) });
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          supported: true,
+          cycle: effectCycle({ state: "OPEN_SETTLING" }),
+        }),
+      });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const { getByRole } = render(<RecCard rec={makeRec()} />);
     expect(() => getByRole("button", { name: "Track this change" })).toThrow();
     fireEvent.click(getByRole("button", { name: "Show guided prompt" }));
     fireEvent.click(getByRole("button", { name: "Copy prompt" }));
@@ -134,9 +166,22 @@ describe("RecCard — action buttons", () => {
     expect(getByRole("button", { name: "I completed the change" })).toBeTruthy();
     fireEvent.click(getByRole("button", { name: "I completed the change" }));
     fireEvent.click(getByRole("button", { name: "Track this change" }));
-    expect(onAdopt).not.toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalledTimes(0);
+    expect(getByRole("button", { name: "Undo" })).toBeDefined();
+    expect(getByRole("button", { name: "Undo" }).parentElement?.textContent).toContain(
+      "Track pending",
+    );
     act(() => vi.advanceTimersByTime(5_000));
-    expect(onAdopt).toHaveBeenCalledWith("rec-test-1");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/esf/effects/track",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"completed_change":true'),
+      }),
+    );
   });
 
   it("Dismiss is disabled when no onDismiss prop is given", () => {
@@ -147,6 +192,13 @@ describe("RecCard — action buttons", () => {
   it("does not offer tracking until there is action evidence", () => {
     const { queryByRole } = render(<RecCard rec={makeRec()} />);
     expect(queryByRole("button", { name: "Track this change" })).toBeNull();
+  });
+
+  it("keeps recommendations without an ESF capability manual and does not show a countdown", () => {
+    const { effect_capability: _capability, ...rec } = makeRec();
+    const { queryByRole, getByText } = render(<RecCard rec={rec} />);
+    expect(queryByRole("button", { name: "Track this change" })).toBeNull();
+    expect(getByText(/Measurement availability is unknown/)).toBeDefined();
   });
 
   // O11 Option B (2026-09-04): the experimental action is now "Open in Claude
@@ -377,6 +429,322 @@ describe("RecCard — action buttons", () => {
 });
 
 // ---------------------------------------------------------------------------
+// RecCard — ESF2 lifecycle evidence and controls
+// ---------------------------------------------------------------------------
+
+describe("RecCard — ESF2 lifecycle evidence and controls", () => {
+  it("loads bounded history, loads more, and keeps legacy evidence read-only", async () => {
+    const mockFetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("cycle_cursor=next-cycle")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            writer_enabled: true,
+            cycles: [
+              effectCycle({
+                cycleId: "cycle-older",
+                cycleNo: 1,
+                state: "STOPPED",
+                createdAt: "2026-09-01T00:00:00Z",
+                versionStatus: "SUPPORTED",
+              }),
+            ],
+            legacy: [],
+            next_cycle_cursor: null,
+            next_legacy_cursor: null,
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          writer_enabled: true,
+          cycles: [
+            effectCycle({
+              cycleId: "cycle-current",
+              cycleNo: 2,
+              state: "OPEN_MEASURING",
+              createdAt: "2026-09-02T00:00:00Z",
+              versionStatus: "SUPPORTED",
+            }),
+          ],
+          legacy: [
+            {
+              cycleId: "legacy-1",
+              state: "LEGACY_FINALIZED",
+              measuredAt: "2026-08-30T00:00:00Z",
+              verdict: "NO_EFFECT",
+            },
+          ],
+          next_cycle_cursor: "next-cycle",
+          next_legacy_cursor: null,
+        }),
+      });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const view = render(<RecCard rec={makeRec({ effect_cycle: effectCycle() })} />);
+    await waitFor(() =>
+      expect(view.getByText(/Legacy target-metric result: NO_EFFECT/)).toBeDefined(),
+    );
+    expect(view.getByText(/read-only/)).toBeDefined();
+    fireEvent.click(view.getByRole("button", { name: "Load more history" }));
+    await waitFor(() => expect(view.getByText(/Cycle 1: STOPPED/)).toBeDefined());
+  });
+
+  it("retries a failed history read and reuses a lifecycle retry key", async () => {
+    let historyAttempts = 0;
+    let stopAttempts = 0;
+    const stopBodies: string[] = [];
+    const mockFetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/token")
+        return Promise.resolve({ ok: true, json: async () => ({ token: "tok" }) });
+      if (url.startsWith("/api/esf/effects?")) {
+        historyAttempts += 1;
+        return Promise.resolve(
+          historyAttempts === 1
+            ? { ok: false, json: async () => ({ error: "offline" }) }
+            : {
+                ok: true,
+                json: async () => ({
+                  writer_enabled: true,
+                  cycles: [],
+                  legacy: [],
+                  next_cycle_cursor: null,
+                  next_legacy_cursor: null,
+                }),
+              },
+        );
+      }
+      if (url === "/api/esf/effects/stop") {
+        stopAttempts += 1;
+        stopBodies.push(String(init?.body));
+        return Promise.resolve(
+          stopAttempts === 1
+            ? { ok: false, status: 409, json: async () => ({ error: "conflict" }) }
+            : { ok: true, json: async () => effectCycle({ state: "STOPPED" }) },
+        );
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const view = render(<RecCard rec={makeRec({ effect_cycle: effectCycle() })} />);
+    await waitFor(() =>
+      expect(view.getByRole("button", { name: "Retry loading history" })).toBeDefined(),
+    );
+    fireEvent.click(view.getByRole("button", { name: "Retry loading history" }));
+    await waitFor(() => expect(view.getByText("No recorded measurement history.")).toBeDefined());
+    fireEvent.click(view.getByRole("button", { name: "Stop measurement" }));
+    await waitFor(() => expect(view.getByText(/Could not save: conflict/)).toBeDefined());
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(stopAttempts).toBe(2));
+    expect(stopBodies[1]).toBe(stopBodies[0]);
+  });
+
+  it("offers close only for finalized attribution and consumes the server result", async () => {
+    let attempts = 0;
+    const bodies: string[] = [];
+    const cycle = effectCycle({ state: "FINALIZED", attributionClosedAt: null });
+    const closed = {
+      ...cycle,
+      attributionClosedAt: "2026-09-08T12:00:00Z",
+      attributionCloseReason: "USER_CLOSED",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/token") return { ok: true, json: async () => ({ token: "tok" }) };
+        if (url === "/api/esf/effects/close") {
+          bodies.push(String(init?.body));
+          attempts += 1;
+          return attempts === 1
+            ? { ok: false, status: 409, json: async () => ({ error: "conflict" }) }
+            : { ok: true, json: async () => closed };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            writer_enabled: true,
+            cycles: [],
+            legacy: [],
+            next_cycle_cursor: null,
+            next_legacy_cursor: null,
+          }),
+        };
+      }),
+    );
+    const view = render(<RecCard rec={makeRec({ effect_cycle: cycle })} />);
+    fireEvent.click(view.getByRole("button", { name: "Close attribution" }));
+    await waitFor(() => expect(view.getByText(/Could not save: conflict/)).toBeDefined());
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(view.queryByRole("button", { name: "Close attribution" })).toBeNull(),
+    );
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(view.getByText(/Attribution closed/)).toBeDefined();
+    view.rerender(<RecCard rec={makeRec({ effect_cycle: effectCycle() })} />);
+    expect(view.queryByRole("button", { name: "Close attribution" })).toBeNull();
+    expect(view.getByRole("button", { name: "Stop measurement" })).toBeDefined();
+  });
+
+  it("uses the server's finalized state when stopping races finalization", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/token") return { ok: true, json: async () => ({ token: "tok" }) };
+        if (url === "/api/esf/effects/stop")
+          return { ok: true, json: async () => effectCycle({ state: "FINALIZED" }) };
+        return {
+          ok: true,
+          json: async () => ({
+            writer_enabled: true,
+            cycles: [],
+            legacy: [],
+            next_cycle_cursor: null,
+            next_legacy_cursor: null,
+          }),
+        };
+      }),
+    );
+    const view = render(<RecCard rec={makeRec({ effect_cycle: effectCycle() })} />);
+    fireEvent.click(view.getByRole("button", { name: "Stop measurement" }));
+    await waitFor(() =>
+      expect(view.getByRole("button", { name: "Close attribution" })).toBeDefined(),
+    );
+    expect(view.queryByRole("button", { name: "Stop measurement" })).toBeNull();
+  });
+
+  it("keeps frozen lifecycle controls available after current source drift without allowing retrack", async () => {
+    const stopped = effectCycle({ state: "STOPPED" });
+    const mockFetch = vi.fn((input: RequestInfo | URL) =>
+      Promise.resolve({
+        ok: true,
+        json: async () => (String(input) === "/api/token" ? { token: "tok" } : stopped),
+      }),
+    );
+    vi.stubGlobal("fetch", mockFetch);
+    const rec = makeRec({
+      effect_cycle: effectCycle(),
+      effect_capability: { mode: "MANUAL", reason: "SOURCE_UNAVAILABLE" },
+    });
+    const view = render(<RecCard rec={rec} />);
+    fireEvent.click(view.getByRole("button", { name: "Stop measurement" }));
+    await waitFor(() =>
+      expect(view.queryByRole("button", { name: "Stop measurement" })).toBeNull(),
+    );
+    expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(true);
+    expect(view.getByRole("button", { name: "I reverted the change" })).toBeTruthy();
+    expect(view.queryByRole("button", { name: "Track another change" })).toBeNull();
+    view.rerender(<RecCard rec={{ ...rec, effect_cycle: effectCycle({ state: "FINALIZED" }) }} />);
+    expect(view.getByRole("button", { name: "Close attribution" })).toBeTruthy();
+    expect(view.queryByRole("button", { name: "Track another change" })).toBeNull();
+  });
+
+  it("keeps unsupported versions and disabled writers read-only, including rollback", () => {
+    const cycle = effectCycle({ versionStatus: "UNSUPPORTED_VERSION", rollbackStatus: "MANUAL" });
+    const view = render(<RecCard rec={makeRec({ effect_cycle: cycle })} />);
+    for (const name of [
+      "Stop measurement",
+      "Close attribution",
+      "I reverted the change",
+      "Track another change",
+    ]) {
+      expect(view.queryByRole("button", { name })).toBeNull();
+    }
+    view.rerender(
+      <RecCard
+        rec={makeRec({
+          effect_cycle: effectCycle(),
+          effect_capability: { mode: "READ_ONLY", reason: "WRITER_DISABLED" },
+        })}
+      />,
+    );
+    expect(view.queryByRole("button", { name: "Stop measurement" })).toBeNull();
+    expect(view.queryByRole("button", { name: "I reverted the change" })).toBeNull();
+  });
+
+  it("retries rollback attestation with the same intent and reloads its canonical cycle", async () => {
+    let attempts = 0;
+    const bodies: string[] = [];
+    const current = effectCycle({ rollbackStatus: "MANUAL" });
+    const recorded = effectCycle({
+      state: "STOPPED",
+      rollbackStatus: "USER_ATTESTED",
+      comparisonReasons: ["ROLLBACK_TIME_UNKNOWN"],
+    });
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push(url);
+        if (url === "/api/token") return { ok: true, json: async () => ({ token: "tok" }) };
+        if (url === "/api/esf/effects/attest-rollback") {
+          attempts += 1;
+          bodies.push(String(init?.body));
+          return attempts === 1
+            ? { ok: false, status: 409, json: async () => ({ error: "offline" }) }
+            : {
+                ok: true,
+                json: async () => ({ cycleId: current.cycleId, status: "USER_ATTESTED" }),
+              };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            writer_enabled: true,
+            cycles: [attempts > 1 ? recorded : current],
+            legacy: [],
+            next_cycle_cursor: null,
+            next_legacy_cursor: null,
+          }),
+        };
+      }),
+    );
+    const view = render(<RecCard rec={makeRec({ effect_cycle: current })} />);
+    fireEvent.click(view.getByRole("button", { name: "I reverted the change" }));
+    await waitFor(() => expect(view.getByRole("button", { name: "Retry" })).toBeDefined());
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(view.queryByRole("button", { name: "I reverted the change" })).toBeNull(),
+    );
+    expect(view.queryByRole("button", { name: "Stop measurement" })).toBeNull();
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(JSON.parse(bodies[1] ?? "{}")).toMatchObject({
+      cycle_id: current.cycleId,
+      actual_time_known: false,
+    });
+    expect(requests).not.toContain("/api/esf/effects/track");
+  });
+
+  it("requires confirmation before retracking a terminal cycle", () => {
+    const view = render(
+      <RecCard rec={makeRec({ effect_cycle: effectCycle({ state: "STOPPED" }) })} />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Track another change" }));
+    expect(view.getByText(/starts a new measurement cycle/)).toBeDefined();
+    expect(
+      (view.getByRole("button", { name: "Confirm retrack" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(view.getByRole("checkbox", { name: /I completed another change/ }));
+    expect(
+      (view.getByRole("button", { name: "Confirm retrack" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    view.rerender(
+      <RecCard
+        rec={makeRec({
+          effect_cycle: effectCycle({ state: "STOPPED", rollbackStatus: "PENDING" }),
+        })}
+      />,
+    );
+    expect(view.queryByRole("button", { name: "Track another change" })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RecCard — progressive disclosure
 // ---------------------------------------------------------------------------
 
@@ -539,12 +907,22 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     expect(vi.mocked(client.fetchRecommendations).mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("calls /api/recommendations/adopt and re-fetches on success", async () => {
-    vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
+  it("tracks a completed change through ESF2 and re-fetches on success", async () => {
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(
+      withTrackableCapabilities(mockRecommendations()),
+    );
 
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValue({ ok: true, json: async () => ({ token: "synthetic-token" }) });
+    const mockFetch = vi.fn((input: RequestInfo | URL) =>
+      String(input) === "/api/token"
+        ? Promise.resolve({ ok: true, json: async () => ({ token: "synthetic-token" }) })
+        : Promise.resolve({
+            ok: true,
+            json: async () => ({
+              supported: true,
+              cycle: effectCycle({ state: "OPEN_SETTLING" }),
+            }),
+          }),
+    );
     vi.stubGlobal("fetch", mockFetch);
 
     const { container } = render(<RecommendationsPage />);
@@ -582,7 +960,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     });
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "/api/recommendations/adopt",
+      "/api/esf/effects/track",
       expect.objectContaining({ method: "POST" }),
     );
 
@@ -591,7 +969,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
   });
 
   it("copies and attests a change before tracking it, then exposes the measuring ledger state", async () => {
-    const initial = mockRecommendations();
+    const initial = withTrackableCapabilities(mockRecommendations());
     const rec = initial.data?.active[0];
     const measuring = mockLedger().data?.entries[1];
     if (!initial.data || !rec || !measuring) throw new Error("missing controlled workflow fixture");
@@ -600,7 +978,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     if (tracked.data === null) throw new Error("tracked fixture data must be populated");
     tracked.data.active = [];
     tracked.data.active_groups = [];
-    tracked.data.adopted = [{ ...rec, state: "MEASURING" }];
+    tracked.data.adopted = [{ ...rec, state: "ADOPTED", effect_cycle: effectCycle() }];
     let ledger: ReturnType<typeof mockLedger> = {
       ...mockLedger(),
       data: { entries: [], cap_read_coeff: 0.1 },
@@ -615,15 +993,29 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
       if (url === "/api/token") {
         return { ok: true, json: async () => ({ token: "synthetic-token" }) };
       }
-      if (url === "/api/recommendations/adopt") {
+      if (url === "/api/esf/effects/track") {
         ledger = {
           ...mockLedger(),
           data: {
-            entries: [{ ...measuring, rec_id: rec.rec_id }],
+            entries: [
+              {
+                ...measuring,
+                rec_id: rec.rec_id,
+                state: "ADOPTED",
+                effects: [],
+                effect_cycle: effectCycle(),
+              },
+            ],
             cap_read_coeff: 0.1,
           },
         };
-        return { ok: true, json: async () => ({}) };
+        return {
+          ok: true,
+          json: async () => ({
+            supported: true,
+            cycle: effectCycle({ state: "OPEN_MEASURING" }),
+          }),
+        };
       }
       return { ok: false, status: 404, text: async () => "unexpected request" };
     });
@@ -658,17 +1050,28 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     });
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "/api/recommendations/adopt",
-      expect.objectContaining({ body: JSON.stringify({ rec_id: rec.rec_id }), method: "POST" }),
+      "/api/esf/effects/track",
+      expect.objectContaining({
+        body: expect.stringContaining(`"rec_id":"${rec.rec_id}"`),
+        method: "POST",
+      }),
     );
 
-    // Re-mount at the ledger's independently fetched API boundary. No action
-    // runner is invoked: the controlled response is the post-track state.
-    page.unmount();
     vi.useRealTimers();
+    await waitFor(() =>
+      expect(page.getByRole("button", { name: "Stop measurement" })).toBeDefined(),
+    );
+    expect(page.getByRole("button", { name: "I reverted the change" })).toBeDefined();
+    // A fresh page still exposes controls for the adopted member.
+    page.unmount();
+    const reopened = render(<RecommendationsPage />);
+    await waitFor(() =>
+      expect(reopened.getByRole("button", { name: "Stop measurement" })).toBeDefined(),
+    );
+    reopened.unmount();
     const ledgerView = render(<ImpactLedger />);
-    await waitFor(() => expect(ledgerView.container.textContent).toContain("Measuring"));
-    expect(ledgerView.container.textContent).toContain("Local check due after");
+    await waitFor(() => expect(ledgerView.container.textContent).toContain("OPEN MEASURING"));
+    expect(ledgerView.container.textContent).toContain("2026-09-30");
   });
 
   it("shows adopted recs in the adopted section when present", async () => {
@@ -773,13 +1176,34 @@ describe("RecCard — RV4 primary-action routing", () => {
 
   it("keeps grouped D1 copy, attestation and tracking owned by the selected member", async () => {
     vi.useFakeTimers();
-    const onAdopt = vi.fn().mockResolvedValue(undefined);
+    const mockFetch = vi.fn((input: RequestInfo | URL) =>
+      String(input) === "/api/token"
+        ? Promise.resolve({ ok: true, json: async () => ({ token: "tok" }) })
+        : Promise.resolve({
+            ok: true,
+            json: async () => ({
+              supported: true,
+              cycle: effectCycle({
+                cycleId: "cycle-2",
+                cycleNo: 1,
+                state: "OPEN_SETTLING",
+                targetDirection: null,
+                comparisonStatus: null,
+                comparisonReasons: [],
+                scheduledObservationTo: "2026-09-30T00:00:00Z",
+                rollbackStatus: null,
+              }),
+            }),
+          }),
+    );
+    vi.stubGlobal("fetch", mockFetch);
     const recs = ["first", "second"].map((name) => ({
       ...makeCopyRec(),
       rec_id: `rec-${name}`,
       file_ref: `C:/synthetic/${name}/CLAUDE.md`,
+      effect_capability: { mode: "TRACKABLE" as const, reason: null },
     }));
-    const view = render(<RecCard group={makeGroup({ recs })} rank={1} onAdopt={onAdopt} />);
+    const view = render(<RecCard group={makeGroup({ recs })} rank={1} />);
     // The representative preview must grant no member evidence.
     fireEvent.click(view.getByRole("button", { name: "Copy prompt" }));
     await act(async () => {
@@ -806,12 +1230,17 @@ describe("RecCard — RV4 primary-action routing", () => {
     fireEvent.click(second.getByRole("button", { name: "I completed the change" }));
     expect(second.getByText(/Tracking records a baseline/)).toBeDefined();
     fireEvent.click(second.getByRole("button", { name: "Track this change" }));
-    expect(onAdopt).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
     await act(async () => {
       vi.advanceTimersByTime(5_000);
     });
-    expect(onAdopt).toHaveBeenCalledTimes(1);
-    expect(onAdopt).toHaveBeenCalledWith("rec-second");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/esf/effects/track",
+      expect.objectContaining({ body: expect.stringContaining('"rec_id":"rec-second"') }),
+    );
     expect(first.queryByRole("button", { name: "I completed the change" })).toBeNull();
     expect(first.queryByRole("button", { name: "Track this change" })).toBeNull();
     expect(first.getByRole("button", { name: "Copy prompt" })).toBeDefined();

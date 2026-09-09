@@ -22,6 +22,7 @@
  */
 
 import type { Db } from "../db/open.js";
+import { ESF_EFFECT_WRITER_ENABLED } from "../effects/gate.js";
 import { PREMIUM_MODEL_SQL } from "../ingest/pricing.js";
 import { GLOBAL_WORKSPACE_ID } from "./context-probe.js";
 import { isD1SourceBackedRecommendation, parseD1SourceIdentity } from "./d1-source-identity.js";
@@ -208,6 +209,7 @@ function handlerFor(rec: MeasurementRecRow): "D1" | "D2" | "D4" | "D8" | null {
 /** Warning-class recs (D5 / LIMIT / explicit NONE) skip the lifecycle entirely (design §2d). */
 export function isWarningClass(rec: MeasurementRecRow): boolean {
   return (
+    rec.detector_id === "D5" ||
     rec.category === "LIMIT" ||
     rec.target_metric === "NONE" ||
     rec.target_metric === "forecast_margin"
@@ -531,6 +533,8 @@ export function runMeasurementPass(
   opts?: RunMeasurementOptions,
 ): MeasurementPassResult {
   const result: MeasurementPassResult = { to_measuring: 0, verdicts: 0, skipped: 0 };
+  // The versioned writer leaves every historical W4 row unchanged, including open rows.
+  if (ESF_EFFECT_WRITER_ENABLED) return result;
 
   if (!tableExists(db, "context_inventory_history")) {
     console.warn("W4: context_inventory_history not available; measurement pass skipped");
@@ -551,12 +555,17 @@ export function runMeasurementPass(
   }
 
   try {
+    // A code-gate rollback must not let W4 take over an already-versioned recommendation.
+    const versionedExclusion = tableExists(db, "effect_cycles")
+      ? "AND NOT EXISTS (SELECT 1 FROM effect_cycles c WHERE c.rec_id=recommendations.rec_id)"
+      : "";
     const rows = db
       .prepare(
         `SELECT rec_id, detector_id, category, scope_workspace_id, evidence_json,
                 target_metric, state, adopted_at
            FROM recommendations
           WHERE state IN ('ADOPTED', 'MEASURING') AND adopted_at IS NOT NULL
+          ${versionedExclusion}
           ORDER BY adopted_at ASC, rec_id ASC`,
       )
       .all() as Array<MeasurementRecRow & { state: string; adopted_at: string }>;

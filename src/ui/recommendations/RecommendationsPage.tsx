@@ -247,7 +247,6 @@ export default function RecommendationsPage() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an intentional re-fetch trigger
   useEffect(() => {
     let cancelled = false;
-    setState({ status: "loading" });
     fetchRecommendations()
       .then((v) => {
         if (!cancelled) setState({ status: "ok", value: v });
@@ -374,6 +373,7 @@ export default function RecommendationsPage() {
                       onDismissFocus={clearFocus}
                       onDismiss={handleDismiss}
                       onAdopt={handleAdopt}
+                      onEffectMutated={refresh}
                     />
                   </div>
                 ))}
@@ -584,6 +584,7 @@ export default function RecommendationsPage() {
                           onDismissFocus={clearFocus}
                           onDismiss={handleDismiss}
                           onAdopt={handleAdopt}
+                          onEffectMutated={refresh}
                         />
                       )}
                       {remainingGroups.length > 0 && (
@@ -601,6 +602,7 @@ export default function RecommendationsPage() {
                               onDismissFocus={clearFocus}
                               onDismiss={handleDismiss}
                               onAdopt={handleAdopt}
+                              onEffectMutated={refresh}
                             />
                           ))}
                         </details>
@@ -649,15 +651,22 @@ export default function RecommendationsPage() {
                 <ul className="rec-adopted-list">
                   {visibleAdopted.map((rec) => (
                     <li key={rec.rec_id} className="rec-adopted-row">
-                      <span className="rec-badge" title={rec.detector_id}>
-                        {DETECTOR_GROUP_LABELS[rec.detector_id] ?? rec.detector_id}
-                      </span>{" "}
-                      {rec.lever} <span className="kpi-off-hint">· {rec.state}</span>
+                      {rec.effect_cycle != null ? (
+                        <RecCard rec={rec} onEffectMutated={refresh} />
+                      ) : (
+                        <>
+                          <span className="rec-badge" title={rec.detector_id}>
+                            {DETECTOR_GROUP_LABELS[rec.detector_id] ?? rec.detector_id}
+                          </span>{" "}
+                          {rec.lever} <span className="kpi-off-hint">· {rec.state}</span>
+                        </>
+                      )}
                     </li>
                   ))}
                 </ul>
               )}
               <ImpactLedger
+                key={refreshKey}
                 {...(hasFilters ? { visibleRecIds: visibleAdopted.map((rec) => rec.rec_id) } : {})}
               />
             </div>
