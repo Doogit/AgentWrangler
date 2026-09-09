@@ -28,13 +28,35 @@ afterEach(() => {
 });
 
 describe("synthetic benchmark fixture", () => {
+  it.each([1, 200, 999])("preserves small-scale seeding at %i turns", (turns) => {
+    const db = createSyntheticDb();
+    seedSyntheticHistory(db, turns);
+    expect(count(db, "SELECT COUNT(*) AS count FROM turns")).toBe(turns);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
   it.each([1_000, 10_000, 100_000])("seeds every population at %i turns", (turns) => {
     const db = createSyntheticDb();
     seedSyntheticHistory(db, turns);
 
     expect(count(db, "SELECT COUNT(*) AS count FROM workspaces")).toBeGreaterThan(0);
     expect(count(db, "SELECT COUNT(*) AS count FROM sessions")).toBeGreaterThan(0);
-    expect(count(db, "SELECT COUNT(*) AS count FROM turns")).toBeGreaterThan(0);
+    expect(count(db, "SELECT COUNT(*) AS count FROM turns")).toBe(turns);
+    expect(
+      count(
+        db,
+        `SELECT COUNT(*) AS count FROM sessions s WHERE s.cost_equiv_u !=
+      COALESCE((SELECT SUM(t.cost_equiv_u) FROM turns t WHERE t.session_id = s.session_id), 0)`,
+      ),
+    ).toBe(0);
+    expect(
+      count(
+        db,
+        `SELECT COUNT(*) AS count FROM session_work_links l
+      JOIN sessions s USING(session_id) JOIN work_items w USING(work_item_id)
+      WHERE s.workspace_id != w.workspace_id`,
+      ),
+    ).toBe(0);
     expect(
       count(
         db,

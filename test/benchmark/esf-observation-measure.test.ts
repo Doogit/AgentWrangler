@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { summarizeEsfMeasurement } from "../../scripts/benchmark/esf-observation-measure.js";
+import {
+  esfMeasurementAvailability,
+  summarizeEsfMeasurement,
+} from "../../scripts/benchmark/esf-observation-measure.js";
 
 describe("summarizeEsfMeasurement", () => {
   it("groups hand-written CPU, RSS, and elapsed samples by scale", () => {
@@ -50,6 +53,15 @@ describe("summarizeEsfMeasurement", () => {
           rss_bytes: { min: 2_000, p50: 2_000, p95: 2_000, max: 2_000, mean: 2_000 },
         },
       },
+    });
+  });
+});
+
+describe("ESF measurement availability", () => {
+  it("reports the absent query without emitting a passing measurement", () => {
+    expect(esfMeasurementAvailability()).toEqual({
+      available: false,
+      reason: expect.stringContaining("not implemented"),
     });
   });
 });

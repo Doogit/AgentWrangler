@@ -35,6 +35,8 @@ const CONCURRENT_READS = 2;
 const WINDOW_FROM = SYNTHETIC_WINDOW_FROM;
 const WINDOW_TO = SYNTHETIC_WINDOW_TO;
 const encodedWindow = `from=${encodeURIComponent(WINDOW_FROM)}&to=${encodeURIComponent(WINDOW_TO)}`;
+const MOVING_WINDOW_DAYS = 7;
+const MOVING_WINDOW_STEPS = 7;
 
 type ChildEvent = Record<string, unknown> & { event: string };
 type Pending = {
@@ -72,7 +74,7 @@ export type RoutePhase =
   | "cold_process"
   | "cold_query"
   | "warm_explicit_window"
-  | "moving_preset";
+  | "moving_window";
 
 export interface PhaseSummary {
   count: number;
@@ -151,7 +153,7 @@ export function summarizeRoutePhases(
     cold_process: summarize("cold_process"),
     cold_query: summarize("cold_query"),
     warm_explicit_window: summarize("warm_explicit_window"),
-    moving_preset: summarize("moving_preset"),
+    moving_window: summarize("moving_window"),
   };
 }
 
@@ -417,11 +419,22 @@ const routes = (workspaceId: string, sessionId: string): Array<{ name: string; p
   { name: "session_drivers", path: `/api/sessions/${sessionId}/drivers` },
 ];
 
-function movingPresetPath(routePath: string, preset: "24h" | "7d" | "30d"): string {
+/**
+ * Advance a fixed-width window through the fixture's known time range.
+ *
+ * This deliberately uses the daemon's supported explicit `from`/`to` API:
+ * real-time presets resolve against the host clock, so they cannot represent
+ * this fixed historical fixture once wall-clock time has moved past it.
+ */
+export function movingWindowPath(routePath: string, step = 0): string {
   const url = new URL(routePath, "http://127.0.0.1");
-  url.searchParams.delete("from");
-  url.searchParams.delete("to");
-  url.searchParams.set("preset", preset);
+  const start = new Date(
+    Date.parse(SYNTHETIC_WINDOW_FROM) + (step % MOVING_WINDOW_STEPS) * 24 * 60 * 60 * 1_000,
+  );
+  const end = new Date(start.getTime() + MOVING_WINDOW_DAYS * 24 * 60 * 60 * 1_000);
+  url.searchParams.delete("preset");
+  url.searchParams.set("from", start.toISOString());
+  url.searchParams.set("to", end.toISOString());
   return `${url.pathname}${url.search}`;
 }
 
@@ -450,7 +463,7 @@ function summarizeRouteMetric(
     cold_process: summarize(phases.cold_process),
     cold_query: summarize(phases.cold_query),
     warm_explicit_window: summarize(phases.warm_explicit_window),
-    moving_preset: summarize(phases.moving_preset),
+    moving_window: summarize(phases.moving_window),
   };
 }
 
@@ -568,19 +581,17 @@ async function profile(scale: number): Promise<Record<string, unknown>> {
         requireRouteSuccess(route.name, sample, scale);
         warmExplicit.push(sample);
       }
-      const movingPreset: RouteSample[] = [];
-      const presets: Array<"24h" | "7d" | "30d"> = ["24h", "7d", "30d"];
+      const movingWindow: RouteSample[] = [];
       for (let index = 0; index < WARM_SAMPLES; index += 1) {
-        const preset = presets[index % presets.length] ?? "7d";
-        const sample = await sampleRouteRequest(child.port, movingPresetPath(route.path, preset));
+        const sample = await sampleRouteRequest(child.port, movingWindowPath(route.path, index));
         requireHttpSuccess(route.name, sample);
-        movingPreset.push(sample);
+        movingWindow.push(sample);
       }
       const phaseSamples: Record<RoutePhase, readonly RouteSample[]> = {
         cold_process: [coldProcess.request],
         cold_query: [coldQuery],
         warm_explicit_window: warmExplicit,
-        moving_preset: movingPreset,
+        moving_window: movingWindow,
       };
       routeResults.push({
         name: route.name,
@@ -597,9 +608,9 @@ async function profile(scale: number): Promise<Record<string, unknown>> {
             elapsed_ms: phaseSamples.warm_explicit_window.map((sample) => sample.elapsedMs),
             response_bytes: phaseSamples.warm_explicit_window.map((sample) => sample.responseBytes),
           },
-          moving_preset: {
-            elapsed_ms: phaseSamples.moving_preset.map((sample) => sample.elapsedMs),
-            response_bytes: phaseSamples.moving_preset.map((sample) => sample.responseBytes),
+          moving_window: {
+            elapsed_ms: phaseSamples.moving_window.map((sample) => sample.elapsedMs),
+            response_bytes: phaseSamples.moving_window.map((sample) => sample.responseBytes),
           },
         }),
         response_bytes: summarizeRouteMetric(phaseSamples, (sample) => sample.responseBytes, "bytes"),
@@ -695,7 +706,9 @@ async function main(): Promise<void> {
         synthetic_only: true,
         cold_definition:
           "cold_process is a first route request after a dedicated fresh child boot; cold_query is the first request in the shared child",
-        warm_definition: `${WARM_SAMPLES} sequential explicit-window and moving-preset requests per route; p50/p95 use nearest-rank`,
+        warm_definition: `${WARM_SAMPLES} sequential full-fixture explicit-window and fixture-anchored advancing ${MOVING_WINDOW_DAYS}-day explicit-window requests per route; p50/p95 use nearest-rank`,
+        moving_window_limitation:
+          "This benchmark does not measure real-time preset resolution: presets resolve against the host clock while the fixture is fixed historical data. Some routes do not accept window filters, so their moving-window samples measure the unchanged route contract.",
         measurement_vantage:
           "Route timings and bytes are controller-observed HTTP metrics. Safe-job CPU/RSS and idle delay are child-reported. Concurrent-read event-loop delay is controller-observed.",
         idle_definition: `${IDLE_MS}ms after safe jobs complete; no production interval timers are started`,

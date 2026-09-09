@@ -15,7 +15,11 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runMigrations } from "../../src/db/migrate.js";
 import { openDb } from "../../src/db/open.js";
-import { seedSyntheticHistory } from "./synthetic-fixture.js";
+import {
+  seedSyntheticHistory,
+  SYNTHETIC_WINDOW_FROM,
+  SYNTHETIC_WINDOW_TO,
+} from "./synthetic-fixture.js";
 
 const STARTUP_TIMEOUT_MS = 15_000;
 const PAGE_TIMEOUT_MS = 30_000;
@@ -40,6 +44,7 @@ type PerformanceEntry = { duration?: number; transferSize?: number; initiatorTyp
 
 export type BrowserSample = {
   navigation?: PerformanceNavigation;
+  overviewReadyMs?: number;
   requests?: CdpRequest[];
   retainedCacheEntries?: PerformanceEntry[];
 };
@@ -48,19 +53,21 @@ export type BrowserMeasureRaw = {
   cold: BrowserSample;
   warm: BrowserSample;
   longTasks?: Array<{ duration?: number }>;
-  commits?: Array<{ duration?: number }>;
+  layoutDurations?: Array<{ duration?: number }>;
 };
 
 export type BrowserMeasureSummary = {
   cold_navigation_ms: number;
   warm_navigation_ms: number;
+  cold_overview_ready_ms: number;
+  warm_overview_ready_ms: number;
   cold_request_count: number;
   warm_request_count: number;
   retained_cache_entries: number;
   long_task_count: number;
   long_task_total_ms: number;
   long_task_max_ms: number;
-  commit_duration_ms: number;
+  layout_duration_ms: number;
 };
 
 function finite(value: number | undefined): number {
@@ -90,7 +97,7 @@ export function summarizeBrowserSamples(raw: BrowserMeasureRaw): BrowserMeasureS
   const taskDurations = longTasks
     .map((entry) => finite(entry.duration))
     .filter((value) => value > 0);
-  const commits = raw.commits ?? [];
+  const layoutDurations = raw.layoutDurations ?? [];
   const retained = raw.warm.retainedCacheEntries ?? [];
   const cachedRequests = (raw.warm.requests ?? []).filter(isCached).length;
   const retainedResources = retained.filter(
@@ -102,6 +109,8 @@ export function summarizeBrowserSamples(raw: BrowserMeasureRaw): BrowserMeasureS
   return {
     cold_navigation_ms: navigationMs(raw.cold.navigation),
     warm_navigation_ms: navigationMs(raw.warm.navigation),
+    cold_overview_ready_ms: finite(raw.cold.overviewReadyMs),
+    warm_overview_ready_ms: finite(raw.warm.overviewReadyMs),
     cold_request_count: raw.cold.requests?.length ?? 0,
     warm_request_count: raw.warm.requests?.length ?? 0,
     // CDP identifies cache hits and Resource Timing catches entries retained without a response event.
@@ -109,8 +118,8 @@ export function summarizeBrowserSamples(raw: BrowserMeasureRaw): BrowserMeasureS
     long_task_count: taskDurations.length,
     long_task_total_ms: taskDurations.reduce((sum, duration) => sum + duration, 0),
     long_task_max_ms: Math.max(0, ...taskDurations),
-    // LayoutDuration is Chrome's aggregate renderer layout/commit time, in milliseconds here.
-    commit_duration_ms: commits.reduce((sum, entry) => sum + finite(entry.duration), 0),
+    // Chrome LayoutDuration is aggregate renderer layout time, not React commit duration.
+    layout_duration_ms: layoutDurations.reduce((sum, entry) => sum + finite(entry.duration), 0),
   };
 }
 
@@ -210,6 +219,21 @@ function contentType(file: string): string {
   return "text/html; charset=utf-8";
 }
 
+/**
+ * The synthetic fixture is historical, while the production Overview defaults
+ * to a real-clock 7-day preset. Keep the production UI unchanged and rewrite
+ * only fixture-backed preset requests to its fixed, populated window.
+ */
+export function syntheticBenchmarkApiPath(requestUrl: string): string {
+  const url = new URL(requestUrl, "http://127.0.0.1");
+  if (url.pathname.startsWith("/api/") && url.searchParams.has("preset")) {
+    url.searchParams.delete("preset");
+    url.searchParams.set("from", SYNTHETIC_WINDOW_FROM);
+    url.searchParams.set("to", SYNTHETIC_WINDOW_TO);
+  }
+  return `${url.pathname}${url.search}`;
+}
+
 async function startSyntheticUi(
   childPort: number,
 ): Promise<{ url: string; close(): Promise<void> }> {
@@ -225,7 +249,7 @@ async function startSyntheticUi(
         {
           hostname: "127.0.0.1",
           port: childPort,
-          path: requestUrl,
+          path: syntheticBenchmarkApiPath(requestUrl),
           method: request.method,
           headers: request.headers,
         },
@@ -415,6 +439,23 @@ class CdpClient {
   }
 }
 
+type CdpRuntimeEvaluation<T> = {
+  result?: { value?: T };
+  exceptionDetails?: { text?: string; exception?: { description?: string } };
+};
+
+function requireRuntimeValue<T>(evaluation: CdpRuntimeEvaluation<T>, label: string): T {
+  const exception = evaluation.exceptionDetails;
+  if (exception) {
+    throw new Error(
+      `${label} failed in the page: ${exception.exception?.description ?? exception.text ?? "unknown exception"}`,
+    );
+  }
+  if (evaluation.result?.value === undefined)
+    throw new Error(`${label} did not return a value`);
+  return evaluation.result.value;
+}
+
 async function connect(wsUrl: string): Promise<{ client: CdpClient; close(): void }> {
   const socket = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
@@ -446,7 +487,13 @@ async function browserSample(
   client: CdpClient,
   sessionId: string,
   url: string,
-): Promise<BrowserSample & { commit: number; longTasks: Array<{ duration?: number }> }> {
+): Promise<
+  BrowserSample & {
+    layoutDuration: number;
+    longTasks: Array<{ duration?: number }>;
+    overviewReadyMs: number;
+  }
+> {
   const beforeMetrics = await client.call<{ metrics: Array<{ name: string; value: number }> }>(
     "Performance.getMetrics",
     {},
@@ -480,19 +527,29 @@ async function browserSample(
     const load = client.once("Page.loadEventFired", PAGE_TIMEOUT_MS);
     await client.call("Page.navigate", { url }, sessionId);
     await load;
-    const performance = await client.call<{
-      result: {
-        value: {
-          navigation?: PerformanceNavigation[];
-          resources?: PerformanceEntry[];
-          longTasks?: Array<{ duration?: number }>;
-        };
-      };
-    }>(
+    const readiness = await client.call<CdpRuntimeEvaluation<number>>(
       "Runtime.evaluate",
       {
         expression:
-          "(() => ({ navigation: performance.getEntriesByType('navigation'), resources: performance.getEntriesByType('resource').map(({ duration, transferSize, initiatorType }) => ({ duration, transferSize, initiatorType })), longTasks: window.__awBrowserMeasure?.longTasks ?? [] }))()",
+          "new Promise((resolve, reject) => { const deadline = performance.now() + 30000; const check = () => { const overview = document.querySelector('[data-testid=\"rv7-tile-row\"]'); const overviewLoaded = performance.getEntriesByType('resource').some((entry) => entry.name.includes('/api/overview')); const busy = document.querySelector('[aria-busy=\"true\"]'); if (overview && overviewLoaded && !busy) { requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))); return; } if (performance.now() >= deadline) { reject(new Error('Overview did not finish rendering after its API query')); return; } setTimeout(check, 25); }; check(); })",
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      sessionId,
+    );
+    const performance = await client.call<
+      CdpRuntimeEvaluation<{
+        navigation?: PerformanceNavigation[];
+        resources?: PerformanceEntry[];
+        longTasks?: Array<{ duration?: number }>;
+      }>
+    >(
+      "Runtime.evaluate",
+      {
+        // loadEventEnd stays 0 until the load handler finishes, so poll before sampling.
+        expression:
+          "new Promise((resolve) => { let tries = 0; const check = () => { const nav = performance.getEntriesByType('navigation')[0]; if ((nav && nav.loadEventEnd > 0) || tries >= 100) resolve({ navigation: performance.getEntriesByType('navigation').map(({ duration, startTime, loadEventEnd }) => ({ duration, startTime, loadEventEnd })), resources: performance.getEntriesByType('resource').map(({ duration, transferSize, initiatorType }) => ({ duration, transferSize, initiatorType })), longTasks: window.__awBrowserMeasure?.longTasks ?? [] }); else { tries += 1; setTimeout(check, 10); } }; check(); })",
+        awaitPromise: true,
         returnByValue: true,
       },
       sessionId,
@@ -504,13 +561,14 @@ async function browserSample(
     );
     const afterLayoutSeconds =
       metrics.metrics.find((metric) => metric.name === "LayoutDuration")?.value ?? 0;
-    const value = performance.result.value;
+    const value = requireRuntimeValue(performance, "Browser performance sample");
     return {
       navigation: value.navigation?.[0] ?? {},
       requests,
       retainedCacheEntries: value.resources ?? [],
       longTasks: value.longTasks ?? [],
-      commit: Math.max(0, afterLayoutSeconds - beforeLayoutSeconds) * 1_000,
+      layoutDuration: Math.max(0, afterLayoutSeconds - beforeLayoutSeconds) * 1_000,
+      overviewReadyMs: requireRuntimeValue(readiness, "Overview readiness"),
     };
   } finally {
     removeRequest();
@@ -561,11 +619,16 @@ async function main(): Promise<void> {
           {
             synthetic_only: true,
             production_assets: true,
+            synthetic_window: { from: SYNTHETIC_WINDOW_FROM, to: SYNTHETIC_WINDOW_TO },
+            preset_requests_rewritten_to_synthetic_window: true,
             ...summarizeBrowserSamples({
               cold,
               warm,
               longTasks: [...cold.longTasks, ...warm.longTasks],
-              commits: [{ duration: cold.commit }, { duration: warm.commit }],
+              layoutDurations: [
+                { duration: cold.layoutDuration },
+                { duration: warm.layoutDuration },
+              ],
             }),
           },
           null,

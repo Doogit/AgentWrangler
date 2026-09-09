@@ -170,29 +170,37 @@ export function seedSyntheticHistory(db: Db, turns: number): void {
       }
     }
 
-    const insertWorkItem = db.prepare(
-      `INSERT INTO work_items (work_item_id, workspace_id, number, state, final_commit,
-        checks_conclusion, opened_at, merged_at, closed_at, synced_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    );
-    insertWorkItem.run(
-      "synthetic-work-item-0", "synthetic-ws-0", 1, "MERGED", "synthetic-commit-4", "SUCCESS",
-      "2026-01-02T00:00:00.000Z", "2026-01-10T00:00:00.000Z", null, SYNTHETIC_WINDOW_TO,
-    );
-    db.prepare(
-      "INSERT INTO session_work_links (session_id, work_item_id, confidence, method) VALUES (?,?,?,?)",
-    ).run("synthetic-session-4", "synthetic-work-item-0", 0.9, "MANUAL");
-    db.prepare(
-      "INSERT INTO observed_outcomes (work_item_id, outcome, derived_at, methodology_version) VALUES (?,?,?,?)",
-    ).run("synthetic-work-item-0", "OBSERVED_SUCCESS", SYNTHETIC_WINDOW_TO, "synthetic-outcomes-v1");
-    db.prepare(
-      `INSERT INTO review_findings (finding_id, work_item_id, source, severity, status, evidence_ref,
-        confidence, human_state, raised_at, cleared_at, cleared_by, extractor_version)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    ).run(
-      "synthetic-finding-0", "synthetic-work-item-0", "DIFF_MARKER", "LOW", "ADDRESSED",
-      "synthetic-evidence-ref", 1, null, "2026-01-03T00:00:00.000Z", "2026-01-09T00:00:00.000Z",
-      "synthetic-commit-4", "synthetic-findings-v1",
-    );
+    // Keep cached session totals consistent with window-query accounting.
+    db.prepare(`UPDATE sessions SET cost_equiv_u = COALESCE(
+      (SELECT SUM(cost_equiv_u) FROM turns WHERE turns.session_id = sessions.session_id), 0
+    )`).run();
+
+    const linkedSession = seeds.find((seed) => seed.index === 4 && seed.turns > 0);
+    if (linkedSession) {
+      const insertWorkItem = db.prepare(
+        `INSERT INTO work_items (work_item_id, workspace_id, number, state, final_commit,
+          checks_conclusion, opened_at, merged_at, closed_at, synced_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      );
+      insertWorkItem.run(
+        "synthetic-work-item-0", `synthetic-ws-${linkedSession.workspace}`, 1, "MERGED", "synthetic-commit-4", "SUCCESS",
+        "2026-01-02T00:00:00.000Z", "2026-01-10T00:00:00.000Z", null, SYNTHETIC_WINDOW_TO,
+      );
+      db.prepare(
+        "INSERT INTO session_work_links (session_id, work_item_id, confidence, method) VALUES (?,?,?,?)",
+      ).run("synthetic-session-4", "synthetic-work-item-0", 0.9, "MANUAL");
+      db.prepare(
+        "INSERT INTO observed_outcomes (work_item_id, outcome, derived_at, methodology_version) VALUES (?,?,?,?)",
+      ).run("synthetic-work-item-0", "OBSERVED_SUCCESS", SYNTHETIC_WINDOW_TO, "synthetic-outcomes-v1");
+      db.prepare(
+        `INSERT INTO review_findings (finding_id, work_item_id, source, severity, status, evidence_ref,
+          confidence, human_state, raised_at, cleared_at, cleared_by, extractor_version)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).run(
+        "synthetic-finding-0", "synthetic-work-item-0", "DIFF_MARKER", "LOW", "ADDRESSED",
+        "synthetic-evidence-ref", 1, null, "2026-01-03T00:00:00.000Z", "2026-01-09T00:00:00.000Z",
+        "synthetic-commit-4", "synthetic-findings-v1",
+      );
+    }
 
     const insertInventory = db.prepare(
       `INSERT INTO context_inventory (probe_id, workspace_id, probed_at, component, file_ref, file_hash, tokens, attribution_version)

@@ -2,7 +2,8 @@
 
 ## Status and measurement contract
 
-This is the acceptance-budget freeze point for the performance work. A value is
+This is preparatory benchmark tooling for the acceptance-budget freeze. PERF0 is
+not complete and no performance budget is frozen in this checkout. A value is
 accepted only after it has been filled from **at least three repeated runs**,
 with **30 samples per measured distribution**. Until then, every `TBD` below is
 an intentionally unfilled acceptance threshold, not permission to infer one
@@ -92,7 +93,7 @@ timestamp is an explicit-window cache hit.
 | Browser cold and warm navigation | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 / **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
 | Browser request count / retained cache entries | <= **TBD — fill from >=3 repeated 30-sample runs** requests/navigation / **TBD — fill from >=3 repeated 30-sample runs** entries |
 | Long tasks | <= **TBD — fill from >=3 repeated 30-sample runs** tasks/navigation and **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
-| React commit duration | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
+| Browser layout duration (React commit profiling unavailable) | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 |
 | Concurrent-read event-loop delay / RSS | <= **TBD — fill from >=3 repeated 30-sample runs** ms p95 / **TBD — fill from >=3 repeated 30-sample runs** MiB p95 |
 
 ## Reproducible measurement commands
@@ -106,12 +107,39 @@ node --import tsx/esm scripts/benchmark/browser-measure.ts
 node --import tsx/esm scripts/benchmark/esf-observation-measure.ts
 ```
 
-- `synthetic-history.ts` is the daemon/HTTP harness: phase-tagged route service
-  time, HTTP p50/p95, query count, response bytes, startup-to-ready, ingest
-  catch-up, CPU/RSS, and event-loop delay.
-- `browser-measure.ts` measures production-asset cold/warm navigation, request
-  counts, retained cache entries, long tasks, and commit duration.
-- `esf-observation-measure.ts` measures `getEsfObservations` CPU/RSS at scale.
+- Build production assets with `npm run build:ui` before the browser command.
+- `synthetic-history.ts` emits controller-observed HTTP timing/bytes, startup
+  wall time, controller CPU/RSS/event-loop samples, child safe-job CPU/RSS,
+  child idle delay, and seed insertion throughput. It does **not** measure
+  route service time, SQLite query count/plans, or real ingest catch-up.
+- Its moving-window samples use advancing explicit windows anchored to the
+  populated fixture. They do not validate the UI's live preset/cache behavior.
+- `browser-measure.ts` measures a 1k-turn Overview navigation with production
+  assets and rewrites preset API requests to the fixed fixture window. This
+  does not validate real-clock preset resolution. Browser layout time is not React commit duration; resource cache
+  hits are not the application's retained query-cache cardinality.
+- `esf-observation-measure.ts` reports `available: false`: this branch contains
+  no `getEsfObservations` implementation. No CPU/RSS measurement is claimed.
+- Cold route samples and browser cold/warm navigation have one observation
+  per invocation. Only the HTTP warm/moving distributions contain 30 samples.
+  Repetition and the missing coverage below are required before any freeze.
+
+## Deferred coverage and completion conditions
+
+The review found that the original coverage description exceeded the executable
+harness. These items remain in this governing baseline plan; none are passing
+performance evidence:
+
+1. Integrate the real ESF observations query and its verified accounting-source
+   watermark, then add scale measurements and executable integration coverage.
+2. Instrument child route service time and SQLite query counts/plans. Exercise
+   real populated ingest catch-up and concurrent HTTP interference; seed insert
+   throughput and parent event-loop delay cannot substitute for those metrics.
+3. Measure application query-cache retention and React commits, extend browser
+   scenarios to the required scales/routes, and verify live moving-preset cache
+   behavior. CDP layout time/resource cache hits cover different quantities.
+4. Collect at least three matched runs of 30 observations for every required
+   distribution, record metadata/spread, and replace TBD thresholds only then.
 
 ## Frozen before/after protocol
 
@@ -130,7 +158,7 @@ change.
    samples.
 4. Compare p50/p95, spread, query count/plan, response bytes, CPU/RSS,
    event-loop delay, ingest throughput, browser requests/cache retention/long
-   tasks/commit duration against the matching frozen phase budget. Include
+   tasks/layout duration against the matching frozen phase budget. Include
    concurrent one-tab burst and repeated two-tab reads when daemon work is
    touched.
 5. Report the before/after distributions and parity evidence. A claim requires
@@ -144,7 +172,7 @@ change.
 |---|---|---|
 | PERF1 | Hot Sessions selected-window ranking and enrichment, including per-returned-row percentile work | `cold-query` and `warm-explicit-window` route service/HTTP time, query count/plan, response bytes, and `getEsfObservations` CPU/RSS where the shared query path applies |
 | PERF2 | Flavor/cache-write aggregation, cold Overview/trend scans, and explicit-window versus rolling-preset cache behavior | `cold-query`, `warm-explicit-window`, and `moving-preset` service/HTTP time, query count/plan, response bytes, cache state, and freshness-effective-window evidence |
-| PERF3 | Document-local cache cardinality/payload retention, duplicate eligible requests, and browser rendering work | `warm-explicit-window` and `moving-preset` browser navigation, request count, retained cache entries, long tasks, commit duration, and retained-memory budgets |
+| PERF3 | Document-local cache cardinality/payload retention, duplicate eligible requests, and browser rendering work | `warm-explicit-window` and `moving-preset` browser navigation, request count, retained cache entries, long tasks, layout duration, and retained-memory budgets |
 | PERF4 | Ingest tail/legacy-prefix catch-up, bounded batch CPU/RSS, and HTTP responsiveness while populated ingest work runs | `cold-process` startup/catch-up throughput and CPU/RSS; `moving-preset` concurrent-read HTTP/service time and event-loop-delay budgets |
 | PERF5 | Each recurring job's own elapsed time, CPU/RSS, event-loop delay, and concurrent-read interference | `cold-process` readiness/catch-up and `moving-preset` concurrent-read budgets, plus **per-job attribution** for boot/initial scan, 2s tail, 30s discovery, reconciliation, post-ingest detectors, probes, reports, effect evaluation, outcomes, calibration, and weekly callbacks |
 
