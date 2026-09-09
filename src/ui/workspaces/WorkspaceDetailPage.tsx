@@ -28,6 +28,7 @@ import {
   fetchWorkspaceSessions,
   fetchWorkspaces,
 } from "../api/client";
+import { ObservationEvidence } from "../esf/ObservationEvidence";
 import { workspaceLabel } from "../lib/workspace-label";
 import Chip from "../shell/Chip";
 import EmptyState from "../shell/EmptyState";
@@ -44,6 +45,8 @@ type LoadState<T> =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ok"; value: ApiResponse<T> };
+
+type Preset = "24h" | "7d" | "30d";
 
 interface Props {
   workspaceId: string;
@@ -96,6 +99,7 @@ function fmtDate(iso: string | null): string {
 // ---------------------------------------------------------------------------
 
 export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
+  const [preset, setPreset] = useState<Preset>("7d");
   const [wsListState, setWsListState] = useState<LoadState<PagedList<WorkspaceSummary>>>({
     status: "loading",
   });
@@ -116,30 +120,70 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
   });
 
   useEffect(() => {
-    fetchWorkspaces({ preset: "7d" })
-      .then((v) => setWsListState({ status: "ok", value: v }))
-      .catch((e: unknown) => setWsListState({ status: "error", message: String(e) }));
+    let active = true;
+    setWsListState({ status: "loading" });
+    setSessionsState({ status: "loading" });
+    setContextState({ status: "loading" });
+    setOutcomeState({ status: "loading" });
+    setClosureProxyState({ status: "loading" });
+    setCostPerSuccessState({ status: "loading" });
+    fetchWorkspaces({ preset })
+      .then((v) => {
+        if (!active) return;
+        setWsListState({ status: "ok", value: v });
+        const selectedWindow = { from: v.meta.window.from, to: v.meta.window.to };
+        fetchWorkspaceSessions(workspaceId, selectedWindow)
+          .then((v) => {
+            if (active) setSessionsState({ status: "ok", value: v });
+          })
+          .catch((e: unknown) => {
+            if (active) setSessionsState({ status: "error", message: String(e) });
+          });
 
-    fetchWorkspaceSessions(workspaceId, { preset: "7d" })
-      .then((v) => setSessionsState({ status: "ok", value: v }))
-      .catch((e: unknown) => setSessionsState({ status: "error", message: String(e) }));
+        fetchCostPerSuccess(selectedWindow, workspaceId)
+          .then((v) => {
+            if (active) setCostPerSuccessState({ status: "ok", value: v });
+          })
+          .catch((e: unknown) => {
+            if (active) setCostPerSuccessState({ status: "error", message: String(e) });
+          });
+      })
+      .catch((e: unknown) => {
+        if (active) {
+          setWsListState({ status: "error", message: String(e) });
+          setSessionsState({ status: "error", message: "Selected cohort unavailable" });
+          setCostPerSuccessState({ status: "error", message: "Selected cohort unavailable" });
+        }
+      });
 
     fetchContextComposition(workspaceId)
-      .then((v) => setContextState({ status: "ok", value: v }))
-      .catch((e: unknown) => setContextState({ status: "error", message: String(e) }));
+      .then((v) => {
+        if (active) setContextState({ status: "ok", value: v });
+      })
+      .catch((e: unknown) => {
+        if (active) setContextState({ status: "error", message: String(e) });
+      });
 
     fetchWorkspaceOutcomes()
-      .then((v) => setOutcomeState({ status: "ok", value: v }))
-      .catch((e: unknown) => setOutcomeState({ status: "error", message: String(e) }));
+      .then((v) => {
+        if (active) setOutcomeState({ status: "ok", value: v });
+      })
+      .catch((e: unknown) => {
+        if (active) setOutcomeState({ status: "error", message: String(e) });
+      });
 
     fetchClosureProxy(workspaceId)
-      .then((v) => setClosureProxyState({ status: "ok", value: v }))
-      .catch((e: unknown) => setClosureProxyState({ status: "error", message: String(e) }));
+      .then((v) => {
+        if (active) setClosureProxyState({ status: "ok", value: v });
+      })
+      .catch((e: unknown) => {
+        if (active) setClosureProxyState({ status: "error", message: String(e) });
+      });
 
-    fetchCostPerSuccess({ preset: "7d" }, workspaceId)
-      .then((v) => setCostPerSuccessState({ status: "ok", value: v }))
-      .catch((e: unknown) => setCostPerSuccessState({ status: "error", message: String(e) }));
-  }, [workspaceId]);
+    return () => {
+      active = false;
+    };
+  }, [workspaceId, preset]);
 
   const wsList =
     wsListState.status === "ok" ? ((wsListState.value.data?.items as WorkspaceRow[]) ?? []) : [];
@@ -185,9 +229,22 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
             ← Back
           </button>
           <h1 style={{ display: "inline" }}>{label}</h1>
-          <p className="page-sub">Workspace detail · last 7 days</p>
+          <p className="page-sub">Workspace detail · selected {preset} window</p>
         </div>
         <div className="chips">
+          <div className="date-range" aria-label="Workspace date range">
+            {(["24h", "7d", "30d"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`date-preset-btn${preset === value ? " active" : ""}`}
+                onClick={() => setPreset(value)}
+                aria-pressed={preset === value}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
           <Chip kind="LIST_EQUIV" />
         </div>
       </div>
@@ -209,7 +266,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
         {wsListState.status === "ok" && workspace !== undefined && (
           <>
             <div className="kpi card">
-              <div className="kpi-label">SPEND (7d)</div>
+              <div className="kpi-label">SPEND ({preset})</div>
               <div className="kpi-value">{fmtUsd(workspace.cost_equiv_u)}</div>
               <div className="kpi-subval">{workspace.turns.toLocaleString()} reconciled turns</div>
               <div className="chips">
@@ -227,7 +284,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
               </div>
             </div>
             <div className="kpi card">
-              <div className="kpi-label">SESSIONS (7d)</div>
+              <div className="kpi-label">SESSIONS ({preset})</div>
               <div className="kpi-value">
                 {sessionsState.status === "ok"
                   ? (sessionsState.value.data?.items.length ?? 0)
@@ -245,11 +302,29 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
         {wsListState.status === "ok" && workspace === undefined && (
           <div className="banner banner-info" role="note">
             <span>
-              No spend data found for workspace <code>{workspaceId}</code> in the last 7 days.
+              No spend data found for workspace <code>{workspaceId}</code> in the selected {preset}{" "}
+              window.
             </span>
           </div>
         )}
       </div>
+
+      {wsListState.status === "ok" ? (
+        <ObservationEvidence
+          workspaceId={workspaceId}
+          filter={{
+            from: wsListState.value.meta.window.from,
+            to: wsListState.value.meta.window.to,
+          }}
+          title="Evidence by cohort"
+        />
+      ) : (
+        <p aria-busy={wsListState.status === "loading"}>
+          {wsListState.status === "loading"
+            ? "Loading selected cohort?"
+            : "Selected cohort unavailable because the workspace request failed."}
+        </p>
+      )}
 
       {/* Top sessions */}
       <div className="card" style={{ marginBottom: 13 }}>
@@ -273,7 +348,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
         {sessionsState.status === "ok" && sessions.length === 0 && (
           <EmptyState
             headline="No sessions found"
-            why="No sessions were recorded for this workspace in the last 7 days."
+            why={`No sessions were recorded for this workspace in [${sessionsState.value.meta.window.from}, ${sessionsState.value.meta.window.to}).`}
             whatWillAppear="Session rows will appear after Claude Code activity is detected."
           />
         )}

@@ -13,6 +13,8 @@ import { buildResponse } from "../envelope.js";
 export interface EsfObservationQueryOpts {
   /** null selects all workspaces. */
   workspaceId: string | null;
+  /** Optional exact session scope, using the same accounting predicates. */
+  sessionId?: string;
   /** Inclusive ISO-8601 lower bound. */
   from: string;
   /** Exclusive ISO-8601 upper bound. */
@@ -125,6 +127,7 @@ function sourceFingerprint(opts: EsfObservationQueryOpts, rows: FingerprintRow[]
         version: "esf-cohort-source-fingerprint-1",
         window: { from: opts.from, to: opts.to },
         workspace_id: opts.workspaceId,
+        ...(opts.sessionId === undefined ? {} : { session_id: opts.sessionId }),
         turns: rows,
       }),
       "utf8",
@@ -146,12 +149,14 @@ export function getEsfObservations(
   opts: EsfObservationQueryOpts,
 ): ApiResponse<EsfObservationCohort> {
   const workspaceFilter = opts.workspaceId === null ? "" : " AND t.workspace_id = ?";
+  const sessionFilter = opts.sessionId === undefined ? "" : " AND t.session_id = ?";
   const params =
     opts.workspaceId === null ? [opts.from, opts.to] : [opts.from, opts.to, opts.workspaceId];
+  if (opts.sessionId !== undefined) params.push(opts.sessionId);
   const cohort = `WITH selected_turns AS (
       SELECT t.message_id, t.session_id, t.ts, t.cost_equiv_u, t.cost_claim, t.parser_version, t.provisional
         FROM turns t
-       WHERE t.ts >= ? AND t.ts < ?${workspaceFilter}
+       WHERE t.ts >= ? AND t.ts < ?${workspaceFilter}${sessionFilter}
     ),
     selected_sessions AS (
       SELECT DISTINCT st.session_id, s.state
@@ -395,6 +400,37 @@ export function getEsfObservations(
       claim_kinds_count: data.watermark.cost_claim_counts.length,
       note: "Selected-turn cohort is [from,to). Unpriced turns are unknown, not zero-cost. Test recovery is a versioned observation of completed test events, not D7 detector matching or a task outcome.",
     },
-    ...(opts.workspaceId === null ? {} : { drilldown_ids: { workspace_id: opts.workspaceId } }),
+    drilldown_ids: {
+      ...(opts.workspaceId === null ? {} : { workspace_id: opts.workspaceId }),
+      ...(opts.sessionId === undefined ? {} : { session_id: opts.sessionId }),
+    },
   });
+}
+
+/** Full session evidence; the exclusive end includes the final turn/tool event. */
+export function getSessionEsfObservations(
+  db: Db,
+  sessionId: string,
+): ApiResponse<EsfObservationCohort> {
+  const session = db
+    .prepare("SELECT workspace_id FROM sessions WHERE session_id = ?")
+    .get(sessionId) as { workspace_id: string } | undefined;
+  if (session === undefined) {
+    const missing = buildResponse(null, {
+      claim_kind: "N_A",
+      metric_definition_version: "esf-1",
+      n: 0,
+      drilldown_ids: { session_id: sessionId },
+    });
+    return { data: null, meta: missing.meta };
+  }
+  const span = db
+    .prepare(`SELECT MIN(ts) AS first_at, MAX(ts) AS last_at FROM (
+    SELECT ts FROM turns WHERE session_id = ?
+    UNION ALL SELECT ts FROM tool_events WHERE session_id = ?
+  )`)
+    .get(sessionId, sessionId) as { first_at: string | null; last_at: string | null };
+  const from = span.first_at ?? "1970-01-01T00:00:00.000Z";
+  const to = new Date(Date.parse(span.last_at ?? from) + 1).toISOString();
+  return getEsfObservations(db, { workspaceId: session.workspace_id, sessionId, from, to });
 }

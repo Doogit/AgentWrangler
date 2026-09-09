@@ -102,7 +102,7 @@ describe("RecommendationsPage — states", () => {
     const detailsId = expandBtn.getAttribute("aria-controls");
     expect(detailsId).not.toBeNull();
     expect(container.ownerDocument.getElementById(detailsId ?? "")).not.toBeNull();
-    expect(container.querySelectorAll(".rec-details h4.rec-section-label")).toHaveLength(6);
+    expect(container.querySelectorAll(".rec-details h4.rec-section-label")).toHaveLength(7);
   });
 
   it("shows confidence tiers and unvalidated assumption notes per detector", async () => {

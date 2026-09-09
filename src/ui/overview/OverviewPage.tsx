@@ -53,6 +53,7 @@ import {
   getLastFetchTimestamp,
 } from "../api/client";
 import type { DaemonStatus } from "../api/client";
+import { ObservationEvidence } from "../esf/ObservationEvidence";
 import { useForegroundPoll } from "../lib/use-foreground-poll";
 import Chip from "../shell/Chip";
 import ChipLegend from "../shell/ChipLegend";
@@ -838,6 +839,17 @@ export default function OverviewPage({
         isLoading={trendsState.status === "loading" || priorTrendsState.status === "loading"}
         topRecommendation={topRecommendation}
       />
+
+      {hasOverviewForPreset && overviewState.status === "ok" && (
+        <ObservationEvidence
+          workspaceId={null}
+          filter={{
+            from: overviewState.value.meta.window.from,
+            to: overviewState.value.meta.window.to,
+          }}
+          title="Outcome and observation cohort"
+        />
+      )}
 
       {/* RV7 tile row — rate-limit gauges · hook status · hot sessions top-3 */}
       <div

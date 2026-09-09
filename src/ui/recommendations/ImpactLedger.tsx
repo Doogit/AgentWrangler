@@ -393,6 +393,13 @@ export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string
       <div className="impact-ledger">
         <div className="banner banner-error" role="alert">
           <span>Impact Ledger unavailable: {state.message}</span>
+          <button
+            type="button"
+            className="banner-retry"
+            onClick={() => setRefreshKey((key) => key + 1)}
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
@@ -406,10 +413,7 @@ export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string
   if (view === null || entries.length === 0) {
     return (
       <div className="impact-ledger">
-        <p className="kpi-off-hint">
-          No measured recommendations in this selection. Adopted recs appear here once the probe
-          measures their effect.
-        </p>
+        <p className="kpi-off-hint">No tracked completed changes in this scope.</p>
       </div>
     );
   }

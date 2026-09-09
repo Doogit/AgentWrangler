@@ -7,7 +7,7 @@
  * confounded-window banner, and the COEFF caveat. Client is mocked.
  */
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObservationBundle } from "../../src/effects/types";
 import type { LedgerEntry } from "../../src/query/api/recommendations-ledger";
@@ -52,6 +52,24 @@ describe("ImpactLedger — states", () => {
     await waitFor(() => {
       expect(container.querySelector(".banner-error")).not.toBeNull();
     });
+  });
+
+  it("retries a failed ledger request", async () => {
+    vi.mocked(client.fetchLedger)
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValue(mockLedger());
+    const { getByRole } = render(<ImpactLedger />);
+    await waitFor(() => expect(getByRole("button", { name: "Retry" })).toBeTruthy());
+    fireEvent.click(getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(vi.mocked(client.fetchLedger)).toHaveBeenCalledTimes(2));
+  });
+
+  it("uses the completed-change empty state", async () => {
+    mockOk([]);
+    const { container } = render(<ImpactLedger />);
+    await waitFor(() =>
+      expect(container.textContent).toContain("No tracked completed changes in this scope."),
+    );
   });
 });
 

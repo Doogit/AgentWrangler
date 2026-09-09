@@ -15,7 +15,7 @@
  * cache WRITE next turn — warn the user in the expanded section.
  */
 
-import { useEffect, useId, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import type { EffectEvidencePage } from "../../effects/api-contract";
 import { buildSeededPrompt } from "../../query/api/rec-prompt"; // browser-safe; avoids pulling server-side graph
 import type {
@@ -38,6 +38,7 @@ import { workspaceLabel } from "../lib/workspace-label";
 import Chip from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
 import EffectEvidence from "./EffectEvidence";
+import EvaluationDisclosure from "./EvaluationDisclosure";
 import {
   type GeneratedSnippet,
   buildPromptArtifact,
@@ -951,6 +952,10 @@ function SingleRecCard({
   const focused = focusRecId !== null && focusRecId === rec.rec_id;
   const [expanded, setExpanded] = useState(focused);
   const cardRef = useRef<HTMLDivElement>(null);
+  const detailsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const detailsLauncherRef = useRef<HTMLButtonElement>(null);
+  const evaluationLauncherRef = useRef<HTMLButtonElement>(null);
+  const [evaluationOpen, setEvaluationOpen] = useState(false);
 
   // Auto-expand + scroll when this card becomes the deep-link target (RV6).
   // Grouped members expand here; the group card owns scroll/highlight.
@@ -959,6 +964,9 @@ function SingleRecCard({
     setExpanded(true);
     if (!grouped) scrollFocusedIntoView(cardRef.current);
   }, [focused, grouped]);
+  useEffect(() => {
+    if (expanded) detailsHeadingRef.current?.focus();
+  }, [expanded]);
   const [collapsedChipsExpanded, setCollapsedChipsExpanded] = useState(false);
   const [artifactCopied, setArtifactCopied] = useState(false);
   const [guidedShown, setGuidedShown] = useState(false);
@@ -1388,6 +1396,27 @@ function SingleRecCard({
     void runCycleAction("rollback");
   }
 
+  function toggleDetails() {
+    if (expanded) {
+      setExpanded(false);
+      detailsLauncherRef.current?.focus();
+      return;
+    }
+    setExpanded(true);
+  }
+
+  function onDetailsKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    setExpanded(false);
+    detailsLauncherRef.current?.focus();
+  }
+
+  function closeEvaluation() {
+    setEvaluationOpen(false);
+    evaluationLauncherRef.current?.focus();
+  }
+
   const rootClass = grouped ? "rec-session-row" : "card rec-card";
   const highlightClass = focused && !grouped ? " rec-focus-highlight" : "";
 
@@ -1528,13 +1557,23 @@ function SingleRecCard({
             </button>
           )}
           <button
+            ref={detailsLauncherRef}
             type="button"
             className="rec-action-btn rec-expand-btn"
             aria-expanded={expanded}
             aria-controls={detailsId}
-            onClick={() => setExpanded((e) => !e)}
+            onClick={toggleDetails}
           >
             {expanded ? "Hide details ▲" : "Show details ▼"}
+          </button>
+          <button
+            ref={evaluationLauncherRef}
+            type="button"
+            className="rec-action-btn"
+            aria-expanded={evaluationOpen}
+            onClick={() => (evaluationOpen ? closeEvaluation() : setEvaluationOpen(true))}
+          >
+            Evaluation
           </button>
         </div>
         {!grouped && route === "hook" && (
@@ -1653,6 +1692,15 @@ function SingleRecCard({
             Measurement availability is unknown for this older recommendation. It remains manual and
             no countdown is shown.
           </p>
+        )}
+        {evaluationOpen && (
+          <EvaluationDisclosure
+            rec={rec}
+            cycle={cycle}
+            capability={capability}
+            canRetrack={canRetrack}
+            onClose={closeEvaluation}
+          />
         )}
         {rec.detector_id !== "D5" &&
           actionEvidence !== "none" &&
@@ -1917,7 +1965,10 @@ function SingleRecCard({
 
       {/* Expanded details — methodology behind the toggle */}
       {expanded && (
-        <div id={detailsId} className="rec-details">
+        <div id={detailsId} className="rec-details" onKeyDown={onDetailsKeyDown}>
+          <h4 ref={detailsHeadingRef} className="rec-section-label" tabIndex={-1}>
+            Recommendation details
+          </h4>
           {grouped && (
             <h4 className="rec-section-label" hidden>
               Recommendation details
