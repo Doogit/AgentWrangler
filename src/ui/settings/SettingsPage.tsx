@@ -18,20 +18,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OAuthStatus } from "../../oauth/credentials";
 import type { GithubTokenStatus } from "../../outcomes/github/credential";
-import type { AgentsLivenessResult, LiveAgent } from "../../query/api/agents-liveness";
 import type { HookConfig, HookConfigResponse } from "../../query/api/hook-config";
-import type { IdleSession } from "../../query/api/idle-sessions";
 import type { Report } from "../../query/api/reports";
-import type { Settings, WorkspaceMapping } from "../../query/api/settings";
+import type { Settings } from "../../query/api/settings";
 import type { ApiResponse } from "../../query/envelope";
 import {
   calibrateBytesPerTokenApi,
   calibrateLimitApi,
-  endSessionPid,
-  fetchAgentsLiveness,
   fetchGithubTokenStatus,
   fetchHookConfig,
-  fetchIdleSessions,
   fetchOAuthStatus,
   fetchSettings,
   getReports,
@@ -43,9 +38,11 @@ import {
 } from "../api/client";
 import { setExperimentalActions, useExperimentalActions } from "../hooks/useExperimentalActions";
 import { formatAbsolute, relativeTime } from "../lib/relative-time";
+import { useWorkspaceNames } from "../lib/workspace-names";
 import Chip, { type ChipProps } from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
 import Modal from "../shell/Modal";
+import SectionHeader from "../shell/SectionHeader";
 import AnchorsPanel from "./AnchorsPanel";
 import { buildHookInstallPrompt, buildHookUninstallPrompt } from "./install-prompt";
 
@@ -86,12 +83,6 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
   const [limitConfidence, setLimitConfidence] = useState<"low" | null>(
     settings.limit_provenance?.includes("LOW CONFIDENCE") ? "low" : null,
   );
-  // Track whether the user manually edited the limit field this session.
-  // Only set to true on direct user input — not when calibrate updates limitRaw
-  // programmatically. When false, we omit limit_tokens from the Save payload so a
-  // calibrated limit + its provenance/resets_at are preserved (Bug-1 fix).
-  const [limitDirty, setLimitDirty] = useState(false);
-
   // Re-calibrate hint: show when a stored resets_at has passed
   const resetsAt = settings.limit_resets_at;
   const showRecalibrateHint =
@@ -138,19 +129,6 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
 
     // Coerce + validate numbers loudly rather than letting NaN/Infinity slip
     // through (NaN serializes to JSON null and would silently clear the limit).
-    const limitTrimmed = limitRaw.trim();
-    let limit: number | null;
-    if (limitTrimmed === "") {
-      limit = null;
-    } else {
-      const parsed = Number(limitTrimmed);
-      if (!Number.isFinite(parsed) || parsed < 0) {
-        setError("Weekly token limit must be a non-negative number.");
-        return;
-      }
-      limit = parsed;
-    }
-
     const windowNum = Number(windowSecs.trim());
     if (!Number.isFinite(windowNum) || windowNum < 1) {
       setError("Activity window must be a whole number of seconds (>= 1).");
@@ -160,11 +138,7 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
     setError(null);
     setSaving(true);
     try {
-      // Only include limit_tokens when the user actually edited the manual-override
-      // field this session. If untouched (e.g. limit was set by Calibrate), omit
-      // the key so the backend leaves calibrated provenance + resets_at intact.
       const res = await saveSettings({
-        ...(limitDirty ? { limit_tokens: limit } : {}),
         scan_roots: roots,
         activity_window_secs: windowNum,
       });
@@ -238,43 +212,6 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
             A new weekly window has started — consider re-calibrating.
           </output>
         )}
-
-        {/* Advanced: manual override — de-emphasised below the primary action */}
-        <div className="settings-advanced-override">
-          <label className="settings-label" htmlFor="limit-tokens">
-            Weekly token limit
-            <span className="settings-hint"> (blank = forecast OFF)</span>
-          </label>
-          <span className="settings-hint" style={{ marginBottom: 4, fontSize: 11 }}>
-            Advanced: manual override — use if Calibrate is unavailable or you need a specific
-            value.
-          </span>
-          <input
-            id="limit-tokens"
-            className="settings-input"
-            type="number"
-            min={0}
-            value={limitRaw}
-            onChange={(e) => {
-              setLimitRaw(e.target.value);
-              setLimitDirty(true);
-              // Manual edit clears calibrated provenance label
-              if (provenance?.startsWith("calibrated")) {
-                setProvenance("manual");
-              }
-            }}
-            placeholder="e.g. 10000000000"
-          />
-          {provenance === "manual" && (
-            <div
-              className="settings-hint"
-              style={{ marginTop: 4, fontSize: 11 }}
-              aria-label="Limit provenance"
-            >
-              manual override
-            </div>
-          )}
-        </div>
       </div>
       <div className="settings-field">
         <label className="settings-label" htmlFor="scan-roots">
@@ -297,6 +234,9 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
         <label className="settings-label" htmlFor="activity-window">
           Activity window (seconds)
         </label>
+        <p className="settings-hint" style={{ margin: "0 0 4px" }}>
+          How long a session can go quiet before it stops counting as active in the metrics.
+        </p>
         <input
           id="activity-window"
           className="settings-input"
@@ -315,6 +255,62 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
         {saving ? "Saving…" : saved ? "Saved" : "Save config"}
       </button>
     </div>
+  );
+}
+
+function ManualLimitOverride({ settings, onSaved }: ConfigFormProps) {
+  const [limitRaw, setLimitRaw] = useState(
+    settings.limit_tokens !== null ? String(settings.limit_tokens) : "",
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    const value = limitRaw.trim();
+    const limit = value === "" ? null : Number(value);
+    if (limit !== null && (!Number.isFinite(limit) || limit < 0)) {
+      setError("Weekly token limit must be a non-negative number.");
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      const response = await saveSettings({ limit_tokens: limit });
+      if (response.data !== null) onSaved(response.data);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
+      <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>Weekly token limit override</h3>
+      <p className="settings-hint">
+        Use a specific weekly limit when usage calibration is unavailable.
+      </p>
+      <label className="settings-label" htmlFor="limit-tokens">
+        Weekly token limit (blank turns forecasting off)
+      </label>
+      <input
+        id="limit-tokens"
+        className="settings-input"
+        type="number"
+        min={0}
+        value={limitRaw}
+        onChange={(event) => setLimitRaw(event.target.value)}
+        placeholder="e.g. 10000000000"
+      />
+      {error !== null && (
+        <div className="settings-inline-error" role="alert">
+          {error}
+        </div>
+      )}
+      <button type="button" className="settings-save-btn" onClick={handleSave} disabled={saving}>
+        {saving ? "Saving…" : "Save weekly limit"}
+      </button>
+    </section>
   );
 }
 
@@ -428,141 +424,24 @@ function BytesCalibrationSection({ settings, onSaved }: BytesCalibrationSectionP
 // Workspace mappings section
 // ---------------------------------------------------------------------------
 
-interface WorkspaceMappingsProps {
-  mappings: WorkspaceMapping[];
-  onSaved: (updated: Settings) => void;
-}
-
-function WorkspaceMappings({ mappings, onSaved }: WorkspaceMappingsProps) {
-  const [rows, setRows] = useState<WorkspaceMapping[]>(mappings);
-  const [showTransient, setShowTransient] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-
-  // Re-sync local rows only when the SET of workspaces changes (e.g. a DB reset
-  // empties them, or a workspace is added/removed). Keying on the workspace_ids
-  // rather than the array reference means a value-equal refresh after saving a
-  // different section does not clobber unsaved edits in this table.
-  const prevIdsKey = useRef<string | null>(null);
-  const workspaceIdsKey = mappings
-    .map((m) => m.workspace_id)
-    .sort()
-    .join(" ");
-  useEffect(() => {
-    if (workspaceIdsKey !== prevIdsKey.current) {
-      prevIdsKey.current = workspaceIdsKey;
-      setRows(mappings);
-    }
-  }, [workspaceIdsKey, mappings]);
-
-  function update(idx: number, field: "repo_path" | "repo_canonical", value: string) {
-    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value || null } : r)));
-  }
-
-  async function handleSave() {
-    setSaving(true);
-    setError(null);
-    setSaved(false);
-    try {
-      const res = await saveSettings({
-        workspace_mappings: rows.map((r) => ({
-          workspace_id: r.workspace_id,
-          repo_path: r.repo_path,
-          repo_canonical: r.repo_canonical,
-        })),
-      });
-      if (res.data !== null) {
-        onSaved(res.data);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-      }
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+function WorkspaceNamesSummary({ settings }: { settings: Settings }) {
+  const { labelFor } = useWorkspaceNames();
+  const workspaceIds = settings.workspace_mappings.map((mapping) => mapping.workspace_id);
 
   return (
-    <div className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
-      <h2 style={{ margin: "0 0 14px", fontSize: 15 }}>Workspace Mappings</h2>
+    <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
+      <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>Workspace names</h3>
       <p className="settings-hint">
-        Maps each session's working directory to a named workspace so spend rolls up per project.
+        Names are derived automatically from each working directory and its git remote.
       </p>
-      <label>
-        <input
-          type="checkbox"
-          checked={showTransient}
-          onChange={(e) => setShowTransient(e.target.checked)}
-        />{" "}
-        Show transient workspaces
-      </label>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Workspace</th>
-              <th>Repo path</th>
-              <th>Canonical (owner/repo)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) =>
-              row.is_transient && !showTransient ? null : (
-                <tr key={row.workspace_id}>
-                  <td style={{ color: "var(--soft)" }}>
-                    {row.project_slug}
-                    {row.is_transient && " (transient)"}
-                  </td>
-                  <td>
-                    <input
-                      aria-label={`Repo path for ${row.project_slug}`}
-                      className="settings-table-input"
-                      value={row.repo_path ?? ""}
-                      onChange={(e) => update(i, "repo_path", e.target.value)}
-                      placeholder="/absolute/path/to/repo"
-                    />
-                  </td>
-                  <td>
-                    <input
-                      aria-label={`Canonical for ${row.project_slug}`}
-                      className="settings-table-input"
-                      value={row.repo_canonical ?? ""}
-                      onChange={(e) => update(i, "repo_canonical", e.target.value)}
-                      placeholder="owner/repo"
-                    />
-                    {row.repo_canonical === null && row.mapping_reason !== undefined && (
-                      <div
-                        className="settings-hint"
-                        style={{ marginTop: 4, fontSize: 12 }}
-                        role="note"
-                      >
-                        {row.mapping_reason}
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              ),
-            )}
-          </tbody>
-        </table>
-      </div>
-      {error !== null && (
-        <div className="settings-inline-error" role="alert">
-          {error}
-        </div>
+      {workspaceIds.length > 0 ? (
+        <p aria-label="Auto-derived workspace names">{workspaceIds.map(labelFor).join(", ")}</p>
+      ) : (
+        <p aria-label="Auto-derived workspace names">
+          Workspace names appear after AgentWrangler observes a working directory.
+        </p>
       )}
-      <button
-        type="button"
-        className="settings-save-btn"
-        style={{ marginTop: 12 }}
-        onClick={handleSave}
-        disabled={saving}
-      >
-        {saving ? "Saving…" : saved ? "Saved" : "Save mappings"}
-      </button>
-    </div>
+    </section>
   );
 }
 
@@ -839,7 +718,7 @@ function ContextBudgetHookPanel() {
   return (
     <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
       <div className="fb5-panel-header">
-        <h2 style={{ margin: 0, fontSize: 15 }}>In-session guards</h2>
+        <h2 style={{ margin: 0, fontSize: 15 }}>Context budget hook</h2>
         {config !== null && (
           <span
             className={`fb5-status-pill ${installed ? "fb5-status-installed" : "fb5-status-not-installed"}`}
@@ -952,10 +831,15 @@ function ContextBudgetHookPanel() {
               </div>
             </div>
           </div>
-          <p className="fb5-field-hint">
-            fields: context_window, soft_pct, hard_pct, d7_fail_count, d7_window_turns,
-            d9_idle_seconds
-          </p>
+          <details>
+            <summary className="fb5-field-hint" style={{ cursor: "pointer" }}>
+              Show config field names
+            </summary>
+            <p className="fb5-field-hint">
+              fields: context_window, soft_pct, hard_pct, d7_fail_count, d7_window_turns,
+              d9_idle_seconds
+            </p>
+          </details>
         </>
       )}
       {error !== null && (
@@ -986,25 +870,27 @@ function ContextBudgetHookPanel() {
           >
             {busy ? "Installing…" : "Install directly — writes ~/.claude/settings.json for you"}
           </button>
-          <p className="settings-hint" style={{ margin: "10px 0 6px" }}>
-            Install prompt — copy this exact text into Claude Code if you prefer to review the
-            change there.
-          </p>
-          <textarea
-            aria-label="Install prompt text"
-            className="settings-textarea"
-            readOnly
-            rows={8}
-            value={installPrompt ?? "Loading the current hook settings…"}
-            style={{
-              minHeight: 150,
-              resize: "vertical",
-              border: "1px solid var(--line)",
-              background: "var(--bg)",
-              fontFamily: "monospace",
-              fontSize: 12,
-            }}
-          />
+          <details>
+            <summary className="settings-hint" style={{ margin: "10px 0 6px", cursor: "pointer" }}>
+              Show install prompt text — copy this exact text into Claude Code if you prefer to
+              review the change there.
+            </summary>
+            <textarea
+              aria-label="Install prompt text"
+              className="settings-textarea"
+              readOnly
+              rows={8}
+              value={installPrompt ?? "Loading the current hook settings…"}
+              style={{
+                minHeight: 150,
+                resize: "vertical",
+                border: "1px solid var(--line)",
+                background: "var(--bg)",
+                fontFamily: "monospace",
+                fontSize: 12,
+              }}
+            />
+          </details>
         </div>
         <div className="fb5-action-group">
           <button
@@ -1022,308 +908,30 @@ function ContextBudgetHookPanel() {
           >
             {busy ? "Uninstalling…" : "Uninstall directly"}
           </button>
-          <p className="settings-hint" style={{ margin: "10px 0 6px" }}>
-            Uninstall prompt — copy this exact text to remove only AgentWrangler&apos;s copied
-            hooks.
-          </p>
-          <textarea
-            aria-label="Uninstall prompt text"
-            className="settings-textarea"
-            readOnly
-            rows={6}
-            value={uninstallPrompt}
-            style={{
-              minHeight: 120,
-              resize: "vertical",
-              border: "1px solid var(--line)",
-              background: "var(--bg)",
-              fontFamily: "monospace",
-              fontSize: 12,
-            }}
-          />
+          <details>
+            <summary className="settings-hint" style={{ margin: "10px 0 6px", cursor: "pointer" }}>
+              Show uninstall prompt text — copy this exact text to remove only
+              AgentWrangler&apos;s copied hooks.
+            </summary>
+            <textarea
+              aria-label="Uninstall prompt text"
+              className="settings-textarea"
+              readOnly
+              rows={6}
+              value={uninstallPrompt}
+              style={{
+                minHeight: 120,
+                resize: "vertical",
+                border: "1px solid var(--line)",
+                background: "var(--bg)",
+                fontFamily: "monospace",
+                fontSize: 12,
+              }}
+            />
+          </details>
         </div>
       </div>
       <p className="fb5-takes-effect">Takes effect immediately, no restart.</p>
-    </section>
-  );
-}
-
-function IdleSessionsPanel() {
-  const [transcriptIdle, setTranscriptIdle] = useState<IdleSession[]>([]);
-  const [liveness, setLiveness] = useState<AgentsLivenessResult | null>(null);
-  const [confirmSingle, setConfirmSingle] = useState<LiveAgent | null>(null);
-  const [confirmBulk, setConfirmBulk] = useState<LiveAgent[] | null>(null);
-  const [endingPids, setEndingPids] = useState<Set<number>>(new Set());
-  const [endedSessions, setEndedSessions] = useState<Set<string>>(new Set());
-  const [endError, setEndError] = useState<string | null>(null);
-  const [copiedAgents, setCopiedAgents] = useState(false);
-
-  useEffect(() => {
-    void Promise.resolve(fetchIdleSessions())
-      .then((response) => setTranscriptIdle(response?.data ?? []))
-      .catch(() => setTranscriptIdle([]));
-    void Promise.resolve(fetchAgentsLiveness())
-      .then((response) => setLiveness(response?.data ?? null))
-      .catch(() => setLiveness(null));
-  }, []);
-
-  const transcriptIdleIds = new Set(transcriptIdle.map((s) => s.session_id));
-  const liveAgentIds = new Set((liveness?.agents ?? []).map((a) => a.session_id));
-
-  // Intersection: live agents that are also transcript-idle, minus already-ended
-  const intersectionRows: LiveAgent[] =
-    liveness?.available === true
-      ? (liveness.agents ?? []).filter(
-          (a) => transcriptIdleIds.has(a.session_id) && !endedSessions.has(a.session_id),
-        )
-      : [];
-
-  // Non-live count: transcript-idle sessions not present in live list + locally ended
-  const nonLiveCount =
-    liveness?.available === true
-      ? transcriptIdle.filter((s) => !liveAgentIds.has(s.session_id)).length + endedSessions.size
-      : 0;
-
-  const interactivePidRows = intersectionRows.filter((a) => a.pid !== null);
-
-  async function handleEnd(agent: LiveAgent) {
-    if (agent.pid === null) return;
-    const pid = agent.pid;
-    setEndingPids((prev) => new Set(prev).add(pid));
-    setEndError(null);
-    try {
-      await endSessionPid(pid);
-      setEndedSessions((prev) => new Set(prev).add(agent.session_id));
-    } catch (e: unknown) {
-      setEndError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setEndingPids((prev) => {
-        const next = new Set(prev);
-        next.delete(pid);
-        return next;
-      });
-    }
-  }
-
-  async function handleBulkEnd(agents: LiveAgent[]) {
-    setEndError(null);
-    for (const agent of agents) {
-      await handleEnd(agent);
-    }
-  }
-
-  async function handleCopyAgents() {
-    try {
-      await navigator.clipboard.writeText("claude agents");
-      setCopiedAgents(true);
-      setTimeout(() => setCopiedAgents(false), 2000);
-    } catch {
-      /* ignore clipboard failure for CTA copy */
-    }
-  }
-
-  return (
-    <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
-      <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Idle background sessions</h2>
-      <p style={{ color: "var(--muted)", fontSize: 12, margin: "0 0 12px" }}>
-        Idle sessions use no tokens until they resume. A resumed session may need to rewrite expired
-        saved context. End only sessions you no longer need.
-      </p>
-
-      {/* CLI unavailable: banner + transcript-only fallback (no End actions) */}
-      {liveness !== null && !liveness.available && (
-        <output className="banner banner-warning" style={{ marginBottom: 12 }}>
-          {liveness.reason ?? "liveness unknown"}
-        </output>
-      )}
-      {(liveness === null || !liveness.available) && transcriptIdle.length > 0 && (
-        <ul style={{ margin: 0, paddingLeft: 18, fontFamily: "monospace", fontSize: 12 }}>
-          {transcriptIdle.map((session) => (
-            <li key={session.session_id}>
-              <a href={`#/sessions/${session.session_id}`}>{session.session_id}</a> ·{" "}
-              {Math.floor(session.idle_seconds / 60)} idle min ·{" "}
-              {session.cap_weighted_tokens.toLocaleString()} cap-weighted tokens
-            </li>
-          ))}
-        </ul>
-      )}
-      {(liveness === null || !liveness.available) && transcriptIdle.length === 0 && (
-        <p style={{ color: "var(--muted)", margin: 0 }}>No idle background sessions found.</p>
-      )}
-
-      {/* Liveness available: intersection view */}
-      {liveness?.available === true && (
-        <>
-          {intersectionRows.length > 0 ? (
-            <>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Session</th>
-                      <th>Workspace</th>
-                      <th>Kind</th>
-                      <th>Status</th>
-                      <th>Idle min</th>
-                      <th title="Tokens currently held in the session context">
-                        Context held (tokens)
-                      </th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {intersectionRows.map((agent) => (
-                      <tr key={agent.session_id}>
-                        <td style={{ fontFamily: "monospace", fontSize: 12 }}>
-                          <a href={`#/sessions/${agent.session_id}`}>{agent.session_id}</a>
-                        </td>
-                        <td style={{ color: "var(--soft)", fontSize: 12 }}>
-                          {agent.workspace_id ?? basename(agent.cwd) ?? "—"}
-                        </td>
-                        <td style={{ fontSize: 12 }}>{agent.kind}</td>
-                        <td style={{ fontSize: 12 }}>{agent.status}</td>
-                        <td style={{ fontSize: 12 }}>{Math.floor(agent.idle_seconds / 60)}</td>
-                        <td style={{ fontSize: 12 }}>
-                          {agent.cap_weighted_context_held.toLocaleString()}
-                        </td>
-                        <td>
-                          {agent.pid !== null ? (
-                            <button
-                              type="button"
-                              className="fb6-end-btn"
-                              disabled={endingPids.has(agent.pid)}
-                              onClick={() => setConfirmSingle(agent)}
-                            >
-                              {endingPids.has(agent.pid) ? "Ending…" : "End session"}
-                            </button>
-                          ) : (
-                            <span className="fb6-bg-cta">
-                              Manage in terminal: <code className="fb6-code">claude agents</code>
-                              <button
-                                type="button"
-                                className="fb6-copy-btn"
-                                onClick={() => void handleCopyAgents()}
-                              >
-                                {copiedAgents ? "Copied" : "Copy"}
-                              </button>
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {interactivePidRows.length > 0 && (
-                <button
-                  type="button"
-                  className="fb6-bulk-end-btn"
-                  style={{ marginTop: 10 }}
-                  onClick={() => setConfirmBulk(interactivePidRows)}
-                >
-                  End all idle interactive sessions
-                </button>
-              )}
-            </>
-          ) : (
-            <p style={{ color: "var(--muted)", margin: 0 }}>No live idle sessions found.</p>
-          )}
-          {nonLiveCount > 0 && (
-            <p className="fb6-ended-line">
-              {nonLiveCount} past {nonLiveCount === 1 ? "session" : "sessions"} ended — closed
-              sessions cost nothing.
-            </p>
-          )}
-        </>
-      )}
-
-      {endError !== null && (
-        <div className="settings-inline-error" role="alert" style={{ marginTop: 8 }}>
-          {endError}
-        </div>
-      )}
-
-      {/* Single end confirm dialog */}
-      {confirmSingle !== null && (
-        <div className="settings-modal-backdrop">
-          <Modal labelledBy="end-session-title" onCancel={() => setConfirmSingle(null)}>
-            <h3 id="end-session-title" style={{ margin: "0 0 10px" }}>
-              End session?
-            </h3>
-            <p style={{ color: "var(--soft)", fontSize: 13, margin: "0 0 8px" }}>
-              <strong>Session:</strong> {confirmSingle.name || confirmSingle.session_id}
-            </p>
-            <p style={{ color: "var(--soft)", fontSize: 13, margin: "0 0 8px" }}>
-              <strong>Process ID (PID):</strong> {confirmSingle.pid}
-            </p>
-            <p style={{ color: "var(--soft)", fontSize: 13, margin: "0 0 14px" }}>
-              <strong>Working dir:</strong>{" "}
-              <code style={{ fontFamily: "monospace" }}>{confirmSingle.cwd}</code>
-            </p>
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                className="settings-cancel-btn"
-                onClick={() => setConfirmSingle(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="settings-reset-confirm-btn"
-                onClick={() => {
-                  if (confirmSingle === null) return;
-                  const agent = confirmSingle;
-                  setConfirmSingle(null);
-                  void handleEnd(agent);
-                }}
-              >
-                Confirm End
-              </button>
-            </div>
-          </Modal>
-        </div>
-      )}
-
-      {/* Bulk end confirm dialog */}
-      {confirmBulk !== null && (
-        <div className="settings-modal-backdrop">
-          <Modal labelledBy="bulk-end-title" onCancel={() => setConfirmBulk(null)}>
-            <h3 id="bulk-end-title" style={{ margin: "0 0 10px" }}>
-              End all idle interactive sessions?
-            </h3>
-            <ul style={{ margin: "0 0 14px", paddingLeft: 18, fontSize: 13 }}>
-              {confirmBulk.map((a) => (
-                <li key={a.session_id} style={{ color: "var(--soft)", marginBottom: 4 }}>
-                  Process ID (PID) {a.pid} —{" "}
-                  <code style={{ fontFamily: "monospace" }}>{a.cwd}</code>
-                </li>
-              ))}
-            </ul>
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                className="settings-cancel-btn"
-                onClick={() => setConfirmBulk(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="settings-reset-confirm-btn"
-                onClick={() => {
-                  if (confirmBulk === null) return;
-                  const agents = confirmBulk;
-                  setConfirmBulk(null);
-                  void handleBulkEnd(agents);
-                }}
-              >
-                Confirm End All
-              </button>
-            </div>
-          </Modal>
-        </div>
-      )}
     </section>
   );
 }
@@ -1454,11 +1062,9 @@ function GettingStartedCard() {
 }
 
 const settingsNavigation = [
-  ["Configuration", "configuration"],
-  ["Workspaces", "workspaces"],
+  ["Essentials", "essentials"],
   ["In-session guards", "in-session-guards"],
-  ["Idle sessions", "idle-sessions"],
-  ["Outcomes sync", "outcomes-sync"],
+  ["Integrations", "integrations"],
   ["Advanced", "advanced"],
 ] as const;
 
@@ -1500,13 +1106,14 @@ export default function SettingsPage() {
     const navigateToSection = () => {
       const section = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("section");
       const targets: Record<string, string> = {
-        configuration: "settings-configuration",
+        essentials: "settings-essentials",
+        configuration: "settings-essentials",
         "scan-roots": "scan-roots",
         calibration: "limit-tokens",
-        workspaces: "settings-workspaces",
-        "outcomes-sync": "settings-outcomes-sync",
+        workspaces: "settings-integrations",
+        "outcomes-sync": "settings-integrations",
         "in-session-guards": "settings-in-session-guards",
-        "idle-sessions": "settings-idle-sessions",
+        integrations: "settings-integrations",
         advanced: "settings-advanced",
         "parser-health": "settings-parser-health",
       };
@@ -1583,24 +1190,34 @@ export default function SettingsPage() {
           {(settings.scan_roots.length === 0 || settings.parser_health.files_seen === 0) && (
             <GettingStartedCard />
           )}
-          <div id="settings-configuration" tabIndex={-1}>
+          <div id="settings-essentials" tabIndex={-1}>
+            <SectionHeader
+              title="Essentials"
+              sub="Set the local limits and folders AgentWrangler uses every day."
+            />
             <ConfigForm settings={settings} onSaved={handleUpdated} />
-            <BytesCalibrationSection settings={settings} onSaved={handleUpdated} />
             <OAuthStatusPanel />
           </div>
-          <div id="settings-outcomes-sync" tabIndex={-1}>
-            <GithubTokenStatusPanel />
-          </div>
           <div id="settings-in-session-guards" tabIndex={-1}>
+            <SectionHeader
+              title="In-session guards"
+              sub="Choose the local reminders that help Claude Code protect an active session."
+            />
             <ContextBudgetHookPanel />
           </div>
-          <div id="settings-idle-sessions" tabIndex={-1}>
-            <IdleSessionsPanel />
-          </div>
-          <div id="settings-workspaces" tabIndex={-1}>
-            <WorkspaceMappings mappings={settings.workspace_mappings} onSaved={handleUpdated} />
+          <div id="settings-integrations" tabIndex={-1}>
+            <SectionHeader
+              title="Integrations"
+              sub="Review the local connections that enrich workspace and outcome summaries."
+            />
+            <GithubTokenStatusPanel />
+            <WorkspaceNamesSummary settings={settings} />
           </div>
           <div id="settings-advanced" tabIndex={-1}>
+            <SectionHeader
+              title="Advanced"
+              sub="Open diagnostics and optional calibration only when you need them."
+            />
             <details
               ref={advancedDetailsRef}
               open={advancedOpen}
@@ -1611,6 +1228,8 @@ export default function SettingsPage() {
                 Use these details to troubleshoot local ingestion or enable features still being
                 evaluated.
               </p>
+              <ManualLimitOverride settings={settings} onSaved={handleUpdated} />
+              <BytesCalibrationSection settings={settings} onSaved={handleUpdated} />
               <section className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
                 <h2 style={{ margin: "0 0 14px", fontSize: 15 }}>Experimental actions</h2>
                 <p className="settings-hint">
