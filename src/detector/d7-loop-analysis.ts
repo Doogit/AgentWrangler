@@ -92,6 +92,8 @@ function markRedundantReads(
     // Scope exclusions are hard sequence boundaries. In particular, an
     // excluded tool call must not let same-path reads on either side join.
     if (!isEligible(row)) {
+      for (const regions of readsSinceWrite.values())
+        for (const reads of regions.values()) markIfQualifying(reads);
       readsSinceWrite.clear();
       continue;
     }

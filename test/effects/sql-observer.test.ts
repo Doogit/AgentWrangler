@@ -119,6 +119,34 @@ function trackScoped(
 }
 
 describe("SQLite effect observations", () => {
+  it("preserves a qualifying read region before an invalid-owner boundary", () => {
+    const db = createInMemoryFixtureDb();
+    const at = "2026-02-05T00:00:00.000Z";
+    sample(db, "completed-reads", 1, at);
+    for (let index = 0; index < 6; index++) {
+      const read = index % 2 === 0;
+      scopedEvent(
+        db,
+        `completed-reads-${index}`,
+        "completed-reads-s-0",
+        index === 5 ? "missing-owner" : "completed-reads-m-0",
+        at,
+        index,
+        { tool: read ? "Read" : "Bash", inputHash: read ? "same-read" : `bash-${index}` },
+      );
+    }
+    rec(db, "completed-reads", "D7", "loop_flagged_turn_share");
+    const engine = track(db, "completed-reads", "D7", "loop_flagged_turn_share");
+    engine.runPass(new Date("2026-02-15T00:00:00.000Z"));
+    expect(engine.getCycle("completed-reads-1")?.finalEvidence?.after).toMatchObject({
+      value: 1,
+      sessionN: 1,
+      exposureN: 1,
+      excluded: { OWNER_ROW_COUNT_INVALID: 1 },
+    });
+    db.close();
+  });
+
   it.each(["stop", "rollback", "attest"] as const)(
     "keeps the frozen deadline when %s reaches an overdue cycle before the scheduled pass",
     (action) => {
