@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import LoadBoundary from "./LoadBoundary";
+import { SkeletonChart } from "./Skeleton";
 
 /** Load below-the-fold chart code on approach, or explicitly from the keyboard. */
 export default function DeferredChart({
@@ -34,8 +35,13 @@ export default function DeferredChart({
       {visible ? (
         <LoadBoundary label={label}>{children}</LoadBoundary>
       ) : (
-        <button type="button" onClick={() => setVisible(true)}>
-          Load {label}
+        <button
+          type="button"
+          onClick={() => setVisible(true)}
+          aria-label={`Load ${label}`}
+          style={{ width: "100%", padding: 0, border: 0, background: "transparent" }}
+        >
+          <SkeletonChart />
         </button>
       )}
     </div>

@@ -1,6 +1,14 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { responseCache } from "../../src/ui/api/client";
+import {
+  fetchCachedJson,
+  getCachedResponse,
+  getLastFetchTimestamp,
+  getResponseCacheKey,
+  networkOnlyFetchTimestamps,
+  responseCache,
+} from "../../src/ui/api/client";
 import { mockBurnStatus, mockLiveSessions } from "../../src/ui/api/fixtures";
 import Sidebar from "../../src/ui/nav/Sidebar";
 import OverviewPage from "../../src/ui/overview/OverviewPage";
@@ -22,10 +30,18 @@ const mount = (overview = true) =>
       {overview && <OverviewPage />}
     </>,
   );
+const CachedRoute = () => {
+  const [data, setData] = useState(() => getCachedResponse<{ label: string }>("/api/route-cache"));
+  useEffect(() => {
+    void fetchCachedJson<{ label: string }>("/api/route-cache").then(setData);
+  }, []);
+  return <p>{data?.label ?? "Loading cached route"}</p>;
+};
 
 beforeEach(() => {
   vi.useFakeTimers();
   responseCache.clear();
+  networkOnlyFetchTimestamps.clear();
   failed = false;
   statusCount = liveCount = burnCount = 0;
   vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -77,6 +93,9 @@ beforeEach(() => {
           },
         }),
       );
+    }
+    if (path === "/api/route-cache") {
+      return new Response(JSON.stringify({ label: "Cached route data" }));
     }
     // Unrelated sections have their own existing error handling.
     return new Response("unavailable", { status: 503 });
@@ -152,5 +171,36 @@ describe("Overview and Sidebar freshness with real client transport", () => {
     expect(screen.queryByLabelText("Loading overview data")).toBeNull();
     await advance(30_000);
     expect(statusCount).toBe(2);
+  });
+
+  it("renders a cached route synchronously after navigation without another request", async () => {
+    const routeRequests = () =>
+      vi.mocked(globalThis.fetch).mock.calls.filter(([url]) => String(url) === "/api/route-cache")
+        .length;
+    const firstView = render(<CachedRoute />);
+    await advance(0);
+    expect(screen.getByText("Cached route data")).toBeTruthy();
+    expect(routeRequests()).toBe(1);
+
+    firstView.unmount();
+    const requestCountBeforeRemount = routeRequests();
+    render(<CachedRoute />);
+
+    expect(screen.getByText("Cached route data")).toBeTruthy();
+    expect(routeRequests()).toBe(requestCountBeforeRemount);
+    await advance(0);
+    expect(routeRequests()).toBe(requestCountBeforeRemount);
+  });
+
+  it("retains network-only freshness timestamps without retaining their payloads", async () => {
+    mount();
+    await advance(0);
+
+    expect(getLastFetchTimestamp("/api/status")).toBe(Date.now());
+    expect(getLastFetchTimestamp("/api/live")).toBe(Date.now());
+    expect(responseCache.has(getResponseCacheKey("/api/status"))).toBe(false);
+    expect(responseCache.has(getResponseCacheKey("/api/live"))).toBe(false);
+    expect(screen.getByText(/Last status check: just now/)).toBeTruthy();
+    expect(screen.getByText("updated 0s ago")).toBeTruthy();
   });
 });

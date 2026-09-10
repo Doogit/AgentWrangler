@@ -1395,12 +1395,13 @@ describe("RecCard — RV4 primary-action routing", () => {
     expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
   });
 
-  it("D9 card routes to the Settings idle-sessions panel with no prompt", () => {
+  it("D9 card routes to the Sessions page with no prompt", () => {
     const { getByRole, queryByRole } = render(
       <RecCard rec={makeRec({ detector_id: "D9", category: "SESSION_HYGIENE" })} />,
     );
-    const link = getByRole("link", { name: "Review idle sessions" });
-    expect(link.getAttribute("href")).toBe("#/settings?section=idle-sessions");
+    // UIR-11 removed the Settings idle-sessions list; Sessions is the live surface.
+    const link = getByRole("link", { name: "Open Sessions" });
+    expect(link.getAttribute("href")).toBe("#/sessions");
     expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
   });
 

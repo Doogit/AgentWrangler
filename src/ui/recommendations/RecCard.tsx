@@ -1604,11 +1604,8 @@ function SingleRecCard({
         )}
         {!grouped && route === "settings-idle" && (
           <div className="rec-primary-action">
-            <a
-              className="rec-action-btn rec-action-btn--primary"
-              href="#/settings?section=idle-sessions"
-            >
-              Review idle sessions
+            <a className="rec-action-btn rec-action-btn--primary" href="#/sessions">
+              Open Sessions
             </a>
           </div>
         )}
@@ -2304,11 +2301,8 @@ function GroupedRecCard({
         )}
         {!isMinorItems && route === "settings-idle" && (
           <div className="rec-primary-action">
-            <a
-              className="rec-action-btn rec-action-btn--primary"
-              href="#/settings?section=idle-sessions"
-            >
-              Review idle sessions
+            <a className="rec-action-btn rec-action-btn--primary" href="#/sessions">
+              Open Sessions
             </a>
           </div>
         )}
