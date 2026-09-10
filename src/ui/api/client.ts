@@ -11,7 +11,6 @@
 import type { PracticesResult } from "../../detector/practice-registry";
 import type { OAuthStatus } from "../../oauth/credentials";
 import type { GithubTokenStatus } from "../../outcomes/github/credential";
-import type { AgentsLivenessResult, EndSessionResult } from "../../query/api/agents-liveness";
 import type { BurnStatus } from "../../query/api/burn-status";
 import type { ContextComposition } from "../../query/api/context-composition";
 import type { CostPerSuccess } from "../../query/api/cost-per-success";
@@ -19,7 +18,6 @@ import type { ClosureProxy } from "../../query/api/effectiveness";
 import type { EfficiencyHeadroom } from "../../query/api/efficiency-headroom";
 import type { HeadroomTrendData } from "../../query/api/headroom-trend";
 import type { HookConfig, HookConfigResponse, HookConfigUpdate } from "../../query/api/hook-config";
-import type { IdleSession } from "../../query/api/idle-sessions";
 import type {
   LinkageRateData,
   SuccessRateData,
@@ -408,44 +406,6 @@ export async function fetchHookConfig(): Promise<ApiResponse<HookConfigResponse>
   const res = await daemonFetch("/api/hook-config");
   if (!res.ok) throw new Error(`/api/hook-config returned ${res.status}`);
   return res.json() as Promise<ApiResponse<HookConfigResponse>>;
-}
-
-/** Read idle, sidechain-dominant sessions for warn-only dashboard surfacing. */
-export async function fetchIdleSessions(): Promise<ApiResponse<IdleSession[]>> {
-  const res = await daemonFetch("/api/idle-sessions");
-  if (!res.ok) throw new Error(`/api/idle-sessions returned ${res.status}`);
-  return res.json() as Promise<ApiResponse<IdleSession[]>>;
-}
-
-/** Fetch live Claude Code agent measurements from the running CLI. */
-export async function fetchAgentsLiveness(): Promise<ApiResponse<AgentsLivenessResult>> {
-  const res = await daemonFetch("/api/agents-liveness");
-  if (!res.ok) throw new Error(`/api/agents-liveness returned ${res.status}`);
-  return res.json() as Promise<ApiResponse<AgentsLivenessResult>>;
-}
-
-/**
- * Send a confirm-gated end request for the given PID.
- * TOKEN-GATED — mirrors the hook install pattern.
- * Endpoint: POST /api/idle-sessions/end
- */
-export async function endSessionPid(pid: number): Promise<EndSessionResult> {
-  const tokenResponse = await daemonFetch("/api/token");
-  if (!tokenResponse.ok) throw new Error("Unable to authorize session end.");
-  const token = ((await tokenResponse.json()) as { token?: unknown }).token;
-  if (typeof token !== "string" || token.length === 0) {
-    throw new Error("Unable to authorize session end.");
-  }
-  const res = await daemonFetch("/api/idle-sessions/end", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-AgentWrangler-Token": token },
-    body: JSON.stringify({ pid, confirm: true }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `/api/idle-sessions/end returned ${res.status}`);
-  }
-  return res.json() as Promise<EndSessionResult>;
 }
 
 /** Persist a partial context-budget hook configuration. */

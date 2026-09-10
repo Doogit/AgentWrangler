@@ -11,6 +11,17 @@ afterEach(() => {
 });
 
 describe("deferred chart loading", () => {
+  it("shows a chart skeleton with an accessible explicit load control before observation", () => {
+    const { container } = render(
+      <DeferredChart label="trends" ready={false}>
+        <p>Chart</p>
+      </DeferredChart>,
+    );
+
+    expect(container.querySelector(".skeleton-chart")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Load trends" }).textContent).toBe("");
+  });
+
   it("waits for the surrounding layout before observing a chart", () => {
     const observe = vi.fn();
     vi.stubGlobal(

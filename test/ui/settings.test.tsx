@@ -12,7 +12,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
-import { mockCalibrateLimit, mockSettings } from "../../src/ui/api/fixtures";
+import { mockCalibrateLimit, mockSettings, mockWorkspaces } from "../../src/ui/api/fixtures";
+import { __resetWorkspaceNamesCache } from "../../src/ui/lib/workspace-names";
 import SettingsPage from "../../src/ui/settings/SettingsPage";
 
 vi.mock("../../src/ui/api/client");
@@ -51,6 +52,38 @@ describe("SettingsPage — error state", () => {
     await waitFor(() => {
       expect(container.querySelector(".banner-error")).not.toBeNull();
     });
+  });
+});
+
+describe("SettingsPage — UIR-10 grouping", () => {
+  it("renders the four settings groups in the operator-facing order", async () => {
+    setupSuccess();
+    render(<SettingsPage />);
+
+    await screen.findByRole("heading", { name: "Essentials" });
+    expect(
+      screen
+        .getAllByRole("heading", { name: /Essentials|In-session guards|Integrations|Advanced/ })
+        .map((heading) => heading.textContent),
+    ).toEqual(["Essentials", "In-session guards", "Integrations", "Advanced"]);
+  });
+
+  it("keeps Advanced collapsed until the operator opens it", async () => {
+    setupSuccess();
+    const { container } = render(<SettingsPage />);
+    await screen.findByRole("heading", { name: "Advanced" });
+
+    const details = container.querySelector<HTMLDetailsElement>("#settings-advanced details");
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute("open")).toBe(false);
+  });
+
+  it("shows auto-derived workspace names and no idle-session UUID list", async () => {
+    setupSuccess();
+    render(<SettingsPage />);
+
+    expect(await screen.findByLabelText("Auto-derived workspace names")).toBeTruthy();
+    expect(screen.queryByText("sess-live-interactive")).toBeNull();
   });
 });
 
@@ -246,97 +279,21 @@ describe("SettingsPage — DB-reset modal", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Workspace mappings — re-sync only on workspace-set change
+// Workspace names — automatically derived from observed workspaces
 // ---------------------------------------------------------------------------
 
-describe("SettingsPage — workspace mappings re-sync", () => {
-  it("preserves unsaved mapping edits when another section saves (same workspace set)", async () => {
-    vi.mocked(client.fetchSettings).mockResolvedValue(mockSettings());
-    vi.mocked(client.resetDatabase).mockResolvedValue(mockSettings());
-    // Mirror the real backend: every save returns a FRESH workspace_mappings
-    // array (same ids). The re-sync must not clobber the in-progress edit.
-    vi.mocked(client.saveSettings).mockImplementation(async () => {
-      const s = mockSettings();
-      const data = s.data;
-      return data === null
-        ? s
-        : {
-            ...s,
-            data: { ...data, workspace_mappings: data.workspace_mappings.map((m) => ({ ...m })) },
-          };
-    });
-
-    render(<SettingsPage />);
-    await waitFor(() => screen.getByLabelText(/Repo path for orbit-api/i));
-
-    const repoInput = screen.getByLabelText(/Repo path for orbit-api/i) as HTMLInputElement;
-    fireEvent.change(repoInput, { target: { value: "/edited/path" } });
-
-    // Save a DIFFERENT section (Config) -> parent re-renders with a fresh,
-    // same-ids mappings reference.
-    fireEvent.click(screen.getByRole("button", { name: /Save config/i }));
-    await waitFor(() => expect(vi.mocked(client.saveSettings)).toHaveBeenCalled());
-
-    await waitFor(() => {
-      expect((screen.getByLabelText(/Repo path for orbit-api/i) as HTMLInputElement).value).toBe(
-        "/edited/path",
-      );
-    });
-  });
-
-  it("clears mapping rows after a reset empties the workspace set", async () => {
-    vi.mocked(client.fetchSettings).mockResolvedValue(mockSettings());
-    vi.mocked(client.saveSettings).mockResolvedValue(mockSettings());
-    vi.mocked(client.resetDatabase).mockImplementation(async () => {
-      const s = mockSettings();
-      const data = s.data;
-      return data === null ? s : { ...s, data: { ...data, workspace_mappings: [] } };
-    });
-
-    render(<SettingsPage />);
-    await waitFor(() => screen.getByLabelText(/Repo path for orbit-api/i));
-
-    fireEvent.click(screen.getByText(/Reset database…/i));
-    await waitFor(() => screen.getByRole("textbox", { name: /Type the database name/i }));
-    fireEvent.change(screen.getByRole("textbox", { name: /Type the database name/i }), {
-      target: { value: "db.sqlite" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /^Reset database$/i }));
-
-    await waitFor(() => {
-      expect(screen.queryByLabelText(/Repo path for orbit-api/i)).toBeNull();
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Workspace mappings — transient rows are opt-in
-// ---------------------------------------------------------------------------
-
-describe("SettingsPage — transient workspace mappings", () => {
-  it("hides transient rows by default and reveals them when toggled", async () => {
+describe("SettingsPage — workspace names summary", () => {
+  it("renders the derived owner/name label, not the raw slug or empty-state copy", async () => {
+    __resetWorkspaceNamesCache();
     setupSuccess();
+    vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "30d" }));
     render(<SettingsPage />);
 
-    await waitFor(() => screen.getByLabelText(/Repo path for orbit-api/i));
-    expect(screen.getByLabelText(/Repo path for orbit-api/i)).toBeTruthy();
-    expect(screen.queryByLabelText(/Repo path for AgentWrangler/i)).toBeNull();
-
-    fireEvent.click(screen.getByLabelText("Show transient workspaces"));
-
-    await waitFor(() => screen.getByLabelText(/Repo path for AgentWrangler/i));
-    expect(screen.getByText("AgentWrangler (transient)")).toBeTruthy();
-  });
-
-  it("shows why an unmapped workspace has no canonical", async () => {
-    setupSuccess();
-    render(<SettingsPage />);
-
-    await waitFor(() => screen.getByLabelText(/Repo path for orbit-api/i));
-    fireEvent.click(screen.getByLabelText("Show transient workspaces"));
-
-    await waitFor(() => screen.getByLabelText(/Repo path for AgentWrangler/i));
-    expect(screen.getByText("No working directory recorded in transcripts yet.")).toBeTruthy();
+    const summary = await screen.findByLabelText("Auto-derived workspace names");
+    await waitFor(() => expect(summary.textContent).toContain("acme/orbit-api"));
+    expect(summary.textContent).not.toContain(
+      "Workspace names appear after AgentWrangler observes a working directory.",
+    );
   });
 });
 
@@ -369,65 +326,6 @@ describe("SettingsPage — config form validation", () => {
 // ---------------------------------------------------------------------------
 
 describe("SettingsPage — config form save", () => {
-  it("calls saveSettings with limit_tokens when the field is filled and saved", async () => {
-    setupSuccess();
-    render(<SettingsPage />);
-
-    await waitFor(() => screen.getByRole("button", { name: /Save config/i }));
-
-    const limitInput = screen.getByLabelText(/Weekly token limit/i);
-    fireEvent.change(limitInput, { target: { value: "9999999" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /Save config/i }));
-
-    await waitFor(() => {
-      expect(vi.mocked(client.saveSettings)).toHaveBeenCalledWith(
-        expect.objectContaining({ limit_tokens: 9999999 }),
-      );
-    });
-  });
-
-  it("calls saveSettings with limit_tokens: null when field is cleared", async () => {
-    setupSuccess();
-    render(<SettingsPage />);
-
-    await waitFor(() => screen.getByRole("button", { name: /Save config/i }));
-
-    const limitInput = screen.getByLabelText(/Weekly token limit/i);
-    // The user had a limit set, then clears it. Setting a value first makes the
-    // subsequent clear a real value change (so React fires onChange and the field
-    // is marked dirty) — otherwise, per the Bug-1 dirty-tracking fix, an untouched
-    // field is intentionally omitted from the Save payload.
-    fireEvent.change(limitInput, { target: { value: "5000000000" } });
-    fireEvent.change(limitInput, { target: { value: "" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /Save config/i }));
-
-    await waitFor(() => {
-      expect(vi.mocked(client.saveSettings)).toHaveBeenCalledWith(
-        expect.objectContaining({ limit_tokens: null }),
-      );
-    });
-  });
-
-  it("blocks save with an inline error on an invalid (negative) limit — no NaN/garbage sent", async () => {
-    setupSuccess();
-    const { container } = render(<SettingsPage />);
-
-    await waitFor(() => screen.getByRole("button", { name: /Save config/i }));
-
-    const limitInput = screen.getByLabelText(/Weekly token limit/i);
-    fireEvent.change(limitInput, { target: { value: "-5" } });
-    fireEvent.click(screen.getByRole("button", { name: /Save config/i }));
-
-    await waitFor(() => {
-      const errEl = container.querySelector(".settings-inline-error");
-      expect(errEl).not.toBeNull();
-      expect(errEl?.textContent).toMatch(/non-negative/i);
-    });
-    expect(vi.mocked(client.saveSettings)).not.toHaveBeenCalled();
-  });
-
   it("blocks save with an inline error when activity window is below 1", async () => {
     setupSuccess();
     const { container } = render(<SettingsPage />);
@@ -588,6 +486,14 @@ describe("Settings section navigation", () => {
   afterEach(() => {
     window.location.hash = "";
   });
+  it("focuses the visible calibration action from dashboard deep links", async () => {
+    window.location.hash = "#/settings?section=calibration";
+    setupSuccess();
+    render(<SettingsPage />);
+    const calibrate = await screen.findByRole("button", { name: /Calibrate from usage/i });
+    await waitFor(() => expect(document.activeElement).toBe(calibrate));
+    expect(calibrate.closest("details")).toBeNull();
+  });
   it("keeps unsaved form state while section navigation focuses targets and opens Advanced", async () => {
     window.location.hash = "#/settings?section=scan-roots";
     setupSuccess();
@@ -610,5 +516,52 @@ describe("Settings section navigation", () => {
     window.location.hash = "#/settings?section=unknown";
     fireEvent(window, new HashChangeEvent("hashchange"));
     expect(document.activeElement?.id).toBe("settings-parser-health");
+  });
+});
+
+describe("Settings limit controls stay synchronized", () => {
+  it("updates the manual override after calibration without losing other edits", async () => {
+    const initial = mockSettings();
+    if (!initial.data) throw new Error("missing settings fixture");
+    const calibrated = {
+      ...initial,
+      data: { ...initial.data, limit_tokens: 123456, limit_provenance: "calibrated today @ 25.0%" },
+    };
+    vi.mocked(client.fetchSettings).mockResolvedValueOnce(initial).mockResolvedValue(calibrated);
+    vi.mocked(client.calibrateLimitApi).mockResolvedValue(mockCalibrateLimit());
+    render(<SettingsPage />);
+    const calibrate = await screen.findByRole("button", { name: /Calibrate from usage/i });
+    const roots = screen.getByLabelText(/Scan roots/i) as HTMLTextAreaElement;
+    fireEvent.change(roots, { target: { value: "/unsaved/project" } });
+    fireEvent.click(calibrate);
+    await waitFor(() =>
+      expect((screen.getByLabelText(/Weekly token limit/i) as HTMLInputElement).value).toBe(
+        "123456",
+      ),
+    );
+    expect(roots.value).toBe("/unsaved/project");
+  });
+
+  it("clears the calibrated result after a manual save disables forecasting", async () => {
+    const initial = mockSettings();
+    if (!initial.data) throw new Error("missing settings fixture");
+    initial.data = {
+      ...initial.data,
+      limit_tokens: 123456,
+      limit_provenance: "calibrated today @ 25.0%",
+    };
+    vi.mocked(client.fetchSettings).mockResolvedValue(initial);
+    vi.mocked(client.saveSettings).mockResolvedValue({
+      ...initial,
+      data: { ...initial.data, limit_tokens: null, limit_provenance: null, limit_resets_at: null },
+    });
+    render(<SettingsPage />);
+    await screen.findByRole("button", { name: /Re-calibrate from usage/i });
+    fireEvent.click(screen.getByText("Advanced and diagnostics"));
+    fireEvent.change(screen.getByLabelText(/Weekly token limit/i), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save weekly limit" }));
+    await waitFor(() => expect(client.saveSettings).toHaveBeenCalledWith({ limit_tokens: null }));
+    await waitFor(() => expect(screen.queryByLabelText("Calibration result")).toBeNull());
+    expect(screen.getByRole("button", { name: "Calibrate from usage" })).toBeTruthy();
   });
 });
