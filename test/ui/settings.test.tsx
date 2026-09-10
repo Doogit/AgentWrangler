@@ -23,6 +23,89 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+describe("Settings calibration navigation", () => {
+  afterEach(() => {
+    window.location.hash = "";
+  });
+
+  it("focuses the visible primary calibration button for calibration links", async () => {
+    window.location.hash = "#/settings?section=calibration";
+    setupSuccess();
+    const { container } = render(<SettingsPage />);
+
+    await waitFor(() => expect(document.activeElement?.id).toBe("settings-calibration"));
+    expect(container.querySelector<HTMLDetailsElement>("#settings-advanced details")?.open).toBe(
+      false,
+    );
+  });
+});
+
+describe("Settings manual override synchronization", () => {
+  function calibratedSettings() {
+    const base = mockSettings();
+    const baseData = base.data;
+    if (baseData === null) throw new Error("mockSettings() returned null data");
+    return {
+      ...base,
+      data: {
+        ...baseData,
+        limit_tokens: 8_000_000_000,
+        limit_provenance: "calibrated 2026-08-24 @ 25.0%",
+        limit_resets_at: "2026-08-31T00:00:00Z",
+      },
+    };
+  }
+
+  it.each([
+    ["turning forecasting off", "", null, null],
+    ["saving a numeric manual override", "9000000000", 9_000_000_000, "manual"],
+  ])(
+    "updates the Essentials calibration result after %s",
+    async (_scenario, input, limit, provenance) => {
+      const calibrated = calibratedSettings();
+      const base = mockSettings();
+      const baseData = base.data;
+      if (baseData === null) throw new Error("mockSettings() returned null data");
+      const forecastOff = {
+        ...base,
+        data: {
+          ...baseData,
+          limit_tokens: limit,
+          limit_provenance: provenance,
+          limit_resets_at: null,
+        },
+      };
+      vi.mocked(client.fetchSettings).mockResolvedValue(calibrated);
+      vi.mocked(client.saveSettings).mockResolvedValue(forecastOff);
+
+      const { container } = render(<SettingsPage />);
+      await screen.findByLabelText("Calibration result");
+      fireEvent.click(screen.getByText("Advanced and diagnostics"));
+      fireEvent.change(screen.getByLabelText(/Weekly token limit/i), { target: { value: input } });
+      fireEvent.click(screen.getByRole("button", { name: "Save weekly limit" }));
+
+      await waitFor(() => expect(container.querySelector(".settings-calibrate-result")).toBeNull());
+      expect(screen.getByRole("button", { name: "Calibrate from usage" })).toBeTruthy();
+    },
+  );
+
+  it("updates the manual input after a successful calibration", async () => {
+    const initial = mockSettings();
+    const calibrated = calibratedSettings();
+    vi.mocked(client.fetchSettings).mockResolvedValueOnce(initial).mockResolvedValue(calibrated);
+    vi.mocked(client.calibrateLimitApi).mockResolvedValue(mockCalibrateLimit());
+
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /Calibrate from usage/i }));
+    await screen.findByRole("button", { name: /Re-calibrate from usage/i });
+
+    fireEvent.click(screen.getByText("Advanced and diagnostics"));
+    expect((screen.getByLabelText(/Weekly token limit/i) as HTMLInputElement).value).toBe(
+      "8000000000",
+    );
+  });
+});
+
 function setupSuccess() {
   vi.mocked(client.fetchSettings).mockResolvedValue(mockSettings());
   vi.mocked(client.saveSettings).mockResolvedValue(mockSettings());

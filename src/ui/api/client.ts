@@ -165,6 +165,8 @@ export function getLastFetchTimestamp(endpoint: string, params?: unknown): numbe
 function clearResponseCache(): void {
   responseCache.clear();
   cacheGeneration += 1;
+  // Existing readers may finish, but post-mutation readers need a new transport.
+  inFlightRequests.clear();
 }
 
 function setCachedResponse<T>(key: string, data: T, fetchedAt: number): void {
@@ -319,7 +321,7 @@ export async function fetchCachedJson<T>(
 
   const key = getResponseCacheKey(endpoint, params);
   let request = inFlightRequests.get(key);
-  if (!request) {
+  if (!request || request.controller.signal.aborted) {
     request = createInFlightRequest<T>(key, endpoint, requestEndpoint, networkOnly);
     inFlightRequests.set(key, request);
   }

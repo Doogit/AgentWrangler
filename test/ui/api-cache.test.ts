@@ -226,6 +226,52 @@ describe("UI API response cache", () => {
     expect(transportSignal?.aborted).toBe(true);
   });
 
+  it("starts a new transport when a caller arrives immediately after the last caller aborts", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ fresh: true }), { status: 200 }));
+    const controller = new AbortController();
+    const first = fetchCachedJson(endpoint, params, endpoint, controller.signal);
+    const firstRejected = expect(first).rejects.toThrow();
+
+    controller.abort();
+    const replacement = fetchCachedJson(endpoint, params);
+
+    await firstRejected;
+    await expect(replacement).resolves.toEqual({ fresh: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not join a pre-mutation read after a successful mutation", async () => {
+    let resolveOld: ((response: Response) => void) | undefined;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveOld = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ fresh: true }), { status: 200 }));
+    const oldRead = fetchCachedJson(endpoint, params);
+    await resetDatabase();
+    const freshRead = fetchCachedJson(endpoint, params);
+    resolveOld?.(new Response(JSON.stringify({ stale: true }), { status: 200 }));
+
+    await expect(oldRead).resolves.toEqual({ stale: true });
+    await expect(freshRead).resolves.toEqual({ fresh: true });
+    expect(getCachedResponse(endpoint, params)).toEqual({ fresh: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("removes a rejected shared request so a retry starts a new transport", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
