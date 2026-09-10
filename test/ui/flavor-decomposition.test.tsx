@@ -19,7 +19,9 @@ import CacheEfficiencyKPI from "../../src/ui/overview/CacheEfficiencyKPI";
 import CacheWriteSpikesChart, {
   buildCacheWriteChartRows,
 } from "../../src/ui/overview/CacheWriteSpikesChart";
-import FlavorDecompositionChart from "../../src/ui/overview/FlavorDecomposition";
+import FlavorDecompositionChart, {
+  buildFlavorChartRows,
+} from "../../src/ui/overview/FlavorDecomposition";
 
 afterEach(() => cleanup());
 
@@ -212,6 +214,21 @@ describe("T11 — FlavorDecomposition renders both modes", () => {
       <FlavorDecompositionChart state={{ status: "ok", value: mockFlavorData() }} />,
     );
     expect(container.textContent).toMatch(/Where your tokens go/);
+  });
+
+  it("shows the log-scale caption", () => {
+    const { container } = render(
+      <FlavorDecompositionChart state={{ status: "ok", value: mockFlavorData() }} />,
+    );
+    expect(container.textContent).toMatch(/Log scale · token values/);
+  });
+
+  it("excludes zero-token flavors from chart rows (no false sliver on the log axis)", () => {
+    const data = mockFlavorData().data;
+    expect(data).not.toBeNull();
+    const rows = buildFlavorChartRows(data?.flavors ?? [], data?.coeff_used ?? 0.1);
+    expect(rows.map((r) => r.flavor)).not.toContain("cache_write_other");
+    expect(rows).toHaveLength(5);
   });
 });
 

@@ -10,4 +10,9 @@ export type { LegacyEffectCycle } from "./legacy.js";
 export { directionFor, EFFECT_HANDLERS, findHandler } from "./registry.js";
 export { createSqlObservationProvider } from "./sql-observer.js";
 export type { ResolvedSourceIdentity, SqlObserverOptions } from "./sql-observer.js";
+export {
+  effectEventSourceIdentity,
+  effectToolIdentity,
+  isOpaqueEffectIdentity,
+} from "./scope-identity.js";
 export * from "./types.js";

@@ -1,7 +1,9 @@
 import { useId, useState } from "react";
 import Chip, { KIND_TOOLTIP, type ChipProps } from "./Chip";
 
-const CHIP_KINDS = Object.keys(KIND_TOOLTIP) as Array<ChipProps["kind"]>;
+const CHIP_KINDS = (Object.keys(KIND_TOOLTIP) as Array<ChipProps["kind"]>).filter(
+  (kind) => kind !== "NO_DATA",
+);
 
 export default function ChipLegend() {
   const [isOpen, setIsOpen] = useState(false);

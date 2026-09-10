@@ -59,6 +59,22 @@ function dataFor(sessionId: string) {
 }
 
 describe("getSessionDrivers", () => {
+  it("routes only the affected D7 session to its matching recommendation", () => {
+    insWs("ws-loop");
+    insSess("sess-loop", "ws-loop", 100);
+    insSess("sess-quiet", "ws-loop", 100);
+    insRec({
+      recId: "rec-loop",
+      detectorId: "D7",
+      workspaceId: "ws-loop",
+      evidence: { session_id: "sess-loop", loop_flagged_turn_share: 0.5 },
+    });
+    expect(dataFor("sess-loop").drivers).toEqual([
+      expect.objectContaining({ detector_id: "D7", rec_id: "rec-loop", routing: "rec_card" }),
+    ]);
+    expect(dataFor("sess-quiet").drivers).toEqual([]);
+  });
+
   it("returns D6 and D8 drivers with only whitelisted measurements", () => {
     insWs("ws-drivers");
     insSess("sess-drivers", "ws-drivers", 100);

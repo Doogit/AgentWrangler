@@ -68,7 +68,7 @@ const DRIVER_CONFIG: Record<
       "loop_flagged_turn_share",
     ],
     shareField: "loop_flagged_turn_share",
-    routing: "hook",
+    routing: "rec_card",
   },
   D8: {
     label: "CACHE_WRITE_CHURN",

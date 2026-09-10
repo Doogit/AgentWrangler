@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ObservationBundle } from "../../src/effects/types";
 import type { RecommendationCard } from "../../src/query/api/recommendations";
 import EffectEvidence from "../../src/ui/recommendations/EffectEvidence";
 import EvaluationDisclosure from "../../src/ui/recommendations/EvaluationDisclosure";
@@ -148,5 +149,93 @@ describe("ESF4 evaluation disclosures", () => {
 
     render(<EffectEvidence cycle={makeEffectCycle()} />);
     expect(screen.getByText("Follow-up evidence: unavailable.")).toBeTruthy();
+  });
+
+  it("shows session and exposure denominators, model-mix counts, and the supplied repair seam", () => {
+    const unavailableMix = { available: false, total: 0, counts: {} };
+    const evidence: ObservationBundle = {
+      metricId: "d2-floor-context",
+      methodVersion: "d2-floor-context-v2",
+      queryDefinitionVersion: "esf-1",
+      scopeFingerprint: "opaque",
+      parserVersions: [],
+      parserMix: { before: unavailableMix, after: unavailableMix },
+      before: { value: 100, denominator: 10, exposureN: 10, sessionN: 9, excluded: {} },
+      after: { value: 82, denominator: 10, exposureN: 10, sessionN: 9, excluded: {} },
+      modelMix: {
+        before: { available: true, total: 20, counts: { sonnet: 6, opus: 14 } },
+        after: { available: true, total: 20, counts: { sonnet: 11, opus: 9 } },
+      },
+      toolMix: { before: unavailableMix, after: unavailableMix },
+      taskMix: { before: unavailableMix, after: unavailableMix },
+      guardrails: [
+        {
+          guardrailId: "reported-useful-completion-repair",
+          methodVersion: "synthetic-supplied-guardrail-1",
+          availability: "SUPPORTED",
+          unit: "completion",
+          before: { value: 2, denominator: 10, exposureN: 10, sessionN: 9, excluded: {} },
+          after: { value: 5, denominator: 10, exposureN: 10, sessionN: 9, excluded: {} },
+          direction: "ADVERSE",
+          reasonCodes: ["SYNTHETIC_SUPPLIED_GUARDRAIL_SEAM"],
+          evidence: { source: "synthetic supplied guardrail seam" },
+        },
+        {
+          guardrailId: "native-token-repair",
+          methodVersion: "native-token-repair-v1",
+          availability: "SUPPORTED",
+          unit: "tokens",
+          before: { value: 30, denominator: 30, exposureN: 30, sessionN: 9, excluded: {} },
+          after: { value: 30, denominator: 30, exposureN: 30, sessionN: 9, excluded: {} },
+          direction: "STABLE",
+          reasonCodes: [],
+          evidence: {},
+        },
+      ],
+    };
+    const cycle = makeEffectCycle({
+      provisionalEvidence: evidence,
+      guardrailDefinitions: [
+        {
+          guardrailId: "reported-useful-completion-repair",
+          methodVersion: "synthetic-supplied-guardrail-1",
+          unit: "completion",
+        },
+        {
+          guardrailId: "native-token-repair",
+          methodVersion: "native-token-repair-v1",
+          unit: "tokens",
+        },
+      ],
+    });
+    const result = render(<EffectEvidence cycle={cycle} />);
+    const text = screen.getByRole("region", { name: "Evidence and limits" }).textContent ?? "";
+
+    expect(text).toContain("Distinct sessions: 9. Exposures: 10.");
+    expect(text).toContain("sonnet: 6 / 20 turns (30%)");
+    expect(text).toContain("sonnet: 11 / 20 turns (55%)");
+    expect(text).toContain(
+      "reported-useful-completion-repair: baseline value: 2 completion. Denominator: 10. Follow-up value: 5 completion. Denominator: 10.",
+    );
+    expect(text).toContain(
+      "native-token-repair: baseline value: 30 tokens. Denominator: 30. Follow-up value: 30 tokens. Denominator: 30.",
+    );
+    expect(text).not.toContain("native-token-repair: baseline 30 / 30");
+    expect(text).toContain("SYNTHETIC_SUPPLIED_GUARDRAIL_SEAM");
+    expect(screen.getByText(/reported-useful-completion-repair: adverse/i)).toBeTruthy();
+    result.unmount();
+
+    render(
+      <EffectEvidence
+        cycle={makeEffectCycle({
+          provisionalEvidence: {
+            ...evidence,
+            before: { ...evidence.before, sessionN: 1, exposureN: 10 },
+            after: { ...evidence.after, sessionN: 1, exposureN: 10 },
+          },
+        })}
+      />,
+    );
+    expect(screen.getAllByText(/Distinct sessions: 1\. Exposures: 10\./)).toHaveLength(2);
   });
 });

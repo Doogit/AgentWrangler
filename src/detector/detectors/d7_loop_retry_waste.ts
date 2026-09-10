@@ -9,11 +9,10 @@
  */
 
 import type { Db } from "../../db/open.js";
+import { getEsfObservedTestRecoveryContext } from "../../query/api/esf-observations.js";
 import { capWeightForTurn, resolveCapReadCoeff } from "../../query/cap-weighted.js";
+import { analyzeD7LoopEvents } from "../d7-loop-analysis.js";
 import type { Detector, DetectorContext, DetectorOutcome, Fired } from "../types.js";
-
-const MIN_RUN = 3;
-const MIN_TRIGRAM_REPEATS = 3;
 
 interface EventRow {
   event_id: string;
@@ -55,139 +54,6 @@ interface SessionTotalsRow {
 interface SessionSignals {
   workspaceId: string;
   rows: EventRow[];
-}
-
-function identicalCallKey(row: EventRow | undefined): string | null {
-  return row === undefined || row.input_hash === null
-    ? null
-    : `${row.tool_name.length}:${row.tool_name}${row.input_hash}`;
-}
-
-function markRuns(
-  rows: EventRow[],
-  keyFor: (row: EventRow) => string | null,
-  target: Set<string>,
-  excessTarget: Set<string>,
-): void {
-  let run: EventRow[] = [];
-  let runKey: string | null = null;
-
-  const flush = (): void => {
-    if (run.length >= MIN_RUN) {
-      for (const row of run) target.add(row.event_id);
-      // The first event is the necessary baseline attempt. Only later events
-      // contribute to the conservative repeat-excess exposure estimate.
-      for (const row of run.slice(1)) excessTarget.add(row.event_id);
-    }
-    run = [];
-    runKey = null;
-  };
-
-  for (const row of rows) {
-    const key = keyFor(row);
-    if (key !== null && key === runKey) {
-      run.push(row);
-    } else {
-      flush();
-      if (key !== null) {
-        run = [row];
-        runKey = key;
-      }
-    }
-  }
-  flush();
-}
-
-function markRedundantReads(
-  rows: EventRow[],
-  target: Set<string>,
-  excessTarget: Set<string>,
-): void {
-  const readsSinceWrite = new Map<string, Map<string, EventRow[]>>();
-
-  const markIfQualifying = (reads: EventRow[] | undefined): void => {
-    if (reads && reads.length >= MIN_RUN) {
-      for (const row of reads) target.add(row.event_id);
-      // Preserve one baseline read; only repeated reads are excess exposure.
-      for (const row of reads.slice(1)) excessTarget.add(row.event_id);
-    }
-  };
-
-  const flushPath = (pathIdentity: string): void => {
-    const regions = readsSinceWrite.get(pathIdentity);
-    if (regions !== undefined) {
-      for (const reads of regions.values()) markIfQualifying(reads);
-    }
-    readsSinceWrite.delete(pathIdentity);
-  };
-
-  for (const row of rows) {
-    const pathIdentity = row.file_path_hash;
-    if (pathIdentity === null) continue;
-
-    const tool = row.tool_name.toLowerCase();
-    if (tool === "edit" || tool === "write") {
-      flushPath(pathIdentity);
-      continue;
-    }
-    if (tool !== "read" || row.input_hash === null) continue;
-
-    // input_hash includes normalized file_path plus Read offset/limit, so
-    // different chunks of one file remain distinct and do not look redundant.
-    const regions = readsSinceWrite.get(pathIdentity) ?? new Map<string, EventRow[]>();
-    const reads = regions.get(row.input_hash) ?? [];
-    reads.push(row);
-    regions.set(row.input_hash, reads);
-    readsSinceWrite.set(pathIdentity, regions);
-  }
-
-  for (const regions of readsSinceWrite.values()) {
-    for (const reads of regions.values()) markIfQualifying(reads);
-  }
-}
-
-function markThreeGramLoops(
-  rows: EventRow[],
-  target: Set<string>,
-  excessTarget: Set<string>,
-): void {
-  const tripleLength = 3;
-  const minimumRunLength = tripleLength * MIN_TRIGRAM_REPEATS;
-
-  for (let start = 0; start <= rows.length - minimumRunLength; ) {
-    const first = identicalCallKey(rows[start]);
-    const second = identicalCallKey(rows[start + 1]);
-    const third = identicalCallKey(rows[start + 2]);
-
-    if (
-      first === null ||
-      second === null ||
-      third === null ||
-      (first === second && second === third)
-    ) {
-      start += 1;
-      continue;
-    }
-
-    let end = start + tripleLength;
-    while (
-      end + tripleLength <= rows.length &&
-      identicalCallKey(rows[end]) === first &&
-      identicalCallKey(rows[end + 1]) === second &&
-      identicalCallKey(rows[end + 2]) === third
-    ) {
-      end += tripleLength;
-    }
-
-    if (end - start < minimumRunLength) {
-      start += 1;
-      continue;
-    }
-
-    for (const row of rows.slice(start, end)) target.add(row.event_id);
-    for (const row of rows.slice(start + tripleLength, end)) excessTarget.add(row.event_id);
-    start = end;
-  }
 }
 
 export const d7Detector: Detector = {
@@ -318,29 +184,19 @@ export const d7Detector: Detector = {
     const capReadCoeff = resolveCapReadCoeff(db);
 
     const fired: Fired[] = [];
+    const workspaceContexts = new Map<
+      string,
+      ReturnType<typeof getEsfObservedTestRecoveryContext>
+    >();
     for (const [sessionId, session] of bySession) {
-      const identicalCalls = new Set<string>();
-      const testFails = new Set<string>();
-      const redundantReads = new Set<string>();
-      const threeGramLoops = new Set<string>();
-      const repeatExcessEventIds = new Set<string>();
-
-      markRuns(session.rows, identicalCallKey, identicalCalls, repeatExcessEventIds);
-      markRuns(
-        session.rows,
-        (row) => (row.exit_class === "TEST_FAIL" ? "TEST_FAIL" : null),
+      const {
+        identicalCalls,
         testFails,
+        redundantReads,
+        threeGramLoops,
         repeatExcessEventIds,
-      );
-      markRedundantReads(session.rows, redundantReads, repeatExcessEventIds);
-      markThreeGramLoops(session.rows, threeGramLoops, repeatExcessEventIds);
-
-      const flaggedEventIds = new Set([
-        ...identicalCalls,
-        ...testFails,
-        ...redundantReads,
-        ...threeGramLoops,
-      ]);
+        flaggedEventIds,
+      } = analyzeD7LoopEvents(session.rows);
       if (flaggedEventIds.size === 0) continue;
 
       const flaggedTurns = new Map<string, EventRow>();
@@ -365,6 +221,19 @@ export const d7Detector: Detector = {
       const ownerTurnMetadataCoverage = Number(
         (coverage.covered / coverage.denominator).toFixed(6),
       );
+
+      // Workspace observation context is a separate denominator from this
+      // session's native matcher and metadata coverage. Freeze its exact window.
+      if (!workspaceContexts.has(session.workspaceId)) {
+        workspaceContexts.set(
+          session.workspaceId,
+          getEsfObservedTestRecoveryContext(db, {
+            workspaceId: session.workspaceId,
+            from: ctx.fromIso,
+            to: ctx.toIso,
+          }),
+        );
+      }
 
       fired.push({
         scopeKey: `D7|${sessionId}`,
@@ -391,6 +260,7 @@ export const d7Detector: Detector = {
             "cap-weighted exposure of turns owning repeat-excess events; not an avoidable-token or USD savings estimate",
         },
         evidence: {
+          ...workspaceContexts.get(session.workspaceId),
           title: `Stop repeated attempts: ${flaggedTurns.size} affected turn${flaggedTurns.size === 1 ? "" : "s"} in this session`,
           session_id: sessionId,
           workspace_id: session.workspaceId,

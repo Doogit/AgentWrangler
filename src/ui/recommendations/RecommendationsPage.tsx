@@ -20,6 +20,7 @@ import type {
 } from "../../query/api/recommendations";
 import type { ApiResponse } from "../../query/envelope";
 import { fetchRecommendations } from "../api/client";
+import { useWorkspaceNames } from "../lib/workspace-names";
 import Chip from "../shell/Chip";
 import EmptyState from "../shell/EmptyState";
 import InfoTip from "../shell/InfoTip";
@@ -239,6 +240,7 @@ async function fetchSessionToken(): Promise<string> {
 export default function RecommendationsPage() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [refreshKey, setRefreshKey] = useState(0);
+  const { labelFor } = useWorkspaceNames();
 
   // Subscribe to hash changes to pick up URL-synced toolbar params.
   const hash = useSyncExternalStore(subscribeToHash, getHash, getHashServer);
@@ -403,7 +405,7 @@ export default function RecommendationsPage() {
                     });
 
               // Scope choices keep the tier filter and include warning proposals.
-              const workspaces = collectWorkspaces(view);
+              const workspaces = collectWorkspaces(view, labelFor);
               const allProposed = [...view.active, ...view.limit_warnings];
               const scopeCandidates = applyFilters(allProposed, {
                 ...toolbarParams,

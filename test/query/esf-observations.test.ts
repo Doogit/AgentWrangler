@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   getEsfObservations,
+  getEsfObservedTestRecoveryContext,
   getSessionEsfObservations,
 } from "../../src/query/api/esf-observations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
@@ -189,6 +190,16 @@ describe("getEsfObservations", () => {
       recovered_session_ids: ["ses-a01", "ses-a02", "ses-a03"],
       eligible_reconciled_qualifying_tool_session_count: 18,
     });
+    expect(
+      getEsfObservedTestRecoveryContext(db, { workspaceId: "ws-alpha", from: FROM, to: TO }),
+    ).toEqual({
+      workspace_context_from: FROM,
+      workspace_context_to: TO,
+      workspace_affected_session_ids: data.observed_test_recovery.affected_session_ids,
+      workspace_recovered_session_ids: data.observed_test_recovery.recovered_session_ids,
+      workspace_qualifying_session_count:
+        data.observed_test_recovery.eligible_reconciled_qualifying_tool_session_count,
+    });
     expect(data.allocation_sessions).toHaveLength(18);
     expect(data.allocation_sessions.reduce((sum, row) => sum + row.priced_cost_u, 0)).toBe(830_000);
     expect(data.allocation_sessions.find((row) => row.session_id === "ses-a16")).toMatchObject({
@@ -196,6 +207,38 @@ describe("getEsfObservations", () => {
       cost_claim_counts: [{ value: "BILLED", count: 1 }],
       parser_version_counts: [{ value: "parser-b", count: 1 }],
     });
+  });
+
+  it("preserves versioned session-level tool qualification while bounding completed tests", () => {
+    session("historic-tool", "ws-alpha");
+    turn("selected-turn", "historic-tool", "ws-alpha", 0);
+    tool("historic-bash", "historic-tool", "2026-07-31T23:59:59.999Z", "TEST_FAIL", true, 1);
+    tool("current-fail-a", "historic-tool", IN, "TEST_FAIL", true, 1);
+    tool("current-fail-b", "historic-tool", IN, "TEST_FAIL", true, 1);
+    // A metadata-recognized test need not use one of the activity-qualifying tool names.
+    db.prepare(
+      "UPDATE tool_events SET tool_name='TestRunner' WHERE event_id LIKE 'current-fail-%'",
+    ).run();
+    tool("outside-pass", "historic-tool", TO, "OK", true, 1);
+    db.prepare("UPDATE tool_events SET tool_name='TestRunner' WHERE event_id='outside-pass'").run();
+    session("unselected", "ws-alpha");
+    turn("outside-turn", "unselected", "ws-alpha", 0, TO);
+    tool("unselected-bash", "unselected", IN);
+    const opts = { workspaceId: "ws-alpha", from: FROM, to: TO };
+    expect(getEsfObservedTestRecoveryContext(db, opts)).toMatchObject({
+      workspace_qualifying_session_count: 1,
+      workspace_affected_session_ids: ["historic-tool"],
+      workspace_recovered_session_ids: [],
+    });
+    expect(cohort().observed_test_recovery).toMatchObject({
+      method_version: "esf-observed-test-recovery-1",
+      eligible_reconciled_qualifying_tool_session_count: 1,
+      affected_session_ids: ["historic-tool"],
+      recovered_session_ids: [],
+    });
+    db.prepare("DELETE FROM tool_event_metadata WHERE event_id='current-fail-b'").run();
+    db.prepare("DELETE FROM tool_events WHERE event_id='current-fail-b'").run();
+    expect(getEsfObservedTestRecoveryContext(db, opts).workspace_affected_session_ids).toEqual([]);
   });
 
   it("deduplicates sessions, respects [from,to), excludes no-tool research, and scopes workspace", () => {

@@ -8,7 +8,7 @@
  *   - Framed as "Possible improvement" / "early upper estimate".
  */
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LedgerEntry } from "../../src/query/api/recommendations-ledger";
 import * as client from "../../src/ui/api/client";
@@ -55,29 +55,33 @@ describe("HeadroomSummary — individual opportunities", () => {
       headroom_pct: null,
     };
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(response);
-    const { container } = render(<ImpactLedger />);
+    const { container, getByRole } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
-    const text = container.textContent ?? "";
-    expect(text).toContain("rec-a: $2.45/wk");
-    expect(text).toContain("rec-b: $0.50/wk");
+    expect(container.querySelector("table")).toBeNull();
+    fireEvent.click(getByRole("button", { name: "See breakdown →" }));
+    const text = getByRole("table").textContent ?? "";
+    expect(text).toContain("rec-a");
+    expect(text).toContain("rec-b");
+    expect(text).toContain("$2.45/wk");
+    expect(text).toContain("$0.50/wk");
     expect(text).not.toMatch(/\d+% of trailing spend/);
   });
 
-  it("does not render a legacy combined percentage when one is supplied", async () => {
+  it("explains when an empty opportunity list has no breakdown", async () => {
     const over = mockEfficiencyHeadroom();
     if (over.data === null) throw new Error("fixture must have data");
-    const { opportunities: _opportunities, ...legacyData } = over.data;
-    over.data = { ...legacyData, headroom_pct: 3.0 }; // Legacy payload: no opportunity coverage.
+    over.data = { ...over.data, opportunities: [], headroom_pct: 3.0, open_rec_count: 0 };
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(over);
-    const { container } = render(<ImpactLedger />);
+    const { container, queryByRole } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
     expect(text).not.toContain("300%");
-    expect(text).toContain("individual opportunity coverage unavailable");
+    expect(text).toContain("No individual modeled opportunities are available");
+    expect(queryByRole("button", { name: "See breakdown →" })).toBeNull();
   });
 
   it("frames output as 'Possible improvement' — never a dollar-headline (INT-5)", async () => {
@@ -93,21 +97,21 @@ describe("HeadroomSummary — individual opportunities", () => {
     expect(text.toLowerCase()).not.toMatch(/\$[\d.]+\s*saved/);
   });
 
-  it("shows the open rec count from the fixture", async () => {
+  it("counts the open modeled opportunities in the summary line", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("1 open rec");
+    expect(text).toContain("1 open modeled opportunity");
   });
 });
 
 describe("HeadroomSummary — unavailable opportunity coverage", () => {
   it("renders unavailable coverage when opportunities are absent — no NaN or ∞", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroomNull());
-    const { container } = render(<ImpactLedger />);
+    const { container, queryByRole } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
@@ -116,12 +120,13 @@ describe("HeadroomSummary — unavailable opportunity coverage", () => {
     expect(text).not.toContain("NaN");
     expect(text).not.toContain("Infinity");
     expect(text).not.toContain("∞");
-    expect(text).toContain("individual opportunity coverage unavailable");
+    expect(text).toContain("Individual modeled estimates were not provided");
+    expect(queryByRole("button", { name: "See breakdown →" })).toBeNull();
   });
 
   it("zero-spend scenario does not divide by zero", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroomNull());
-    const { container } = render(<ImpactLedger />);
+    const { container, queryByRole } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
@@ -131,7 +136,8 @@ describe("HeadroomSummary — unavailable opportunity coverage", () => {
     expect(summaryText).toContain("Possible improvement");
     // Missing legacy opportunity coverage never renders a numeric percentage.
     expect(summaryText).not.toMatch(/\d+%/);
-    expect(summaryText).toContain("individual opportunity coverage unavailable");
+    expect(summaryText).toContain("Individual modeled estimates were not provided");
+    expect(queryByRole("button", { name: "See breakdown →" })).toBeNull();
   });
 });
 

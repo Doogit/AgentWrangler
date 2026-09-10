@@ -52,6 +52,41 @@ function rec(id: string, fileRef = `/project/${id}.md`, workspace = "ws-alpha"):
 }
 
 describe("ESF2 effect service", () => {
+  it("tracks native D7 recommendations at workspace scope without inferring source or tool", () => {
+    rec("rec-d7");
+    db.prepare(`UPDATE recommendations SET detector_id='D7',
+      target_metric='loop_flagged_turn_share', evidence_json=? WHERE rec_id='rec-d7'`).run(
+      JSON.stringify({ sourceIdentity: "a".repeat(64), tool: "Bash", file_path_hash: "synthetic" }),
+    );
+    expect(capabilityForRecommendation(db, "rec-d7")).toEqual({ mode: "TRACKABLE", reason: null });
+    const tracked = trackCompletedChange(
+      db,
+      {
+        rec_id: "rec-d7",
+        idempotency_key: "d7-workspace",
+        completed_change: true,
+      },
+      T0,
+    );
+    if (!tracked.supported) throw new Error("D7 tracking unavailable");
+    expect(tracked.cycle.scope).toEqual({ workspaceId: "ws-alpha" });
+    expect(tracked.cycle.targetDefinition.metricId).toBe("d7-loop-flagged-turn-share");
+    expect(tracked.cycle.scheduledObservationTo).toBe("2026-01-24T00:00:00.000Z");
+    expect(listEffectEvidence(db, "ws-alpha", "rec-d7").cycles[0]).toEqual(tracked.cycle);
+    expect(() =>
+      trackCompletedChange(
+        db,
+        {
+          rec_id: "rec-d7",
+          idempotency_key: "d7-injected",
+          completed_change: true,
+          scope: { tool: "b".repeat(64) },
+        },
+        T0,
+      ),
+    ).toThrow(/Unknown request field/);
+  });
+
   it("replays frozen tracking after recommendation drift while rejecting changed caller intent", () => {
     rec("rec-retry");
     const request = { rec_id: "rec-retry", idempotency_key: "retry", completed_change: true };

@@ -80,6 +80,18 @@ export interface EsfObservationCohort {
   workspace_id: string | null;
 }
 
+/**
+ * Minimal workspace observation context for consumers that need the
+ * versioned completed-test recovery denominator but not the full ESF cohort.
+ */
+export interface EsfObservedTestRecoveryContext {
+  workspace_context_from: string;
+  workspace_context_to: string;
+  workspace_affected_session_ids: string[];
+  workspace_recovered_session_ids: string[];
+  workspace_qualifying_session_count: number;
+}
+
 interface AggregateRow {
   selected_session_count: number;
   priced_cost_u: number;
@@ -135,6 +147,103 @@ function sourceFingerprint(opts: EsfObservationQueryOpts, rows: FingerprintRow[]
     .digest("hex");
 }
 
+function selectedTurnCohort(opts: EsfObservationQueryOpts): {
+  cohort: string;
+  params: string[];
+} {
+  const workspaceFilter = opts.workspaceId === null ? "" : " AND t.workspace_id = ?";
+  const sessionFilter = opts.sessionId === undefined ? "" : " AND t.session_id = ?";
+  const params =
+    opts.workspaceId === null ? [opts.from, opts.to] : [opts.from, opts.to, opts.workspaceId];
+  if (opts.sessionId !== undefined) params.push(opts.sessionId);
+
+  return {
+    params,
+    cohort: `WITH selected_turns AS (
+      SELECT t.message_id, t.session_id, t.ts, t.cost_equiv_u, t.cost_claim, t.parser_version, t.provisional
+        FROM turns t
+       WHERE t.ts >= ? AND t.ts < ?${workspaceFilter}${sessionFilter}
+    ),
+    selected_sessions AS (
+      SELECT DISTINCT st.session_id, s.state
+        FROM selected_turns st
+        JOIN sessions s USING (session_id)
+    )`,
+  };
+}
+
+/**
+ * Read only the bounded, versioned completed-test recovery context. This keeps
+ * the exact ESF observation definitions available to detector evidence without
+ * constructing unrelated resource, allocation, or fingerprint aggregates.
+ * esf-cohort-1 selects sessions by in-window turns, then qualifies tool activity
+ * over the session. Only the completed-test sequence is bounded to this window.
+ */
+export function getEsfObservedTestRecoveryContext(
+  db: Db,
+  opts: EsfObservationQueryOpts,
+): EsfObservedTestRecoveryContext {
+  const { cohort, params } = selectedTurnCohort(opts);
+  const obstacleRows = db
+    .prepare(
+      `${cohort},
+       eligible AS (
+         SELECT ss.session_id
+           FROM selected_sessions ss
+          WHERE ss.state = 'RECONCILED'
+            AND EXISTS (
+              SELECT 1 FROM tool_events te
+               WHERE te.session_id = ss.session_id
+                 AND te.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
+            )
+       ),
+       completed_tests AS (
+         SELECT te.session_id, te.ts, te.exit_class
+           FROM tool_events te
+           JOIN tool_event_metadata tem USING (event_id)
+           JOIN eligible e USING (session_id)
+          WHERE te.ts >= ? AND te.ts < ?
+            AND tem.is_test_command = 1 AND te.result_bytes IS NOT NULL
+       ),
+       failures AS (
+         SELECT session_id, COUNT(*) AS failure_count
+           FROM completed_tests WHERE exit_class = 'TEST_FAIL'
+          GROUP BY session_id HAVING COUNT(*) >= 2
+       )
+       SELECT f.session_id,
+              EXISTS (
+                SELECT 1 FROM completed_tests failed
+                JOIN completed_tests pass ON pass.session_id = failed.session_id
+                 WHERE failed.session_id = f.session_id
+                   AND failed.exit_class = 'TEST_FAIL'
+                   AND pass.exit_class = 'OK' AND pass.ts > failed.ts
+              ) AS recovered
+         FROM failures f ORDER BY f.session_id`,
+    )
+    .all(...params, opts.from, opts.to) as Array<{ session_id: string; recovered: number }>;
+  const eligibleToolRow = db
+    .prepare(
+      `${cohort}
+       SELECT COUNT(*) AS count FROM selected_sessions ss
+        WHERE ss.state = 'RECONCILED'
+          AND EXISTS (
+            SELECT 1 FROM tool_events te WHERE te.session_id = ss.session_id
+              AND te.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
+          )`,
+    )
+    .get(...params) as { count: number };
+
+  return {
+    workspace_context_from: opts.from,
+    workspace_context_to: opts.to,
+    workspace_affected_session_ids: obstacleRows.map((row) => row.session_id),
+    workspace_recovered_session_ids: obstacleRows
+      .filter((row) => row.recovered === 1)
+      .map((row) => row.session_id),
+    workspace_qualifying_session_count: eligibleToolRow.count,
+  };
+}
+
 /**
  * Read the bounded selected-turn cohort once for ESF resource, activity,
  * obstacle, and future allocation consumers. The selected session predicate is
@@ -148,21 +257,7 @@ export function getEsfObservations(
   db: Db,
   opts: EsfObservationQueryOpts,
 ): ApiResponse<EsfObservationCohort> {
-  const workspaceFilter = opts.workspaceId === null ? "" : " AND t.workspace_id = ?";
-  const sessionFilter = opts.sessionId === undefined ? "" : " AND t.session_id = ?";
-  const params =
-    opts.workspaceId === null ? [opts.from, opts.to] : [opts.from, opts.to, opts.workspaceId];
-  if (opts.sessionId !== undefined) params.push(opts.sessionId);
-  const cohort = `WITH selected_turns AS (
-      SELECT t.message_id, t.session_id, t.ts, t.cost_equiv_u, t.cost_claim, t.parser_version, t.provisional
-        FROM turns t
-       WHERE t.ts >= ? AND t.ts < ?${workspaceFilter}${sessionFilter}
-    ),
-    selected_sessions AS (
-      SELECT DISTINCT st.session_id, s.state
-        FROM selected_turns st
-        JOIN sessions s USING (session_id)
-    )`;
+  const { cohort, params } = selectedTurnCohort(opts);
 
   const aggregate = db
     .prepare(
@@ -300,54 +395,7 @@ export function getEsfObservations(
     .filter((row) => row.state === "RECONCILED")
     .map((row) => row.session_id);
 
-  const obstacleRows = db
-    .prepare(
-      `${cohort},
-       eligible AS (
-         SELECT ss.session_id
-           FROM selected_sessions ss
-          WHERE ss.state = 'RECONCILED'
-            AND EXISTS (
-              SELECT 1 FROM tool_events te
-               WHERE te.session_id = ss.session_id
-                 AND te.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
-            )
-       ),
-       completed_tests AS (
-         SELECT te.session_id, te.ts, te.exit_class
-           FROM tool_events te
-           JOIN tool_event_metadata tem USING (event_id)
-           JOIN eligible e USING (session_id)
-          WHERE te.ts >= ? AND te.ts < ?
-            AND tem.is_test_command = 1 AND te.result_bytes IS NOT NULL
-       ),
-       failures AS (
-         SELECT session_id, COUNT(*) AS failure_count
-           FROM completed_tests WHERE exit_class = 'TEST_FAIL'
-          GROUP BY session_id HAVING COUNT(*) >= 2
-       )
-       SELECT f.session_id,
-              EXISTS (
-                SELECT 1 FROM completed_tests failed
-                JOIN completed_tests pass ON pass.session_id = failed.session_id
-                 WHERE failed.session_id = f.session_id
-                   AND failed.exit_class = 'TEST_FAIL'
-                   AND pass.exit_class = 'OK' AND pass.ts > failed.ts
-              ) AS recovered
-         FROM failures f ORDER BY f.session_id`,
-    )
-    .all(...params, opts.from, opts.to) as Array<{ session_id: string; recovered: number }>;
-  const eligibleToolRow = db
-    .prepare(
-      `${cohort}
-       SELECT COUNT(*) AS count FROM selected_sessions ss
-        WHERE ss.state = 'RECONCILED'
-          AND EXISTS (
-            SELECT 1 FROM tool_events te WHERE te.session_id = ss.session_id
-              AND te.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
-          )`,
-    )
-    .get(...params) as { count: number };
+  const recoveryContext = getEsfObservedTestRecoveryContext(db, opts);
 
   const data: EsfObservationCohort = {
     cohort_definition_version: "esf-cohort-1",
@@ -367,11 +415,10 @@ export function getEsfObservations(
     },
     observed_test_recovery: {
       method_version: "esf-observed-test-recovery-1",
-      affected_session_ids: obstacleRows.map((row) => row.session_id),
-      recovered_session_ids: obstacleRows
-        .filter((row) => row.recovered === 1)
-        .map((row) => row.session_id),
-      eligible_reconciled_qualifying_tool_session_count: eligibleToolRow.count,
+      affected_session_ids: recoveryContext.workspace_affected_session_ids,
+      recovered_session_ids: recoveryContext.workspace_recovered_session_ids,
+      eligible_reconciled_qualifying_tool_session_count:
+        recoveryContext.workspace_qualifying_session_count,
     },
     allocation_sessions,
     watermark: {

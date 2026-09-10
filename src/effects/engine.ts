@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "../db/open.js";
 import { EFFECT_HANDLERS, directionFor, findHandler } from "./registry.js";
+import { isOpaqueEffectIdentity } from "./scope-identity.js";
 import {
   cycleFromRow,
   getCycle,
@@ -237,14 +238,22 @@ function comparison(
 
 function guardrailDirection(
   guardrail: ObservationBundle["guardrails"][number],
+  definition?: EffectCycle["guardrailDefinitions"][number],
 ): ObservationBundle["guardrails"][number] {
   if (
     guardrail.availability === "UNSUPPORTED" ||
     guardrail.before.value === null ||
     guardrail.after.value === null ||
-    guardrail.before.value === 0
+    guardrail.before.value === 0 ||
+    guardrail.before.denominator === 0 ||
+    guardrail.after.denominator === 0 ||
+    (definition?.minimumSessions !== undefined &&
+      definition.minimumSessions !== null &&
+      ((guardrail.before.sessionN ?? 0) < definition.minimumSessions ||
+        (guardrail.after.sessionN ?? 0) < definition.minimumSessions))
   )
     return { ...guardrail, direction: "INSUFFICIENT_DATA" };
+  if (definition?.directional === false) return { ...guardrail, direction: "STABLE" };
   const delta = ((guardrail.after.value - guardrail.before.value) / guardrail.before.value) * 100;
   return { ...guardrail, direction: delta < -15 ? "IMPROVED" : delta > 15 ? "ADVERSE" : "STABLE" };
 }
@@ -312,14 +321,28 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
       throw new EffectValidationError(
         "machine-confirmed tracking requires an opaque action revision",
       );
-    const unsupportedScope = [
-      input.scope.tool,
-      input.scope.modelClass,
-      input.scope.taskIntent,
-    ].some((value) => value !== undefined);
-    if (unsupportedScope || (input.detectorId !== "D1" && input.scope.sourceIdentity !== undefined))
+    const handlerIsScopedD2 = handler.target.metricId === "d2-floor-context-scoped";
+    const supportsEventScope = input.detectorId === "D7" || handlerIsScopedD2;
+    if (input.scope.modelClass !== undefined || input.scope.taskIntent !== undefined)
       throw new EffectValidationError(
         "scope filter is not implemented by the observation provider",
+      );
+    if (input.scope.tool !== undefined && !supportsEventScope)
+      throw new EffectValidationError("tool scope is not implemented for this target");
+    if (
+      input.scope.sourceIdentity !== undefined &&
+      input.detectorId !== "D1" &&
+      !supportsEventScope
+    )
+      throw new EffectValidationError("source scope is not implemented for this target");
+    if (
+      supportsEventScope &&
+      ((input.scope.sourceIdentity !== undefined &&
+        !isOpaqueEffectIdentity(input.scope.sourceIdentity)) ||
+        (input.scope.tool !== undefined && !isOpaqueEffectIdentity(input.scope.tool)))
+    )
+      throw new EffectValidationError(
+        "event source and tool scopes must be lowercase SHA-256 digests",
       );
     if (
       input.detectorId === "D1" &&
@@ -428,7 +451,14 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
       )
         throw new EffectValidationError("observation provider version mismatch");
       observed = freezeBaselineSide(observed, null, observed.before, shell.guardrailDefinitions);
-      observed.guardrails = observed.guardrails.map(guardrailDirection);
+      observed.guardrails = observed.guardrails.map((guardrail) =>
+        guardrailDirection(
+          guardrail,
+          shell.guardrailDefinitions.find(
+            (definition) => definition.guardrailId === guardrail.guardrailId,
+          ),
+        ),
+      );
       shell.baselineEvidence = observed.before;
       shell.provisionalEvidence = observed;
       db.prepare(`INSERT INTO effect_cycles
@@ -504,7 +534,14 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
         cycle.baselineEvidence,
         cycle.guardrailDefinitions,
       );
-      bundle.guardrails = bundle.guardrails.map(guardrailDirection);
+      bundle.guardrails = bundle.guardrails.map((guardrail) =>
+        guardrailDirection(
+          guardrail,
+          cycle.guardrailDefinitions.find(
+            (definition) => definition.guardrailId === guardrail.guardrailId,
+          ),
+        ),
+      );
       const { direction } = directionFor(handler, bundle.before.value, bundle.after.value);
       const cmp = comparison(
         db,

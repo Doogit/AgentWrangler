@@ -1,6 +1,7 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../../src/ui/api/client";
+import * as esfClient from "../../../src/ui/api/esf-client";
 import {
   mockBurnStatus,
   mockCacheWriteTrend,
@@ -20,7 +21,10 @@ import OverviewPage from "../../../src/ui/overview/OverviewPage";
 
 vi.mock("../../../src/ui/api/client");
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -41,6 +45,22 @@ beforeEach(() => {
 });
 
 describe("OverviewPage first-run onboarding", () => {
+  it("selects a workspace for observations while keeping the global overview scope", async () => {
+    vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 5 }));
+    const observations = vi
+      .spyOn(esfClient, "fetchEsfObservations")
+      .mockImplementation(() => new Promise(() => {}));
+    render(<OverviewPage />);
+    const selector = await screen.findByRole("combobox", { name: "Observation workspace" });
+    const workspaceId = mockWorkspaces({ preset: "7d" }).data?.items[0]?.workspace_id;
+    const { from, to } = mockGlobalOverview({ preset: "7d" }).meta.window;
+    expect(workspaceId).toBeTruthy();
+    await waitFor(() => expect(selector.querySelectorAll("option").length).toBeGreaterThan(1));
+    fireEvent.change(selector, { target: { value: workspaceId } });
+    await waitFor(() => expect(observations).toHaveBeenLastCalledWith(workspaceId, { from, to }));
+    fireEvent.change(selector, { target: { value: "" } });
+    await waitFor(() => expect(observations).toHaveBeenLastCalledWith(null, { from, to }));
+  });
   it("shows API-derived ingest progress and hides normal KPI cards before any sessions exist", async () => {
     vi.mocked(client.fetchStatus).mockResolvedValue(
       mockStatus({ sessions: 0, files_seen: 10, files_parsed: 4, scan_state: "scanning" }),
@@ -54,7 +74,7 @@ describe("OverviewPage first-run onboarding", () => {
     expect(screen.queryByRole("checkbox", { name: /first recommendation generated/i })).toBeNull();
     expect(screen.getByText(/\d of 2/)).toBeTruthy();
     expect(screen.getByText(/Scanning.*4 of 10 files/)).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: /two meters, several tanks/i })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /spend vs your limit/i })).toBeNull();
   });
 
   it("renders the normal Overview once sessions exist", async () => {
@@ -63,7 +83,7 @@ describe("OverviewPage first-run onboarding", () => {
     render(<OverviewPage />);
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /two meters, several tanks/i })).toBeTruthy(),
+      expect(screen.getByRole("heading", { name: /spend vs your limit/i })).toBeTruthy(),
     );
     expect(screen.queryByRole("heading", { name: /welcome to agentwrangler/i })).toBeNull();
   });
@@ -114,7 +134,7 @@ describe("scan recovery and healthy empty findings", () => {
     vi.mocked(client.fetchRecommendations).mockRejectedValue(new Error("unavailable"));
     vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 1 }));
     render(<OverviewPage />);
-    await screen.findByRole("heading", { name: /two meters, several tanks/i });
+    await screen.findByRole("heading", { name: /spend vs your limit/i });
     expect(screen.queryByText(/no recommendations were found/)).toBeNull();
   });
 });

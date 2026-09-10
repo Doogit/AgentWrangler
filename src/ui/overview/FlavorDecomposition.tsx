@@ -72,6 +72,28 @@ function axisLabel(flavor: string, fallback: string, coeff: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Chart rows
+// ---------------------------------------------------------------------------
+
+// Zero-token flavors are excluded: the log axis domain floor of 1 would clamp
+// them into a false sliver bar instead of rendering nothing.
+export function buildFlavorChartRows(
+  flavors: FlavorDecompositionData["flavors"],
+  coeffUsed: number,
+) {
+  return flavors
+    .filter((f) => f.raw_tokens > 0)
+    .map((f) => ({
+      label: axisLabel(f.flavor, f.label, coeffUsed),
+      flavor: f.flavor,
+      weighted_tokens: Math.round(f.weighted_tokens),
+      raw_tokens: f.raw_tokens,
+      weighted_share: f.weighted_share,
+      raw_share: f.raw_share,
+    }));
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -113,14 +135,7 @@ export default function FlavorDecomposition({ state }: FlavorDecompositionProps)
   }
 
   // Recharts-friendly data with Y-axis label
-  const chartData = decomp.flavors.map((f) => ({
-    label: axisLabel(f.flavor, f.label, decomp.coeff_used),
-    flavor: f.flavor,
-    weighted_tokens: Math.round(f.weighted_tokens),
-    raw_tokens: f.raw_tokens,
-    weighted_share: f.weighted_share,
-    raw_share: f.raw_share,
-  }));
+  const chartData = buildFlavorChartRows(decomp.flavors, decomp.coeff_used);
 
   const dataKey = mode === "weighted" ? "weighted_tokens" : "raw_tokens";
   const shareKey = mode === "weighted" ? "weighted_share" : "raw_share";
@@ -162,6 +177,11 @@ export default function FlavorDecomposition({ state }: FlavorDecompositionProps)
         )}
       </div>
 
+      {/* A log axis keeps both cache-read-heavy and smaller positive flavors legible. */}
+      <div className="kpi-fn" style={{ marginBottom: 4 }} aria-label="Chart scale: logarithmic">
+        Log scale · token values
+      </div>
+
       {/* Chart */}
       <ResponsiveContainer width="100%" height={220}>
         <BarChart
@@ -174,8 +194,8 @@ export default function FlavorDecomposition({ state }: FlavorDecompositionProps)
             type="number"
             axisLine={gridProps.axisLine}
             tickLine={gridProps.tickLine}
-            tickCount={gridProps.tickCount}
-            interval={gridProps.preserveStartEnd ? "preserveStartEnd" : 0}
+            scale="log"
+            domain={[1, "auto"]}
             tickFormatter={fmtTokens}
             tick={{ fontSize: 11 }}
           />

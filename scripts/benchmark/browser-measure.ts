@@ -16,9 +16,9 @@ import { fileURLToPath } from "node:url";
 import { runMigrations } from "../../src/db/migrate.js";
 import { openDb } from "../../src/db/open.js";
 import {
-  seedSyntheticHistory,
   SYNTHETIC_WINDOW_FROM,
   SYNTHETIC_WINDOW_TO,
+  seedSyntheticHistory,
 } from "./synthetic-fixture.js";
 
 const STARTUP_TIMEOUT_MS = 15_000;
@@ -31,7 +31,12 @@ const BROWSER_ROUTES = [
   { name: "overview", hash: "#/overview", api: "/api/overview?", selector: "rv7-tile-row" },
   { name: "hot_sessions", hash: "#/sessions", api: "/api/hot-sessions", selector: null },
   { name: "workspaces", hash: "#/workspaces", api: "/api/workspaces?", selector: null },
-  { name: "recommendations", hash: "#/recommendations", api: "/api/recommendations", selector: null },
+  {
+    name: "recommendations",
+    hash: "#/recommendations",
+    api: "/api/recommendations",
+    selector: null,
+  },
 ] as const;
 
 type BrowserRoute = (typeof BROWSER_ROUTES)[number];
@@ -44,6 +49,8 @@ type CdpResponse = {
 
 type CdpRequest = {
   requestId: string;
+  url?: string;
+  method?: string;
   response?: CdpResponse;
   fromDiskCache?: boolean;
   fromPrefetchCache?: boolean;
@@ -74,6 +81,8 @@ export type BrowserMeasureSummary = {
   warm_overview_ready_ms: number;
   cold_request_count: number;
   warm_request_count: number;
+  eligible_request_count: number;
+  duplicate_eligible_requests: number;
   retained_cache_entries: number;
   long_task_count: number;
   long_task_total_ms: number;
@@ -102,6 +111,24 @@ function isCached(request: CdpRequest): boolean {
   );
 }
 
+function normalizedApiPath(url: URL): string {
+  url.searchParams.sort();
+  return `${url.pathname}${url.search}`;
+}
+
+function normalizedEligibleApiUrl(request: CdpRequest): string | undefined {
+  if (request.method !== "GET" || !request.url || !isLoopbackUrl(request.url)) return undefined;
+  const url = new URL(request.url);
+  if (
+    !url.pathname.startsWith("/api/") ||
+    url.pathname === "/api/live" ||
+    url.pathname === "/api/status" ||
+    url.pathname === "/api/burn-status"
+  )
+    return undefined;
+  return normalizedApiPath(url);
+}
+
 /** Pure summary of CDP and Performance API-shaped values; intentionally no I/O. */
 export function summarizeBrowserSamples(raw: BrowserMeasureRaw): BrowserMeasureSummary {
   const longTasks = raw.longTasks ?? [];
@@ -111,6 +138,23 @@ export function summarizeBrowserSamples(raw: BrowserMeasureRaw): BrowserMeasureS
   const layoutDurations = raw.layoutDurations ?? [];
   const retained = raw.warm.retainedCacheEntries ?? [];
   const cachedRequests = (raw.warm.requests ?? []).filter(isCached).length;
+  // Duplicates are counted per document — cold and warm are separate navigations,
+  // so a URL fetched once in each is reuse across documents, not duplication.
+  const perDocument = [raw.cold.requests ?? [], raw.warm.requests ?? []].map((requests) =>
+    requests
+      .map((request) => ({ request, url: normalizedEligibleApiUrl(request) }))
+      .filter((entry): entry is { request: CdpRequest; url: string } => entry.url !== undefined),
+  );
+  const eligibleRequests = perDocument.flat();
+  let duplicateEligibleRequests = 0;
+  for (const documentRequests of perDocument) {
+    const eligibleFetchCounts = new Map<string, number>();
+    for (const { request, url } of documentRequests)
+      if (!isCached(request)) eligibleFetchCounts.set(url, (eligibleFetchCounts.get(url) ?? 0) + 1);
+    duplicateEligibleRequests += [...eligibleFetchCounts.values()].filter(
+      (count) => count >= 2,
+    ).length;
+  }
   const retainedResources = retained.filter(
     (entry) =>
       finite(entry.transferSize) === 0 &&
@@ -124,6 +168,8 @@ export function summarizeBrowserSamples(raw: BrowserMeasureRaw): BrowserMeasureS
     warm_overview_ready_ms: finite(raw.warm.overviewReadyMs),
     cold_request_count: raw.cold.requests?.length ?? 0,
     warm_request_count: raw.warm.requests?.length ?? 0,
+    eligible_request_count: eligibleRequests.length,
+    duplicate_eligible_requests: duplicateEligibleRequests,
     // CDP identifies cache hits and Resource Timing catches entries retained without a response event.
     retained_cache_entries: Math.max(cachedRequests, retainedResources),
     long_task_count: taskDurations.length,
@@ -242,7 +288,7 @@ export function syntheticBenchmarkApiPath(requestUrl: string): string {
     url.searchParams.set("from", SYNTHETIC_WINDOW_FROM);
     url.searchParams.set("to", SYNTHETIC_WINDOW_TO);
   }
-  return `${url.pathname}${url.search}`;
+  return normalizedApiPath(url);
 }
 
 async function startSyntheticUi(
@@ -466,8 +512,7 @@ function requireRuntimeValue<T>(evaluation: CdpRuntimeEvaluation<T>, label: stri
       `${label} failed in the page: ${exception.exception?.description ?? exception.text ?? "unknown exception"}`,
     );
   }
-  if (evaluation.result?.value === undefined)
-    throw new Error(`${label} did not return a value`);
+  if (evaluation.result?.value === undefined) throw new Error(`${label} did not return a value`);
   return evaluation.result.value;
 }
 
@@ -501,9 +546,7 @@ async function connect(wsUrl: string): Promise<{ client: CdpClient; close(): voi
 /** Route readiness: its API request observed, nothing aria-busy, double rAF settle. */
 function readinessExpression(api: string, selector: string | null): string {
   const selectorCheck =
-    selector === null
-      ? "true"
-      : `Boolean(document.querySelector('[data-testid="${selector}"]'))`;
+    selector === null ? "true" : `Boolean(document.querySelector('[data-testid="${selector}"]'))`;
   return `new Promise((resolve, reject) => { const deadline = performance.now() + 30000; const check = () => { const apiLoaded = performance.getEntriesByType('resource').some((entry) => entry.name.includes('${api}')); const busy = document.querySelector('[aria-busy="true"]'); if (${selectorCheck} && apiLoaded && !busy) { requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))); return; } if (performance.now() >= deadline) { reject(new Error('Route did not finish rendering after its API query')); return; } setTimeout(check, 25); }; check(); })`;
 }
 
@@ -535,7 +578,12 @@ async function browserSample(
     beforeMetrics.metrics.find((metric) => metric.name === "LayoutDuration")?.value ?? 0;
   const requests: CdpRequest[] = [];
   const removeRequest = client.on("Network.requestWillBeSent", (params) => {
-    requests.push({ requestId: String(params.requestId ?? "") });
+    const request = params.request as Record<string, unknown> | undefined;
+    requests.push({
+      requestId: String(params.requestId ?? ""),
+      ...(typeof request?.url === "string" ? { url: request.url } : {}),
+      ...(typeof request?.method === "string" ? { method: request.method } : {}),
+    });
   });
   const removeResponse = client.on("Network.responseReceived", (params) => {
     const received = params.response as Record<string, unknown> | undefined;
@@ -685,10 +733,7 @@ function summarizeDurations(values: number[]): Record<string, number> {
   };
 }
 
-async function measureScale(
-  client: CdpClient,
-  scale: number,
-): Promise<Record<string, unknown>> {
+async function measureScale(client: CdpClient, scale: number): Promise<Record<string, unknown>> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wrangler-synthetic-"));
   let child: ChildHarness | undefined;
   let ui: { url: string; close(): Promise<void> } | undefined;
@@ -850,9 +895,19 @@ async function measureReactCommits(client: CdpClient): Promise<Record<string, un
     const overview = BROWSER_ROUTES[0];
     await client.call("Network.clearBrowserCache", {}, session.sessionId);
     await navigateBlank(client, session.sessionId);
-    const cold = await browserSample(client, session.sessionId, `${ui.url}${overview.hash}`, overview);
+    const cold = await browserSample(
+      client,
+      session.sessionId,
+      `${ui.url}${overview.hash}`,
+      overview,
+    );
     await navigateBlank(client, session.sessionId);
-    const warm = await browserSample(client, session.sessionId, `${ui.url}${overview.hash}`, overview);
+    const warm = await browserSample(
+      client,
+      session.sessionId,
+      `${ui.url}${overview.hash}`,
+      overview,
+    );
     const durations = (samples: Array<{ duration?: number | null }>): number[] =>
       samples
         .map((entry) => entry.duration)

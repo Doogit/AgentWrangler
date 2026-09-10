@@ -3,6 +3,7 @@ import type { HotSessionRowWithPercentile } from "../../query/api/hot-sessions.j
 import { mockHotSessions } from "../api/fixtures";
 import { relativeTime } from "../lib/relative-time";
 import { shortId } from "../lib/short-id";
+import { useWorkspaceNames } from "../lib/workspace-names";
 import Chip from "../shell/Chip";
 import EmptyState from "../shell/EmptyState";
 import InfoTip from "../shell/InfoTip";
@@ -35,6 +36,7 @@ export default function HotSessionsPage({
   onSelectSession: (id: string) => void;
 }) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const { labelFor } = useWorkspaceNames();
 
   useEffect(() => {
     let cancelled = false;
@@ -180,7 +182,7 @@ export default function HotSessionsPage({
                         aria-label={`Copy and open session ${row.session_id}`}
                         title={row.session_id}
                       >
-                        <span>{row.workspace_id}</span>
+                        <span>{labelFor(row.workspace_id)}</span>
                         <span aria-hidden="true"> · </span>
                         <span className="section-meta">{shortId(row.session_id)}</span>
                       </button>

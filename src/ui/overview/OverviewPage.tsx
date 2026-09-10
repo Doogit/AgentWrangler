@@ -58,6 +58,7 @@ import { useForegroundPoll } from "../lib/use-foreground-poll";
 import Chip from "../shell/Chip";
 import ChipLegend from "../shell/ChipLegend";
 import DeferredChart from "../shell/DeferredChart";
+import SectionHeader from "../shell/SectionHeader";
 import { SkeletonKpi, SkeletonRow } from "../shell/Skeleton";
 import BurnForecastCard from "./BurnForecastCard";
 import CacheEfficiencyKPI from "./CacheEfficiencyKPI";
@@ -471,6 +472,7 @@ export default function OverviewPage({
     }
   });
   const [preset, setPreset] = useState<Preset>("7d");
+  const [observationWorkspaceId, setObservationWorkspaceId] = useState<string | null>(null);
   // Keep the range that produced each response alongside the response. A
   // preset change can occur before the first request resolves; the prior
   // range must not briefly render as the newly selected range.
@@ -832,6 +834,7 @@ export default function OverviewPage({
         </div>
       )}
 
+      <SectionHeader title="Summary" />
       <VerdictBand
         preset={preset}
         trend={trendData}
@@ -840,18 +843,8 @@ export default function OverviewPage({
         topRecommendation={topRecommendation}
       />
 
-      {hasOverviewForPreset && overviewState.status === "ok" && (
-        <ObservationEvidence
-          workspaceId={null}
-          filter={{
-            from: overviewState.value.meta.window.from,
-            to: overviewState.value.meta.window.to,
-          }}
-          title="Outcome and observation cohort"
-        />
-      )}
-
       {/* RV7 tile row — rate-limit gauges · hook status · hot sessions top-3 */}
+      <SectionHeader title="Needs attention" />
       <div
         data-testid="rv7-tile-row"
         style={{
@@ -960,12 +953,10 @@ export default function OverviewPage({
 
       {!isOnboardingStatusPending && !isFirstRun && !isOverviewPending && overviewData !== null && (
         <>
-          <div className="section-head">
-            <h2>Two meters, several tanks</h2>
-          </div>
-          <p className="section-subtitle">
-            Watch spend and your configured limit together; each answers a different question.
-          </p>
+          <SectionHeader
+            title="Spend vs your limit"
+            sub="Watch spend and your configured limit together; each answers a different question."
+          />
           <p className="kpi-fn" style={{ marginTop: 2, marginBottom: 8 }}>
             Absolute cap values are unpublished (Anthropic publishes only relative multipliers).
             Which cap you're hitting is visible only in /usage.
@@ -1008,12 +999,10 @@ export default function OverviewPage({
         onSelectSession={onSelectSession}
       />
 
-      <div className="section-head">
-        <h2>Where your tokens go</h2>
-      </div>
-      <p className="section-subtitle">
-        Use these breakdowns to see which usage patterns are driving the total.
-      </p>
+      <SectionHeader
+        title="Where your tokens go"
+        sub="Use these breakdowns to see which usage patterns are driving the total."
+      />
 
       {/* Spend-Viz-v2 — "Where your tokens go" section (taxonomy §4 Section 1.2) */}
       <CacheEfficiencyKPI state={cacheEffState} forecast={overviewData?.forecast ?? null} />
@@ -1025,6 +1014,7 @@ export default function OverviewPage({
       </DeferredChart>
 
       {/* Workspace table */}
+      <SectionHeader title="Workspaces" />
       {isWorkspacesLoading ? (
         <div className="card" style={{ marginBottom: 13 }}>
           <div className="section-head">
@@ -1065,6 +1055,42 @@ export default function OverviewPage({
       <DeferredChart label="spend trends chart" ready={!isOverviewPending && !isLivePending}>
         <TrendChart state={trendsState} />
       </DeferredChart>
+
+      {hasOverviewForPreset && overviewState.status === "ok" && (
+        <details data-testid="overview-data-notes" style={{ marginBottom: 13 }}>
+          <summary style={{ cursor: "pointer" }}>
+            <SectionHeader
+              title="Data notes"
+              sub="See how this page's totals and observations were selected."
+            />
+          </summary>
+          <label style={{ display: "block", marginBottom: 8 }}>
+            Observation workspace{" "}
+            <select
+              value={observationWorkspaceId ?? ""}
+              onChange={(event) => setObservationWorkspaceId(event.target.value || null)}
+              style={{ maxWidth: "100%" }}
+            >
+              <option value="">All workspaces</option>
+              {hasWorkspacesForPreset &&
+                workspacesState.status === "ok" &&
+                workspacesState.value.data?.items.map((workspace) => (
+                  <option key={workspace.workspace_id} value={workspace.workspace_id}>
+                    {workspace.workspace_id}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <ObservationEvidence
+            workspaceId={observationWorkspaceId}
+            filter={{
+              from: overviewState.value.meta.window.from,
+              to: overviewState.value.meta.window.to,
+            }}
+            title={null}
+          />
+        </details>
+      )}
     </div>
   );
 }

@@ -184,6 +184,8 @@ function track(
     return { supported: false as const, reason: capability.reason ?? "UNSUPPORTED" };
   const appliedAt = now.toISOString();
   const trackingRequestedAt = appliedAt;
+  // Native D7 recommendations have no exact event-source/tool identity producer.
+  // Keep production tracking workspace-only; opaque scoped fixtures use the engine directly.
   const tuple = rec.detector_id === "D1" ? sourceTuple(rec) : null;
   const identity = tuple === null ? undefined : sourceDigest(tuple);
   const result = effectEngineForDb(db).track({

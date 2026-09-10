@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { analyzeD7LoopEvents } from "../../src/detector/d7-loop-analysis.js";
 import { d7Detector } from "../../src/detector/detectors/d7_loop_retry_waste.js";
 import type { DetectorContext, DetectorOutcome } from "../../src/detector/types.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
@@ -364,6 +365,41 @@ describe("D7 quiet and exclusion cases", () => {
     }
 
     expect(evaluate().status).toBe("INACTIVE");
+  });
+
+  it("treats an excluded null-path event as a redundant-read boundary", () => {
+    const analysis = analyzeD7LoopEvents([
+      {
+        event_id: "read-a",
+        tool_name: "Read",
+        input_hash: "same",
+        exit_class: "OK",
+        file_path_hash: "path",
+      },
+      {
+        event_id: "read-b",
+        tool_name: "Read",
+        input_hash: "same",
+        exit_class: "OK",
+        file_path_hash: "path",
+      },
+      {
+        event_id: "excluded",
+        tool_name: "Bash",
+        input_hash: "other",
+        exit_class: "OK",
+        file_path_hash: null,
+        eligible: false,
+      },
+      {
+        event_id: "read-c",
+        tool_name: "Read",
+        input_hash: "same",
+        exit_class: "OK",
+        file_path_hash: "path",
+      },
+    ]);
+    expect(analysis.redundantReads).toEqual(new Set());
   });
 
   it("excludes provisional owner turns and LIVE sessions", () => {
