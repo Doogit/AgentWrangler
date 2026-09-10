@@ -93,6 +93,9 @@ const DAEMON_REQUEST_TIMEOUT_MS = 8_000;
 /** Keep recently requested read responses available while the UI revalidates them. */
 export const RESPONSE_CACHE_TTL_MS = 45_000;
 
+/** Bound retained read responses so distinct query parameters cannot grow unbounded. */
+export const RESPONSE_CACHE_MAX_ENTRIES = 128;
+
 export interface ResponseCacheEntry<T> {
   data: T;
   fetchedAt: number;
@@ -114,6 +117,19 @@ export interface DaemonStatus {
  * parameter object so a later UI layer can synchronously render a fresh value.
  */
 export const responseCache = new Map<string, ResponseCacheEntry<unknown>>();
+/** Success timestamps for network-only endpoints, kept outside the payload cache. */
+export const networkOnlyFetchTimestamps = new Map<string, number>();
+const networkOnlyEndpoints = new Set(["/api/live", "/api/status", "/api/burn-status"]);
+let cacheGeneration = 0;
+
+interface InFlightRequest {
+  controller: AbortController;
+  subscribers: number;
+  promise: Promise<unknown>;
+}
+
+/** One document-local transport per cache key while a read is in progress. */
+const inFlightRequests = new Map<string, InFlightRequest>();
 
 // Local-only debug/benchmark handle: lets the PERF0 browser harness (and a
 // devtools console) read retained cache cardinality without shipping new API.
@@ -127,14 +143,52 @@ export function getResponseCacheKey(endpoint: string, params?: unknown): string 
 
 /** Return a cache value only while it is within the read TTL. */
 export function getCachedResponse<T>(endpoint: string, params?: unknown): T | undefined {
-  const entry = responseCache.get(getResponseCacheKey(endpoint, params));
-  if (!entry || Date.now() - entry.fetchedAt >= RESPONSE_CACHE_TTL_MS) return undefined;
+  const key = getResponseCacheKey(endpoint, params);
+  if (networkOnlyEndpoints.has(endpoint)) {
+    return undefined;
+  }
+  const entry = responseCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.fetchedAt >= RESPONSE_CACHE_TTL_MS) {
+    responseCache.delete(key);
+    return undefined;
+  }
   return entry.data as T;
 }
 
 /** Return the timestamp of the most recent successful fetch for a cache key. */
 export function getLastFetchTimestamp(endpoint: string, params?: unknown): number | undefined {
+  if (networkOnlyEndpoints.has(endpoint)) return networkOnlyFetchTimestamps.get(endpoint);
   return responseCache.get(getResponseCacheKey(endpoint, params))?.fetchedAt;
+}
+
+function clearResponseCache(): void {
+  responseCache.clear();
+  cacheGeneration += 1;
+}
+
+function setCachedResponse<T>(key: string, data: T, fetchedAt: number): void {
+  if (!responseCache.has(key) && responseCache.size >= RESPONSE_CACHE_MAX_ENTRIES) {
+    for (const [expiredKey, entry] of responseCache) {
+      if (fetchedAt - entry.fetchedAt >= RESPONSE_CACHE_TTL_MS) {
+        responseCache.delete(expiredKey);
+      }
+    }
+
+    if (responseCache.size >= RESPONSE_CACHE_MAX_ENTRIES) {
+      let oldestKey: string | undefined;
+      let oldestFetchedAt = Number.POSITIVE_INFINITY;
+      for (const [entryKey, entry] of responseCache) {
+        if (entry.fetchedAt < oldestFetchedAt) {
+          oldestKey = entryKey;
+          oldestFetchedAt = entry.fetchedAt;
+        }
+      }
+      if (oldestKey !== undefined) responseCache.delete(oldestKey);
+    }
+  }
+
+  responseCache.set(key, { data, fetchedAt });
 }
 
 /** A transport failure distinct from daemon HTTP or data errors. */
@@ -168,6 +222,80 @@ async function daemonFetch(input: RequestInfo | URL, init?: RequestInit): Promis
   }
 }
 
+function subscribeToInFlight<T>(request: InFlightRequest, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
+
+  request.subscribers += 1;
+  return new Promise<T>((resolve, reject) => {
+    let subscribed = true;
+    const unsubscribe = () => {
+      if (!subscribed) return;
+      subscribed = false;
+      signal?.removeEventListener("abort", onAbort);
+      request.subscribers -= 1;
+      if (request.subscribers === 0) request.controller.abort();
+    };
+    const onAbort = () => {
+      unsubscribe();
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    request.promise.then(
+      (data) => {
+        if (!subscribed) return;
+        unsubscribe();
+        resolve(data as T);
+      },
+      (error: unknown) => {
+        if (!subscribed) return;
+        unsubscribe();
+        reject(error);
+      },
+    );
+  });
+}
+
+function createInFlightRequest<T>(
+  key: string,
+  endpoint: string,
+  requestEndpoint: string,
+  networkOnly: boolean,
+): InFlightRequest {
+  const controller = new AbortController();
+  const fetchGeneration = cacheGeneration;
+  const request: InFlightRequest = {
+    controller,
+    subscribers: 0,
+    promise: Promise.resolve(),
+  };
+
+  request.promise = (async () => {
+    const res = await daemonFetch(requestEndpoint, {
+      signal: controller.signal,
+      ...(networkOnly ? { cache: "no-store" as const } : {}),
+    });
+    if (!res.ok) throw new Error(`${requestEndpoint} returned ${res.status}`);
+    const data = (await res.json()) as T;
+    controller.signal.throwIfAborted();
+    if (cacheGeneration === fetchGeneration) {
+      const fetchedAt = Date.now();
+      if (networkOnly) {
+        networkOnlyFetchTimestamps.set(endpoint, fetchedAt);
+      } else {
+        setCachedResponse(key, data, fetchedAt);
+      }
+    }
+    return data;
+  })().finally(() => {
+    if (inFlightRequests.get(key) === request) inFlightRequests.delete(key);
+  });
+
+  return request;
+}
+
 /**
  * Read a daemon JSON endpoint with a short-lived response cache.
  *
@@ -181,19 +309,21 @@ export async function fetchCachedJson<T>(
   requestEndpoint = endpoint,
   signal?: AbortSignal,
 ): Promise<T> {
-  const networkOnly = ["/api/live", "/api/status", "/api/burn-status"].includes(endpoint);
+  const networkOnly = networkOnlyEndpoints.has(endpoint);
   const cached = networkOnly ? undefined : getCachedResponse<T>(endpoint, params);
   if (cached !== undefined) return cached;
 
-  const res = await daemonFetch(requestEndpoint, {
-    signal: signal ?? null,
-    ...(networkOnly ? { cache: "no-store" as const } : {}),
-  });
-  if (!res.ok) throw new Error(`${requestEndpoint} returned ${res.status}`);
-  const data = (await res.json()) as T;
-  signal?.throwIfAborted();
-  responseCache.set(getResponseCacheKey(endpoint, params), { data, fetchedAt: Date.now() });
-  return data;
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
+
+  const key = getResponseCacheKey(endpoint, params);
+  let request = inFlightRequests.get(key);
+  if (!request) {
+    request = createInFlightRequest<T>(key, endpoint, requestEndpoint, networkOnly);
+    inFlightRequests.set(key, request);
+  }
+  return subscribeToInFlight<T>(request, signal);
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +516,9 @@ export async function fetchStatus(signal?: AbortSignal): Promise<DaemonStatus> {
  */
 export async function saveSettings(update: SettingsUpdate): Promise<ApiResponse<Settings>> {
   if (USE_MOCK) {
-    return Promise.resolve(mockUpdateSettings(update));
+    const result = mockUpdateSettings(update);
+    clearResponseCache();
+    return result;
   }
   const res = await daemonFetch("/api/settings", {
     method: "POST",
@@ -397,7 +529,9 @@ export async function saveSettings(update: SettingsUpdate): Promise<ApiResponse<
     const text = await res.text();
     throw new Error(text || `/api/settings returned ${res.status}`);
   }
-  return res.json() as Promise<ApiResponse<Settings>>;
+  const result = (await res.json()) as ApiResponse<Settings>;
+  clearResponseCache();
+  return result;
 }
 
 /** Read the runtime thresholds for the context-budget hook. */
@@ -419,7 +553,9 @@ export async function saveHookConfig(update: HookConfigUpdate): Promise<ApiRespo
     const text = await res.text();
     throw new Error(text || `/api/hook-config returned ${res.status}`);
   }
-  return res.json() as Promise<ApiResponse<HookConfig>>;
+  const result = (await res.json()) as ApiResponse<HookConfig>;
+  clearResponseCache();
+  return result;
 }
 
 export interface HookInstallResult {
@@ -445,6 +581,7 @@ async function hookMutation(
     throw new Error(text || `${endpoint} returned ${res.status}`);
   }
   const result = (await res.json()) as HookInstallResult;
+  clearResponseCache();
   window.dispatchEvent(new Event("agentwrangler:hooks-changed"));
   return result;
 }
@@ -466,7 +603,9 @@ export function uninstallHook(): Promise<HookInstallResult> {
  */
 export async function resetDatabase(): Promise<ApiResponse<Settings>> {
   if (USE_MOCK) {
-    return Promise.resolve(mockResetDatabase());
+    const result = mockResetDatabase();
+    clearResponseCache();
+    return result;
   }
   const res = await daemonFetch("/api/reset", {
     method: "POST",
@@ -476,7 +615,9 @@ export async function resetDatabase(): Promise<ApiResponse<Settings>> {
     const text = await res.text();
     throw new Error(text || `/api/reset returned ${res.status}`);
   }
-  return res.json() as Promise<ApiResponse<Settings>>;
+  const result = (await res.json()) as ApiResponse<Settings>;
+  clearResponseCache();
+  return result;
 }
 
 /**
@@ -487,7 +628,9 @@ export async function resetDatabase(): Promise<ApiResponse<Settings>> {
  */
 export async function calibrateLimitApi(): Promise<ApiResponse<CalibrateResult>> {
   if (USE_MOCK) {
-    return Promise.resolve(mockCalibrateLimit());
+    const result = mockCalibrateLimit();
+    clearResponseCache();
+    return result;
   }
   const res = await daemonFetch("/api/calibrate", {
     method: "POST",
@@ -497,7 +640,9 @@ export async function calibrateLimitApi(): Promise<ApiResponse<CalibrateResult>>
     const text = await res.text();
     throw new Error(text || `/api/calibrate returned ${res.status}`);
   }
-  return res.json() as Promise<ApiResponse<CalibrateResult>>;
+  const result = (await res.json()) as ApiResponse<CalibrateResult>;
+  clearResponseCache();
+  return result;
 }
 
 /**
@@ -511,7 +656,7 @@ export async function calibrateBytesPerTokenApi(): Promise<
 > {
   if (USE_MOCK) {
     // Degrade gracefully in test/mock mode — return a disabled result.
-    return Promise.resolve({
+    const result: ApiResponse<CalibrateBytesPerTokenResult> = {
       data: { ok: false, reason: "calibration disabled — enable in Settings first" },
       meta: {
         claim_kind: "N_A",
@@ -526,7 +671,9 @@ export async function calibrateBytesPerTokenApi(): Promise<
         metric_definition_version: "observe-1",
         drilldown_ids: {},
       },
-    });
+    };
+    clearResponseCache();
+    return result;
   }
   const res = await daemonFetch("/api/calibrate-bytes-per-token", {
     method: "POST",
@@ -536,7 +683,9 @@ export async function calibrateBytesPerTokenApi(): Promise<
     const text = await res.text();
     throw new Error(text || `/api/calibrate-bytes-per-token returned ${res.status}`);
   }
-  return res.json() as Promise<ApiResponse<CalibrateBytesPerTokenResult>>;
+  const result = (await res.json()) as ApiResponse<CalibrateBytesPerTokenResult>;
+  clearResponseCache();
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +912,10 @@ export async function fetchCacheWriteTrend(
  * Write path — CSRF gate enforced by the daemon.
  */
 export async function linkSession(sessionId: string, workItemId: string): Promise<void> {
-  if (USE_MOCK) return;
+  if (USE_MOCK) {
+    clearResponseCache();
+    return;
+  }
   const res = await daemonFetch("/api/outcomes/link", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -773,6 +925,7 @@ export async function linkSession(sessionId: string, workItemId: string): Promis
     const text = await res.text();
     throw new Error(text || `/api/outcomes/link returned ${res.status}`);
   }
+  clearResponseCache();
 }
 
 /**
@@ -781,7 +934,10 @@ export async function linkSession(sessionId: string, workItemId: string): Promis
  * Write path — CSRF gate enforced by the daemon.
  */
 export async function unlinkSession(sessionId: string, workItemId: string): Promise<void> {
-  if (USE_MOCK) return;
+  if (USE_MOCK) {
+    clearResponseCache();
+    return;
+  }
   const res = await daemonFetch("/api/outcomes/unlink", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -791,6 +947,7 @@ export async function unlinkSession(sessionId: string, workItemId: string): Prom
     const text = await res.text();
     throw new Error(text || `/api/outcomes/unlink returned ${res.status}`);
   }
+  clearResponseCache();
 }
 
 /**

@@ -1,11 +1,18 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchCachedJson, getLastFetchTimestamp, responseCache } from "../../src/ui/api/client";
+import {
+  fetchCachedJson,
+  getLastFetchTimestamp,
+  getResponseCacheKey,
+  networkOnlyFetchTimestamps,
+  responseCache,
+} from "../../src/ui/api/client";
 import { useForegroundPoll } from "../../src/ui/lib/use-foreground-poll";
 
 beforeEach(() => {
   vi.useFakeTimers();
   responseCache.clear();
+  networkOnlyFetchTimestamps.clear();
   vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
   vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
 });
@@ -48,6 +55,37 @@ describe("foreground network polling", () => {
       expect(getLastFetchTimestamp(endpoint)).toBe((first ?? 0) + interval * 3);
     },
   );
+
+  it("records successful status and live polls outside the response cache", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (url) => new Response(JSON.stringify({ endpoint: String(url) })),
+    );
+    const status = renderHook(() =>
+      useForegroundPoll(
+        (signal) => fetchCachedJson("/api/status", undefined, undefined, signal),
+        30_000,
+        vi.fn(),
+        vi.fn(),
+      ),
+    );
+    await advance(0);
+    status.unmount();
+    const live = renderHook(() =>
+      useForegroundPoll(
+        (signal) => fetchCachedJson("/api/live", undefined, undefined, signal),
+        30_000,
+        vi.fn(),
+        vi.fn(),
+      ),
+    );
+    await advance(0);
+
+    expect(getLastFetchTimestamp("/api/status")).toBe(Date.now());
+    expect(getLastFetchTimestamp("/api/live")).toBe(Date.now());
+    expect(responseCache.has(getResponseCacheKey("/api/status"))).toBe(false);
+    expect(responseCache.has(getResponseCacheKey("/api/live"))).toBe(false);
+    live.unmount();
+  });
 
   it("waits for a slow request to settle before scheduling another", async () => {
     let resolve!: (value: number) => void;
