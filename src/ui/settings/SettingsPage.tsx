@@ -83,12 +83,6 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
   const [limitConfidence, setLimitConfidence] = useState<"low" | null>(
     settings.limit_provenance?.includes("LOW CONFIDENCE") ? "low" : null,
   );
-  // The Advanced override can change the persisted limit independently.
-  useEffect(() => {
-    setLimitRaw(settings.limit_tokens !== null ? String(settings.limit_tokens) : "");
-    setProvenance(settings.limit_provenance);
-    setLimitConfidence(settings.limit_provenance?.includes("LOW CONFIDENCE") ? "low" : null);
-  }, [settings.limit_tokens, settings.limit_provenance]);
   // Re-calibrate hint: show when a stored resets_at has passed
   const resetsAt = settings.limit_resets_at;
   const showRecalibrateHint =
@@ -172,7 +166,6 @@ function ConfigForm({ settings, onSaved }: ConfigFormProps) {
         <button
           type="button"
           className="settings-calibrate-primary-btn"
-          id="calibrate-limit"
           onClick={handleCalibrate}
           disabled={calibrating}
           title="Estimate the weekly token limit from Claude Code's reported usage percentage"
@@ -271,11 +264,6 @@ function ManualLimitOverride({ settings, onSaved }: ConfigFormProps) {
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Refresh after calibration, without resetting drafts on unrelated saves.
-  useEffect(() => {
-    setLimitRaw(settings.limit_tokens !== null ? String(settings.limit_tokens) : "");
-  }, [settings.limit_tokens]);
 
   async function handleSave() {
     const value = limitRaw.trim();
@@ -922,8 +910,8 @@ function ContextBudgetHookPanel() {
           </button>
           <details>
             <summary className="settings-hint" style={{ margin: "10px 0 6px", cursor: "pointer" }}>
-              Show uninstall prompt text — copy this exact text to remove only AgentWrangler&apos;s
-              copied hooks.
+              Show uninstall prompt text — copy this exact text to remove only
+              AgentWrangler&apos;s copied hooks.
             </summary>
             <textarea
               aria-label="Uninstall prompt text"
@@ -1121,7 +1109,7 @@ export default function SettingsPage() {
         essentials: "settings-essentials",
         configuration: "settings-essentials",
         "scan-roots": "scan-roots",
-        calibration: "calibrate-limit",
+        calibration: "limit-tokens",
         workspaces: "settings-integrations",
         "outcomes-sync": "settings-integrations",
         "in-session-guards": "settings-in-session-guards",

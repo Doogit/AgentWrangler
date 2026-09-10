@@ -486,14 +486,6 @@ describe("Settings section navigation", () => {
   afterEach(() => {
     window.location.hash = "";
   });
-  it("focuses the visible calibration action from dashboard deep links", async () => {
-    window.location.hash = "#/settings?section=calibration";
-    setupSuccess();
-    render(<SettingsPage />);
-    const calibrate = await screen.findByRole("button", { name: /Calibrate from usage/i });
-    await waitFor(() => expect(document.activeElement).toBe(calibrate));
-    expect(calibrate.closest("details")).toBeNull();
-  });
   it("keeps unsaved form state while section navigation focuses targets and opens Advanced", async () => {
     window.location.hash = "#/settings?section=scan-roots";
     setupSuccess();
@@ -516,52 +508,5 @@ describe("Settings section navigation", () => {
     window.location.hash = "#/settings?section=unknown";
     fireEvent(window, new HashChangeEvent("hashchange"));
     expect(document.activeElement?.id).toBe("settings-parser-health");
-  });
-});
-
-describe("Settings limit controls stay synchronized", () => {
-  it("updates the manual override after calibration without losing other edits", async () => {
-    const initial = mockSettings();
-    if (!initial.data) throw new Error("missing settings fixture");
-    const calibrated = {
-      ...initial,
-      data: { ...initial.data, limit_tokens: 123456, limit_provenance: "calibrated today @ 25.0%" },
-    };
-    vi.mocked(client.fetchSettings).mockResolvedValueOnce(initial).mockResolvedValue(calibrated);
-    vi.mocked(client.calibrateLimitApi).mockResolvedValue(mockCalibrateLimit());
-    render(<SettingsPage />);
-    const calibrate = await screen.findByRole("button", { name: /Calibrate from usage/i });
-    const roots = screen.getByLabelText(/Scan roots/i) as HTMLTextAreaElement;
-    fireEvent.change(roots, { target: { value: "/unsaved/project" } });
-    fireEvent.click(calibrate);
-    await waitFor(() =>
-      expect((screen.getByLabelText(/Weekly token limit/i) as HTMLInputElement).value).toBe(
-        "123456",
-      ),
-    );
-    expect(roots.value).toBe("/unsaved/project");
-  });
-
-  it("clears the calibrated result after a manual save disables forecasting", async () => {
-    const initial = mockSettings();
-    if (!initial.data) throw new Error("missing settings fixture");
-    initial.data = {
-      ...initial.data,
-      limit_tokens: 123456,
-      limit_provenance: "calibrated today @ 25.0%",
-    };
-    vi.mocked(client.fetchSettings).mockResolvedValue(initial);
-    vi.mocked(client.saveSettings).mockResolvedValue({
-      ...initial,
-      data: { ...initial.data, limit_tokens: null, limit_provenance: null, limit_resets_at: null },
-    });
-    render(<SettingsPage />);
-    await screen.findByRole("button", { name: /Re-calibrate from usage/i });
-    fireEvent.click(screen.getByText("Advanced and diagnostics"));
-    fireEvent.change(screen.getByLabelText(/Weekly token limit/i), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save weekly limit" }));
-    await waitFor(() => expect(client.saveSettings).toHaveBeenCalledWith({ limit_tokens: null }));
-    await waitFor(() => expect(screen.queryByLabelText("Calibration result")).toBeNull());
-    expect(screen.getByRole("button", { name: "Calibrate from usage" })).toBeTruthy();
   });
 });
