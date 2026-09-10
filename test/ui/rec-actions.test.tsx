@@ -116,6 +116,28 @@ function withTrackableCapabilities(view: ReturnType<typeof mockRecommendations>)
 // ---------------------------------------------------------------------------
 
 describe("RecCard — action buttons", () => {
+  it("keeps featured and list recommendations on the shared grid-card contract", () => {
+    const first = makeRec({ rec_id: "rec-grid-first" });
+    const second = makeRec({ rec_id: "rec-grid-second", title: "Second grid recommendation" });
+    const { container } = render(<RecCard group={makeGroup({ recs: [first, second] })} rank={1} />);
+
+    const cards = container.querySelectorAll<HTMLElement>(".rec-group-members > .rec-session-row");
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      const grid = card.querySelector(".rec-collapsed-row");
+      expect(grid).not.toBeNull();
+      const description = grid?.querySelector(".rec-description");
+      expect(description?.parentElement).toBe(grid);
+      const chipRow = grid?.querySelector(".rec-chip-row");
+      expect(chipRow?.parentElement).toBe(grid);
+      expect(grid?.querySelector(".rec-description-container")).toBeNull();
+      expect(
+        grid?.querySelectorAll(".rec-confidence-tier, .rec-category-chip, .rec-scope-badge"),
+      ).toHaveLength(3);
+      expect(grid?.querySelector(".rec-actions")?.children).toHaveLength(2);
+    }
+  });
+
   it("uses the D10 tool-catalog label instead of the TOOLING category fallback", () => {
     const rec = makeRec({ detector_id: "D10", category: "TOOLING" });
     const { container } = render(<RecCard rec={rec} />);
@@ -887,9 +909,9 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     // Switch to fake timers for the deferred-commit window
     vi.useFakeTimers();
 
-    const dismissBtn = container.querySelector<HTMLButtonElement>(
-      ".rec-actions button:first-child",
-    );
+    const dismissBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".rec-actions button"),
+    ).find((button) => button.textContent === "Dismiss");
     if (!dismissBtn) throw new Error("dismiss button not found");
     fireEvent.click(dismissBtn);
 
@@ -1169,7 +1191,7 @@ describe("RecCard — RV4 primary-action routing", () => {
     expect(getAllByRole("button", { name: "Copy prompt" })).toHaveLength(1);
   });
 
-  it("collapsed copy-route group renders exactly one Copy prompt action", () => {
+  it("collapsed copy-route group keeps only its representative preview action", () => {
     const { getAllByRole } = render(<RecCard group={makeGroup()} rank={1} />);
     expect(getAllByRole("button", { name: "Copy prompt" })).toHaveLength(1);
   });
@@ -1205,7 +1227,7 @@ describe("RecCard — RV4 primary-action routing", () => {
     }));
     const view = render(<RecCard group={makeGroup({ recs })} rank={1} />);
     // The representative preview must grant no member evidence.
-    fireEvent.click(view.getByRole("button", { name: "Copy prompt" }));
+    fireEvent.click(view.getAllByRole("button", { name: "Copy prompt" })[0] as HTMLElement);
     await act(async () => {
       await Promise.resolve();
     });
@@ -1253,14 +1275,19 @@ describe("RecCard — RV4 primary-action routing", () => {
 
   it("behavioral card (D2) leads with Install hook and collapses the guided prompt", async () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
-    const { getByRole, findByRole, queryByRole } = render(
+    const { container, getByRole, findAllByRole, queryByRole } = render(
       <RecCard rec={makeRec({ detector_id: "D2" })} />,
     );
 
-    expect(await findByRole("button", { name: "Install hook" })).toBeDefined();
+    const installButtons = await findAllByRole("button", { name: "Install hook" });
+    expect(installButtons).toHaveLength(1);
+    expect(installButtons[0]?.closest(".rec-primary-action")).not.toBeNull();
     expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
 
-    fireEvent.click(getByRole("button", { name: "Show guided prompt" }));
+    const guidedPrompt = getByRole("button", { name: "Show guided prompt" });
+    expect(guidedPrompt.closest(".rec-primary-action")).not.toBeNull();
+    expect(container.querySelector(".rec-actions-menu .rec-guided-toggle")).toBeNull();
+    fireEvent.click(guidedPrompt);
     expect(getByRole("button", { name: "Copy prompt" })).toBeDefined();
   });
 

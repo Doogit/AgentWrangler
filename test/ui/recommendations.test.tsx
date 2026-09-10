@@ -607,6 +607,18 @@ describe("RecommendationsPage — states", () => {
           owner_turn_metadata_coverage: 0.8,
           owner_turn_metadata_covered_event_count: 4,
           owner_turn_metadata_denominator_event_count: 5,
+          workspace_context_from: "2026-08-01T00:00:00.000Z",
+          workspace_context_to: "2026-08-15T00:00:00.000Z",
+          workspace_qualifying_session_count: 18,
+          workspace_affected_session_ids: [
+            "ses-a01",
+            "ses-a02",
+            "ses-a03",
+            "ses-a04",
+            "ses-a05",
+            "ses-a06",
+          ],
+          workspace_recovered_session_ids: ["ses-a01", "ses-a02", "ses-a03"],
         },
       },
       {
@@ -647,6 +659,14 @@ describe("RecommendationsPage — states", () => {
     expect(diagnostics).toContain("Cause facet — dynamic content: UNOBSERVABLE.");
     expect(observations).toContain("Tool identified: Bash.");
     expect(observations).toContain("Tool events linked to a model response: 80%.");
+    expect(observations).toContain(
+      "Workspace cohort context: 6 / 18 repeated test-failure sessions; 3 recovered test sequences.",
+    );
+    expect(observations).toContain("[2026-08-01T00:00:00.000Z, 2026-08-15T00:00:00.000Z)");
+    expect(observations).toContain(
+      "Workspace affected IDs: ses-a01, ses-a02, ses-a03, ses-a04, ses-a05, ses-a06",
+    );
+    expect(observations).toContain("not this session's count or evidence of task success");
     expect(diagnostics).toContain("Output size in bytes: 48,000.");
     expect(diagnostics).toContain("Later turns carrying this output: 3.");
     expect(diagnostics).toContain("Estimated tokens carried into later turns: 13K tokens.");

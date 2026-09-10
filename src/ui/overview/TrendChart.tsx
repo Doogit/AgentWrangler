@@ -232,7 +232,7 @@ function HeadroomPanel({
   if (state.status === "loading") {
     return (
       <div aria-busy="true" aria-label="Loading headroom trend" style={{ marginTop: 20 }}>
-        <p className="kpi-fn">Headroom vs cap over time</p>
+        <p className="kpi-fn">Daily headroom vs your weekly cap</p>
         <SkeletonChart height={210} />
       </div>
     );
@@ -268,7 +268,7 @@ function HeadroomPanel({
   return (
     <div data-testid="headroom-trend-panel" style={{ marginTop: 20 }}>
       <p className="kpi-fn" style={{ marginBottom: 4 }}>
-        Headroom vs cap per {data.bucket} - percent-native
+        Daily headroom vs your weekly cap
       </p>
       <div className="kpi-fn" style={{ marginBottom: 4, opacity: 0.85 }}>
         <span style={{ color: "var(--teal, #2dd4bf)", marginRight: 16 }}>
@@ -279,9 +279,20 @@ function HeadroomPanel({
         </span>
       </div>
       <p className="kpi-fn" style={{ marginBottom: 8, opacity: 0.75 }}>
-        Percent-native headroom has no absolute-cap denominator; negative values mean the limit was
-        exceeded.
+        Each line shows the share of your configured weekly cap left after that {data.bucket}'s
+        estimated cap-weighted use. The 0.1x line counts cache-read tokens at one tenth; the 1.0x
+        line counts them in full. Both are unverified estimates.
       </p>
+      <div
+        className="kpi-fn"
+        aria-label="How to read this chart"
+        style={{ marginBottom: 8, opacity: 0.85 }}
+      >
+        <strong>How to read this:</strong> 100% means no estimated cap use for that {data.bucket}
+        {"; "}
+        0% means that {data.bucket}'s estimate equals your weekly cap; below 0% means it exceeds it.
+        The 0.1x and 1.0x lines use the two unverified cache-read assumptions above.
+      </div>
       <ResponsiveContainer width="100%" height={210}>
         <LineChart data={data.points} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
           <CartesianGrid {...gridProps.grid} />

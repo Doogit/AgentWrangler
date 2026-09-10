@@ -34,7 +34,7 @@ import {
   trackEffect,
 } from "../api/effect-client";
 import { useExperimentalActions } from "../hooks/useExperimentalActions";
-import { workspaceLabel } from "../lib/workspace-label";
+import { useWorkspaceNames } from "../lib/workspace-names";
 import Chip from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
 import EffectEvidence from "./EffectEvidence";
@@ -343,13 +343,6 @@ function fmtValue(v: unknown): string {
   return String(v);
 }
 
-/** ONE claim-kind chip per detector for the collapsed header. */
-function claimChipKind(detectorId: string): "PROXY" | "OBS_PROXY" | "EXPERIMENTAL" {
-  if (detectorId === "D5") return "PROXY";
-  if (detectorId === "D1") return "OBS_PROXY";
-  return "EXPERIMENTAL";
-}
-
 function evidenceNumber(rec: RecommendationCard, key: string): number | null {
   const value = rec.evidence[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -569,8 +562,30 @@ function observedFacts(rec: RecommendationCard): string[] {
       const coverage = evidenceNumber(rec, "owner_turn_metadata_coverage");
       const covered = evidenceNumber(rec, "owner_turn_metadata_covered_event_count");
       const denominator = evidenceNumber(rec, "owner_turn_metadata_denominator_event_count");
+      const workspaceN = evidenceNumber(rec, "workspace_qualifying_session_count");
+      const contextFrom = evidenceString(rec, "workspace_context_from");
+      const contextTo = evidenceString(rec, "workspace_context_to");
+      const affected = rec.evidence.workspace_affected_session_ids;
+      const recovered = rec.evidence.workspace_recovered_session_ids;
+      const hasContext =
+        workspaceN !== null &&
+        contextFrom !== null &&
+        contextTo !== null &&
+        Array.isArray(affected) &&
+        affected.every((id) => typeof id === "string") &&
+        Array.isArray(recovered) &&
+        recovered.every((id) => typeof id === "string");
       return [
         "This detector crossed its configured threshold; raw measurements are available in developer diagnostics.",
+        hasContext
+          ? `Workspace cohort context: ${affected.length} / ${workspaceN} repeated test-failure sessions; ${recovered.length} recovered test sequences. [${contextFrom}, ${contextTo})`
+          : null,
+        hasContext
+          ? `Workspace affected IDs: ${affected.join(", ") || "none"}. Recovered IDs: ${recovered.join(", ") || "none"}.`
+          : null,
+        hasContext
+          ? "Workspace context is an observation, not this session's count or evidence of task success. The detector match remains session-specific."
+          : null,
         coverage === null
           ? null
           : `Tool events linked to a model response: ${fmtPercent(coverage)}.`,
@@ -895,6 +910,7 @@ function FocusHighlightBanner({ onDismiss }: { onDismiss?: () => void }) {
  * Workspace recs: blue "workspace · <label>" badge.
  */
 function ScopeBadge({ rec }: { rec: RecommendationCard }) {
+  const { labelFor } = useWorkspaceNames();
   if (rec.cross_workspace) {
     const label =
       rec.workspace_multiplier !== null
@@ -903,7 +919,7 @@ function ScopeBadge({ rec }: { rec: RecommendationCard }) {
     return <span className="rec-scope-badge rec-scope-badge--global">{label}</span>;
   }
   const wsId = rec.scope_workspace_id;
-  const label = wsId !== null ? workspaceLabel({ workspace_id: wsId }) : "";
+  const label = wsId !== null ? labelFor(wsId) : "";
   return <span className="rec-scope-badge rec-scope-badge--workspace">workspace · {label}</span>;
 }
 
@@ -948,6 +964,7 @@ function SingleRecCard({
   onAdopt,
   onEffectMutated,
 }: SingleRecCardProps) {
+  const { labelFor } = useWorkspaceNames();
   const experimental = useExperimentalActions();
   const focused = focusRecId !== null && focusRecId === rec.rec_id;
   const [expanded, setExpanded] = useState(focused);
@@ -967,7 +984,6 @@ function SingleRecCard({
   useEffect(() => {
     if (expanded) detailsHeadingRef.current?.focus();
   }, [expanded]);
-  const [collapsedChipsExpanded, setCollapsedChipsExpanded] = useState(false);
   const [artifactCopied, setArtifactCopied] = useState(false);
   const [guidedShown, setGuidedShown] = useState(false);
   const [snippetCopied, setSnippetCopied] = useState(false);
@@ -1000,7 +1016,6 @@ function SingleRecCard({
     | { status: "failed"; action: WriteAction; message: string }
   >({ status: "idle" });
   const detailsId = useId();
-  const chipOverflowId = useId();
   const promptArtifactId = useId();
   const snippetLabelId = useId();
 
@@ -1011,16 +1026,6 @@ function SingleRecCard({
   const tier = confidenceTier(rec);
   const assumptionNote = unvalidatedAssumptionNote(rec);
   const hasVisibleSavings = hasSavings && !isD4;
-  // Keep the complete chip set intact. The collapsed row elevates the confidence
-  // tier and one claim chip, while the remaining explanatory chips are disclosed
-  // inline rather than removed. The details view below intentionally keeps its
-  // existing rendering unchanged.
-  const overflowChips = hasVisibleSavings
-    ? [
-        <Chip key="modeled" kind="MODELED" />,
-        <Chip key="list-equiv" kind="LIST_EQUIV" label="LIST_EQUIV · modeled USD" />,
-      ]
-    : [];
   const isAdopted =
     rec.state !== "PROPOSED" ||
     cycle !== null ||
@@ -1054,8 +1059,10 @@ function SingleRecCard({
     generateAutocompactSnippet(rec);
   // Secondary snippet offered alongside the primary (RI8): D4 subagent routing.
   const generatedSnippet2: GeneratedSnippet | null = generateSubagentRoutingSnippet(rec);
-  const visibleObservationFacts = observationFacts.slice(0, 2);
-  const diagnosticObservationFacts = observationFacts.slice(2);
+  const visibleFactCount =
+    rec.detector_id === "D7" && "workspace_context_from" in rec.evidence ? 5 : 2;
+  const visibleObservationFacts = observationFacts.slice(0, visibleFactCount);
+  const diagnosticObservationFacts = observationFacts.slice(visibleFactCount);
 
   // Per-turn delta: from evidence.delta_context_tokens (present on D1/CONTEXT recs)
   const deltaCtx =
@@ -1328,7 +1335,7 @@ function SingleRecCard({
         if (res.ok && body.launched === true) {
           setOpenTerminalMsg({
             ok: true,
-            text: `Opened a terminal in ${workspaceLabel({ workspace_id: workspaceId })}.`,
+            text: `Opened a terminal in ${labelFor(workspaceId)}.`,
           });
           setActionEvidence("manual");
         } else {
@@ -1418,11 +1425,11 @@ function SingleRecCard({
   }
 
   const rootClass = grouped ? "rec-session-row" : "card rec-card";
-  const highlightClass = focused && !grouped ? " rec-focus-highlight" : "";
+  const highlightClass = focused ? " rec-focus-highlight" : "";
 
   return (
     <div ref={cardRef} className={`${rootClass}${highlightClass}`} style={{ marginBottom: 13 }}>
-      {focused && !grouped && (
+      {focused && (
         <FocusHighlightBanner
           {...(onDismissFocus === undefined ? {} : { onDismiss: onDismissFocus })}
         />
@@ -1439,142 +1446,128 @@ function SingleRecCard({
 
       {/* Collapsed row — always visible */}
       <div className="rec-collapsed-row">
-        <div className="rec-collapsed-main">
-          <div className="rec-header-row">
-            {!grouped && <span className="rec-rank-badge">#{rank}</span>}
-            <h3 className="rec-title">{rec.title ?? rec.lever}</h3>
-            <span className="rec-category-chip">{displayGroup}</span>
-            <ScopeBadge rec={rec} />
-            {isAdopted && (
-              <span className="rec-adopted-pill">
-                {pendingAction === "adopt" ? "Adopt pending — Undo" : "Adopted"}
-              </span>
-            )}
-            {pendingAction === "dismiss" && (
-              <span className="rec-pending-action-pill">Dismiss pending — Undo</span>
-            )}
-          </div>
-          <div className="rec-headline">
-            <span className="rec-headline-text">{headlineText}</span>
-            <span className="rec-chip-row" aria-label="Recommendation claim indicators">
-              <InfoTip
-                label="What the claim chips mean"
-                content="These labels distinguish recorded measurements from estimates. A recorded measurement does not prove that a suggestion will save tokens."
-              />
-              <span
-                className={`rec-confidence-tier ${tier.className}`}
-                title={tier.tooltip}
-                aria-label={tier.tooltip}
-              >
-                {tier.label}
-              </span>
-              <Chip kind={claimChipKind(rec.detector_id)} />
-              {collapsedChipsExpanded && (
-                <span id={chipOverflowId} className="rec-chip-overflow">
-                  {overflowChips}
-                </span>
-              )}
-              {overflowChips.length > 0 && (
-                <button
-                  type="button"
-                  className="rec-chip-expander"
-                  data-chip-expander
-                  aria-controls={collapsedChipsExpanded ? chipOverflowId : undefined}
-                  aria-expanded={collapsedChipsExpanded}
-                  onClick={() => setCollapsedChipsExpanded((isOpen) => !isOpen)}
-                >
-                  {collapsedChipsExpanded ? "−" : "+"}
-                  {overflowChips.length}
-                </button>
-              )}
-            </span>
-          </div>
-          {showSessionRows && sessionIds.length > 0 && (
-            <ul className="rec-session-links" aria-label="Affected sessions">
-              {sessionIds.map((sessionId) => (
-                <li key={sessionId}>
-                  <span className="rec-session-label">Session</span>{" "}
-                  <a href={`#/sessions/${encodeURIComponent(sessionId)}`}>{sessionId}</a>
-                </li>
-              ))}
-            </ul>
-          )}
-          {/* D1 secondary-lever label (taxonomy R9 / D8 design §9.7):
-              always visible in collapsed state so the user sees the framing before acting. */}
-          {!grouped && isD1 && (
-            <p className="rec-d1-secondary-lever">
-              Review the measured file size before editing. Keep instructions the project still
-              needs.
-            </p>
-          )}
+        <div className="rec-header-row">
+          {!grouped && <span className="rec-rank-badge">#{rank}</span>}
+          <h3 className="rec-title">{rec.title ?? rec.lever}</h3>
         </div>
-        <div className="rec-actions">
-          <button
-            type="button"
-            className="rec-action-btn rec-action-btn--ghost"
-            onClick={() => scheduleAction("dismiss")}
-            disabled={!onDismiss || pendingAction !== null || writeState.status === "saving"}
+        <span className="rec-description rec-headline-text">{headlineText}</span>
+        <span className="rec-chip-row" aria-label="Recommendation claim indicators">
+          <span
+            className={`rec-confidence-tier ${tier.className}`}
+            title={tier.tooltip}
+            aria-label={tier.tooltip}
           >
-            Dismiss
-          </button>
-          {(rec.detector_id === "D5" ||
-            (capability?.mode === "TRACKABLE" &&
-              !unsupportedCycle &&
-              ((cycle === null &&
-                actionEvidence !== "none" &&
-                (actionEvidence === "supported" || manualAttested)) ||
-                canRetrack))) && (
-            <button
-              type="button"
-              className="rec-action-btn"
-              title={
-                rec.detector_id === "D5"
-                  ? "Records the calibration warning as acknowledged without impact tracking."
-                  : "Records a baseline for this completed change; it changes no files."
-              }
-              onClick={() => (rec.detector_id === "D5" ? scheduleAction("adopt") : requestTrack())}
-              disabled={
-                (rec.detector_id === "D5" && !onAdopt) ||
-                pendingAction !== null ||
-                writeState.status === "saving"
-              }
-            >
-              {rec.detector_id === "D5"
-                ? "Acknowledge"
-                : terminalCycle
-                  ? "Track another change"
-                  : "Track this change"}
-            </button>
-          )}
-          {experimental && canOpenTerminal && (
-            <button
-              type="button"
-              className="rec-action-btn rec-action-btn--primary"
-              title="Opens your terminal in this workspace running an interactive Claude Code session seeded with the prompt. The daemon changes no files."
-              onClick={handleOpenTerminal}
-            >
-              Open in Claude Code ↗
-            </button>
-          )}
+            {tier.label}
+          </span>
+          <span className="rec-category-chip">{displayGroup}</span>
+          <ScopeBadge rec={rec} />
+          <InfoTip
+            label="What the claim chips mean"
+            content="These labels distinguish recorded measurements from estimates. A recorded measurement does not prove that a suggestion will save tokens."
+          />
+        </span>
+        {expanded && (
+          <p className="rec-meta">
+            {hasVisibleSavings
+              ? `${fmtUsd(rec.modeled_savings_u_per_wk ?? 0)}/wk modeled`
+              : "No modeled savings"}
+            {hasSavings && " · early estimate"}
+            {isFlagship && " · check first"}
+            {isAdopted && ` · ${pendingAction === "adopt" ? "adopt pending" : "adopted"}`}
+            {pendingAction === "dismiss" && " · dismiss pending"}
+          </p>
+        )}
+        {showSessionRows && sessionIds.length > 0 && (
+          <ul className="rec-session-links" aria-label="Affected sessions">
+            {sessionIds.map((sessionId) => (
+              <li key={sessionId}>
+                <span className="rec-session-label">Session</span>{" "}
+                <a href={`#/sessions/${encodeURIComponent(sessionId)}`}>{sessionId}</a>
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* D1 secondary-lever label (taxonomy R9 / D8 design §9.7):
+              always visible in collapsed state so the user sees the framing before acting. */}
+        {!grouped && isD1 && (
+          <p className="rec-d1-secondary-lever">
+            Review the measured file size before editing. Keep instructions the project still needs.
+          </p>
+        )}
+        <div className="rec-actions">
           <button
             ref={detailsLauncherRef}
             type="button"
-            className="rec-action-btn rec-expand-btn"
+            className="rec-action-btn rec-action-btn--primary rec-expand-btn"
             aria-expanded={expanded}
             aria-controls={detailsId}
             onClick={toggleDetails}
           >
             {expanded ? "Hide details ▲" : "Show details ▼"}
           </button>
-          <button
-            ref={evaluationLauncherRef}
-            type="button"
-            className="rec-action-btn"
-            aria-expanded={evaluationOpen}
-            onClick={() => (evaluationOpen ? closeEvaluation() : setEvaluationOpen(true))}
-          >
-            Evaluation
-          </button>
+          <details className="rec-actions-menu">
+            <summary className="rec-action-btn">More ▾</summary>
+            <div className="rec-actions-menu-items">
+              <button
+                type="button"
+                className="rec-action-btn rec-action-btn--ghost"
+                onClick={() => scheduleAction("dismiss")}
+                disabled={!onDismiss || pendingAction !== null || writeState.status === "saving"}
+              >
+                Dismiss
+              </button>
+              {(rec.detector_id === "D5" ||
+                (capability?.mode === "TRACKABLE" &&
+                  !unsupportedCycle &&
+                  ((cycle === null &&
+                    actionEvidence !== "none" &&
+                    (actionEvidence === "supported" || manualAttested)) ||
+                    canRetrack))) && (
+                <button
+                  type="button"
+                  className="rec-action-btn"
+                  title={
+                    rec.detector_id === "D5"
+                      ? "Records the calibration warning as acknowledged without impact tracking."
+                      : "Records a baseline for this completed change; it changes no files."
+                  }
+                  onClick={() =>
+                    rec.detector_id === "D5" ? scheduleAction("adopt") : requestTrack()
+                  }
+                  disabled={
+                    (rec.detector_id === "D5" && !onAdopt) ||
+                    pendingAction !== null ||
+                    writeState.status === "saving"
+                  }
+                >
+                  {rec.detector_id === "D5"
+                    ? "Acknowledge"
+                    : terminalCycle
+                      ? "Track another change"
+                      : "Track this change"}
+                </button>
+              )}
+              {experimental && canOpenTerminal && (
+                <button
+                  type="button"
+                  className="rec-action-btn rec-action-btn--primary"
+                  title="Opens your terminal in this workspace running an interactive Claude Code session seeded with the prompt. The daemon changes no files."
+                  onClick={handleOpenTerminal}
+                >
+                  Open in Claude Code ↗
+                </button>
+              )}
+              <button
+                ref={evaluationLauncherRef}
+                type="button"
+                className="rec-action-btn"
+                aria-expanded={evaluationOpen}
+                onClick={() => (evaluationOpen ? closeEvaluation() : setEvaluationOpen(true))}
+              >
+                Evaluation
+              </button>
+            </div>
+          </details>
         </div>
         {!grouped && route === "hook" && (
           <div className="rec-primary-action">

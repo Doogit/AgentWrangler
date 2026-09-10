@@ -34,32 +34,25 @@ function makeRec(): RecommendationCard {
 }
 
 describe("RecCard chip tiering", () => {
-  it("keeps only the tier and load-bearing claim visible until the inline expander is opened", () => {
+  it("renders only confidence, category, and scope chips; qualifiers remain in metadata", () => {
     const { container, getByRole } = render(<RecCard rec={makeRec()} />);
     const chipRow = container.querySelector(".rec-chip-row");
     if (chipRow === null) throw new Error("recommendation chip row is missing");
 
-    expect(chipRow.querySelectorAll(".rec-confidence-tier, .chip")).toHaveLength(2);
+    expect(
+      chipRow.querySelectorAll(".rec-confidence-tier, .rec-category-chip, .rec-scope-badge"),
+    ).toHaveLength(3);
     expect(chipRow.textContent).toContain("MODELED SAVINGS");
-    expect(chipRow.textContent).toContain("EARLY ESTIMATE");
+    expect(chipRow.textContent).toContain("Long sessions");
+    expect(chipRow.textContent).toContain("workspace");
     expect(chipRow.textContent).not.toContain("LIST_EQUIV · modeled USD");
-
-    const expander = getByRole("button", { name: "+2" });
-    expect(expander.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(expander);
-
-    expect(expander.getAttribute("aria-expanded")).toBe("true");
-    expect(chipRow.querySelectorAll(".rec-confidence-tier, .chip")).toHaveLength(4);
-    expect(chipRow.textContent).toContain("MODELED");
-    expect(chipRow.textContent).toContain("LIST_EQUIV · modeled USD");
+    expect(container.querySelector(".rec-meta")).toBeNull();
 
     fireEvent.click(getByRole("button", { name: /show details/i }));
     const details = container.querySelector(".rec-details");
+    expect(container.querySelector(".rec-meta")?.textContent).toContain("early estimate");
     expect(details?.querySelectorAll(".chip")).toHaveLength(2);
     expect(details?.textContent).toContain("MODELED");
     expect(details?.textContent).toContain("LIST_EQUIV · modeled USD");
-
-    fireEvent.click(getByRole("button", { name: "−2" }));
-    expect(chipRow.querySelectorAll(".rec-confidence-tier, .chip")).toHaveLength(2);
   });
 });

@@ -747,13 +747,24 @@ describe("reconcile work set", () => {
 describe("content-leak guard (SEC-101/107)", () => {
   it("stores no transcript prose in any ingested row", () => {
     runBackscan(db, [FIXTURE_ROOT], OPTS);
-    const dump = JSON.stringify([
-      db.prepare("SELECT * FROM turns").all(),
-      db.prepare("SELECT * FROM tool_events").all(),
-      db.prepare("SELECT * FROM ingest_quarantine").all(),
-    ]);
-    // "synthetic" appears only in fixture tool_result/command *content*, which is
-    // never stored. Its absence proves content was discarded, not persisted.
+    const dump = JSON.stringify(
+      [
+        db.prepare("SELECT * FROM turns").all(),
+        db.prepare("SELECT * FROM tool_events").all(),
+        db.prepare("SELECT * FROM ingest_quarantine").all(),
+      ],
+      (key, value) => {
+        // Quarantine paths legitimately include the checkout name (for example
+        // esf5-synthetic). Strip only the verified fixture-root prefix, retaining
+        // every other field and the relative filename in the content-leak check.
+        if (key === "file_path" && typeof value === "string") {
+          expect(value.startsWith(`${FIXTURE_ROOT}${path.sep}`)).toBe(true);
+          return value.slice(FIXTURE_ROOT.length + 1);
+        }
+        return value;
+      },
+    );
+    // Fixture tool_result/command prose contains "synthetic"; it must not persist.
     expect(dump).not.toContain("synthetic");
   });
 

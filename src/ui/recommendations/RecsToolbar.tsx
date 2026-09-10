@@ -97,6 +97,8 @@ export function setToolbarParam(key: string, value: string | null): void {
 /** Collect unique workspace ids from all recs (null = global). Exported for scope strip use. */
 export function collectWorkspaces(
   view: RecommendationsView,
+  labelFor: (workspaceId: string) => string = (workspaceId) =>
+    workspaceLabel({ workspace_id: workspaceId }),
 ): Array<{ id: string | null; label: string }> {
   const seen = new Set<string | null>();
   const all = [...view.active, ...view.limit_warnings, ...view.adopted, ...view.dismissed];
@@ -105,7 +107,7 @@ export function collectWorkspaces(
     const id = rec.scope_workspace_id;
     if (seen.has(id)) continue;
     seen.add(id);
-    const label = id === null ? "Global (cross-workspace)" : workspaceLabel({ workspace_id: id });
+    const label = id === null ? "Global (cross-workspace)" : labelFor(id);
     workspaces.push({ id, label });
   }
   return workspaces;

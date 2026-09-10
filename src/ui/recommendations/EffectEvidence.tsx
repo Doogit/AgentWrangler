@@ -17,6 +17,16 @@ function evidenceFor(cycle: EffectCycle): ObservationBundle | null {
   return cycle.finalEvidence ?? cycle.provisionalEvidence;
 }
 
+function mixText(mix: ObservationBundle["modelMix"]["before"]): string {
+  if (!mix.available || mix.total === 0) return "unavailable";
+  return Object.entries(mix.counts)
+    .map(
+      ([model, count]) =>
+        `${model}: ${count} / ${mix.total} turns (${((count / mix.total) * 100).toLocaleString("en-US", { maximumFractionDigits: 1 })}%)`,
+    )
+    .join(", ");
+}
+
 function evidenceSummary(
   label: string,
   evidence: ObservationBundle | null,
@@ -33,6 +43,8 @@ function evidenceSummary(
         {label}: observed aggregate value: {value(aggregate.value, cycle.targetDefinition.unit)}.
         {" Numerator is not separately recorded. Denominator: "}
         {aggregate.denominator === null ? "unavailable" : aggregate.denominator.toLocaleString()}.
+        {" Distinct sessions: "}
+        {aggregate.sessionN}. Exposures: {aggregate.exposureN}.
       </p>
       <p>
         Exclusions: {excluded || "none recorded"}. Method: {evidence.methodVersion}; query:{" "}
@@ -91,13 +103,50 @@ export default function EffectEvidence({ cycle }: { cycle: EffectCycle }) {
       </div>
       <section className="rec-section" aria-label="Evidence and limits">
         <h4 className="rec-section-label">Evidence and limits</h4>
+        <p style={{ overflowWrap: "anywhere" }}>
+          Frozen cycle ID: {cycle.cycleId}. Workspace: {cycle.scope.workspaceId ?? "all"}.
+          {cycle.scope.sourceIdentity && ` Source identity: ${cycle.scope.sourceIdentity}.`}
+          {cycle.scope.tool && ` Tool: ${cycle.scope.tool}.`}
+          {" Frozen cohort: "}
+          {JSON.stringify(cycle.cohort)}.
+        </p>
         <p>
           Baseline window: [{cycle.baselineFrom}, {cycle.baselineTo}); observation window: [
           {cycle.observationFrom}, {cycle.observationTo ?? cycle.scheduledObservationTo}). Boundary
-          rule: {cycle.targetDefinition.boundaryRule}.
+          rule: {cycle.targetDefinition.boundaryRule}.{" Scheduled observation end: "}
+          {cycle.scheduledObservationTo}.
         </p>
         {evidenceSummary("Baseline evidence", evidence, evidence?.before ?? null, cycle)}
         {evidenceSummary("Follow-up evidence", evidence, evidence?.after ?? null, cycle)}
+        {evidence?.modelMix && (
+          <p>
+            Model mix (turn counts): baseline {mixText(evidence.modelMix.before)}. Follow-up{" "}
+            {mixText(evidence.modelMix.after)}. Task mix remains subject to the recorded comparison
+            limits.
+          </p>
+        )}
+        {guards
+          .filter((guardrail) => guardrail.availability === "SUPPORTED")
+          .map((guardrail) => (
+            <p key={guardrail.guardrailId}>
+              {guardrail.guardrailId}: baseline value:{" "}
+              {value(
+                guardrail.before?.value ?? null,
+                cycle.guardrailDefinitions.find(
+                  (definition) => definition.guardrailId === guardrail.guardrailId,
+                )?.unit ?? "",
+              )}
+              . Denominator: {guardrail.before?.denominator ?? "unavailable"}.{" Follow-up value: "}
+              {value(
+                guardrail.after?.value ?? null,
+                cycle.guardrailDefinitions.find(
+                  (definition) => definition.guardrailId === guardrail.guardrailId,
+                )?.unit ?? "",
+              )}
+              . Denominator: {guardrail.after?.denominator ?? "unavailable"}.{" Evidence limits: "}
+              {guardrail.reasonCodes.join(", ") || "none recorded"}.
+            </p>
+          ))}
       </section>
       <div className="ledger-row">
         <span className="ledger-key">Comparison</span>

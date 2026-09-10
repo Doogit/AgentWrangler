@@ -301,8 +301,9 @@ function fmtUsdPerWkHeadroom(microUsd: number): string {
 }
 
 /** BM2 headroom summary line — a modeled ceiling, never a "$X wasted" claim. */
-function HeadroomSummary() {
+function HeadroomSummary({ entries }: { entries: LedgerEntry[] }) {
   const [state, setState] = useState<HeadroomState>({ status: "loading" });
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -325,6 +326,8 @@ function HeadroomSummary() {
 
   const caveat = state.value.meta.qualification.note;
   const opportunities = data.opportunities;
+  const openCount = opportunities?.length ?? data.open_rec_count;
+  const openLabel = openCount === 1 ? "open modeled opportunity" : "open modeled opportunities";
 
   return (
     <div className="headroom-summary ledger-row" data-testid="headroom-summary">
@@ -332,29 +335,62 @@ function HeadroomSummary() {
         Possible improvement <InfoTip label="What possible improvement means" content={caveat} />
       </span>
       <span className="ledger-val">
-        {opportunities !== undefined && opportunities.length > 0 ? (
-          <>
-            {opportunities.map((opportunity) => (
-              <span key={opportunity.rec_id} className="kpi-off-hint">
-                {opportunity.rec_id}: {fmtUsdPerWkHeadroom(
-                  opportunity.modeled_savings_u_per_wk,
-                )}{" "}
-              </span>
-            ))}{" "}
-            <Chip kind="EXPERIMENTAL" label="INDIVIDUAL MODELED OPPORTUNITIES" />
-          </>
-        ) : (
-          <span className="kpi-off-hint">
-            {opportunities === undefined
-              ? "individual opportunity coverage unavailable"
-              : "no modeled opportunities are open"}
-          </span>
-        )}
-        {data.open_rec_count > 0 && (
+        {openCount} {openLabel}; {fmtUsdPerWkHeadroom(data.headroom_u_per_wk)} modeled total per
+        week (individual estimates; not additive or measured)
+        {opportunities === undefined ? (
           <span className="kpi-off-hint">
             {" "}
-            · {data.open_rec_count} open {data.open_rec_count === 1 ? "rec" : "recs"}
+            Individual modeled estimates were not provided, so a breakdown is unavailable.
           </span>
+        ) : opportunities.length === 0 ? (
+          <span className="kpi-off-hint">
+            {" "}
+            No individual modeled opportunities are available for a breakdown.
+          </span>
+        ) : (
+          <>
+            {" "}
+            <button
+              type="button"
+              className="link-button"
+              aria-expanded={breakdownOpen}
+              aria-controls="modeled-opportunities-breakdown"
+              onClick={() => setBreakdownOpen((open) => !open)}
+            >
+              {breakdownOpen ? "Hide breakdown" : "See breakdown →"}
+            </button>
+            {breakdownOpen && (
+              <table id="modeled-opportunities-breakdown" className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Rec title / id</th>
+                    <th scope="col">Modeled $/wk</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {opportunities.map((opportunity) => {
+                    const entry = entries.find(
+                      (candidate) => candidate.rec_id === opportunity.rec_id,
+                    );
+                    const title =
+                      entry === undefined
+                        ? opportunity.rec_id
+                        : `${DETECTOR_GROUP_LABELS[entry.detector_id] ?? entry.detector_id}: ${entry.lever}`;
+                    return (
+                      <tr key={opportunity.rec_id}>
+                        <td>
+                          {title} <span className="kpi-off-hint">({opportunity.rec_id})</span>
+                        </td>
+                        <td>{fmtUsdPerWkHeadroom(opportunity.modeled_savings_u_per_wk)}</td>
+                        <td>{entry?.state ?? "OPEN MODELED"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </>
         )}
       </span>
     </div>
@@ -427,7 +463,7 @@ export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string
       {entries.map((entry) => (
         <LedgerRow key={entry.rec_id} entry={entry} />
       ))}
-      {visibleRecIds === undefined && <HeadroomSummary />}
+      {visibleRecIds === undefined && <HeadroomSummary entries={entries} />}
     </div>
   );
 }

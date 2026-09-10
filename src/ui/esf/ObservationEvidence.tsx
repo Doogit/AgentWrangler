@@ -14,8 +14,12 @@ function money(microUsd: number): string {
   return `$${(microUsd / 1_000_000).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export function WindowLabel({ from, to }: { from: string; to: string }) {
-  return <code style={{ overflowWrap: "anywhere" }}>{`[${from}, ${to})`}</code>;
+export function DateRange({ lead, from, to }: { lead: string; from: string; to: string }) {
+  return (
+    <span style={{ overflowWrap: "anywhere" }}>
+      {lead} from {from} up to, but not including, {to}.
+    </span>
+  );
 }
 
 function SessionLinks({ ids, label }: { ids: string[]; label: string }) {
@@ -49,7 +53,14 @@ function DetailDisclosure({
   };
   return (
     <div style={{ marginTop: 10 }}>
-      <button ref={launcher} type="button" className="btn-secondary" onClick={() => setOpen(true)}>
+      <button
+        ref={launcher}
+        type="button"
+        className="btn-secondary"
+        aria-expanded={open}
+        aria-controls={headingId}
+        onClick={() => (open ? close() : setOpen(true))}
+      >
         View evidence and limits
       </button>
       {open && (
@@ -76,9 +87,9 @@ function DetailDisclosure({
             Evidence and limits
           </h3>
           <p>
-            Selected-turn cohort <WindowLabel from={cohort.from} to={cohort.to} />. Resource totals
-            include {cohort.resource.selected_session_count} selected sessions; priced and unpriced
-            turns are separate.
+            <DateRange lead="This data includes entries" from={cohort.from} to={cohort.to} />{" "}
+            Resource totals include {cohort.resource.selected_session_count} selected sessions;
+            priced and unpriced turns are separate.
           </p>
           <p>
             Repeated test-failure observation uses method{" "}
@@ -129,7 +140,7 @@ export function ObservationEvidence({
   workspaceId,
   filter,
   title = "Observed evidence",
-}: { workspaceId: string | null; filter: WindowFilter; title?: string }) {
+}: { workspaceId: string | null; filter: WindowFilter; title?: string | null }) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [retry, setRetry] = useState(0);
   const launcher = useRef<HTMLButtonElement>(null);
@@ -159,9 +170,11 @@ export function ObservationEvidence({
       data-testid="esf-observation-evidence"
       style={{ marginBottom: 13, padding: 14, minHeight: 142 }}
     >
-      <div className="section-head">
-        <h2>{title}</h2>
-      </div>
+      {title !== null && (
+        <div className="section-head">
+          <h2>{title}</h2>
+        </div>
+      )}
       {state.status === "loading" && (
         <div aria-busy="true" style={{ minHeight: 84 }}>
           Loading observations…
@@ -202,8 +215,15 @@ function CohortSummary({
   return (
     <>
       <p style={{ marginTop: 0, fontSize: 12, color: "var(--text-muted)" }}>
-        {cohort.workspace_id === null ? "Selected resource cohort" : "Workspace resource cohort"}{" "}
-        <WindowLabel from={cohort.from} to={cohort.to} />
+        <DateRange
+          lead={
+            cohort.workspace_id === null
+              ? "This overview includes data"
+              : "This workspace includes data"
+          }
+          from={cohort.from}
+          to={cohort.to}
+        />
       </p>
       <div
         style={{
@@ -296,7 +316,11 @@ export function SessionObservedEvidence({ session }: { session: SessionSummary }
       {cohort !== null && cohort.resource.selected_session_count > 0 && (
         <>
           <p>
-            Complete session cohort <WindowLabel from={cohort.from} to={cohort.to} />
+            <DateRange
+              lead="This complete session includes data"
+              from={cohort.from}
+              to={cohort.to}
+            />
           </p>
           <div
             style={{

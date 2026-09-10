@@ -77,10 +77,20 @@ describe("ESF observation evidence", () => {
     expect(await screen.findByText("6 / 18 repeated test-failure sessions")).toBeTruthy();
     expect(screen.getByText(/\$0\.86 priced/)).toBeTruthy();
     const launcher = screen.getByRole("button", { name: "View evidence and limits" });
+    expect(
+      screen.getByText(/This workspace includes data from 7d-from up to, but not including, 7d-to/),
+    ).toBeTruthy();
     fireEvent.click(launcher);
     const heading = await screen.findByRole("heading", { name: "Evidence and limits" });
     expect(document.activeElement).toBe(heading);
-    fireEvent.keyDown(heading, { key: "Escape" });
+    fireEvent.click(launcher);
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "Evidence and limits" })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(launcher);
+    fireEvent.click(launcher);
+    const reopenedHeading = await screen.findByRole("heading", { name: "Evidence and limits" });
+    fireEvent.keyDown(reopenedHeading, { key: "Escape" });
     await waitFor(() =>
       expect(screen.queryByRole("heading", { name: "Evidence and limits" })).toBeNull(),
     );
@@ -97,9 +107,17 @@ describe("ESF observation evidence", () => {
         }) as never,
     );
     render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
-    expect(await screen.findByText("[7d-from, 7d-to)")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        /This workspace includes data from 7d-from up to, but not including, 7d-to/,
+      ),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "24h" }));
-    expect(await screen.findByText("[24h-from, 24h-to)")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        /This workspace includes data from 24h-from up to, but not including, 24h-to/,
+      ),
+    ).toBeTruthy();
     expect(vi.mocked(fetchEsfObservations).mock.lastCall?.[1]).toEqual({
       from: "2026-08-23T00:00:00.000Z",
       to: "2026-08-24T00:00:00.000Z",
@@ -135,12 +153,24 @@ describe("ESF observation evidence", () => {
       .mockResolvedValueOnce({ data: cohortFor("24h") } as never);
     const view = render(<ObservationEvidence workspaceId="ws-alpha" filter={{ preset: "7d" }} />);
     view.rerender(<ObservationEvidence workspaceId="ws-alpha" filter={{ preset: "24h" }} />);
-    expect(await screen.findByText("[24h-from, 24h-to)")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        /This workspace includes data from 24h-from up to, but not including, 24h-to/,
+      ),
+    ).toBeTruthy();
     await act(async () => {
       resolveOld({ data: cohortFor("7d") } as never);
     });
-    expect(screen.queryByText("[7d-from, 7d-to)")).toBeNull();
-    expect(screen.getByText("[24h-from, 24h-to)")).toBeTruthy();
+    expect(
+      screen.queryByText(
+        /This workspace includes data from 7d-from up to, but not including, 7d-to/,
+      ),
+    ).toBeNull();
+    expect(
+      screen.getByText(
+        /This workspace includes data from 24h-from up to, but not including, 24h-to/,
+      ),
+    ).toBeTruthy();
   });
 
   it("clears a previous session's counts and distinguishes loading, failure and retry", async () => {

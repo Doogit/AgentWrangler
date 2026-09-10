@@ -172,10 +172,14 @@ export interface GuardrailDefinition {
   guardrailId: string;
   methodVersion: string;
   unit: string;
+  /** Omitted on frozen legacy definitions. New definitions state this explicitly. */
+  minimumSessions?: number | null;
+  /** False means the value is descriptive and must never produce an outcome direction. */
+  directional?: boolean;
 }
 
 export interface RegisteredHandler {
-  detectorId: "D1" | "D2" | "D4" | "D8";
+  detectorId: "D1" | "D2" | "D4" | "D7" | "D8";
   aliases: readonly string[];
   target: TargetDefinition;
   guardrails: GuardrailDefinition[];

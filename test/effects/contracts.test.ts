@@ -6,8 +6,11 @@ import {
   EffectValidationError,
   type ObservationBundle,
   createEffectEngine,
+  effectEventSourceIdentity,
+  effectToolIdentity,
   findHandler,
 } from "../../src/effects/index.js";
+import { hasOverlappingSupportedCycle } from "../../src/effects/store.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const APPLIED = "2026-02-01T00:00:00.000Z";
@@ -279,6 +282,88 @@ describe("ESF2 persisted contract boundaries", () => {
     db.close();
   });
 
+  it("intersects event scopes conjunctively, with wildcard dimensions and half-open windows", () => {
+    const sourceA = effectEventSourceIdentity("ws-alpha", "path-a");
+    const sourceB = effectEventSourceIdentity("ws-alpha", "path-b");
+    const read = effectToolIdentity(" Read ");
+    const bash = effectToolIdentity("Bash");
+    expect(read).toBe(effectToolIdentity("read"));
+    expect(read).not.toContain("Read");
+
+    const intersects = (
+      left: { workspaceId: string | null; sourceIdentity?: string; tool?: string },
+      right: { workspaceId: string | null; sourceIdentity?: string; tool?: string },
+      rightApplied = APPLIED,
+    ) => {
+      const db = createInMemoryFixtureDb();
+      let sequence = 0;
+      const engine = createEffectEngine(db, {
+        observer: { observe: (_db, cycle) => bundle(cycle, 1) },
+        idFactory: () => `scope-${++sequence}`,
+        now: () => new Date(APPLIED),
+      });
+      insertRec(db, "scope-left");
+      const leftCycle = engine.track({
+        ...request("scope-left", "scope-left"),
+        detectorId: "D7",
+        targetMetric: "loop_flagged_turn_share",
+        scope: left,
+      });
+      insertRec(db, "scope-right");
+      const rightCycle = engine.track({
+        ...request("scope-right", "scope-right"),
+        detectorId: "D2",
+        targetMetric: "d2-floor-context-scoped",
+        scope: right,
+        appliedAt: rightApplied,
+        trackingRequestedAt: rightApplied,
+      });
+      if (!leftCycle.supported || !rightCycle.supported)
+        throw new Error("expected scoped handlers");
+      const result = hasOverlappingSupportedCycle(db, rightCycle.cycle);
+      db.close();
+      return result;
+    };
+
+    expect(
+      intersects(
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+      ),
+    ).toBe(true);
+    expect(
+      intersects(
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        { workspaceId: "ws-alpha", sourceIdentity: sourceB, tool: read },
+      ),
+    ).toBe(false);
+    expect(
+      intersects(
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: bash },
+      ),
+    ).toBe(false);
+    expect(
+      intersects(
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        { workspaceId: "ws-beta", sourceIdentity: sourceA, tool: read },
+      ),
+    ).toBe(false);
+    expect(
+      intersects(
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        { workspaceId: "ws-alpha" },
+      ),
+    ).toBe(true);
+    expect(
+      intersects(
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        { workspaceId: "ws-alpha", sourceIdentity: sourceA, tool: read },
+        "2026-01-18T00:00:00.000Z",
+      ),
+    ).toBe(false);
+  });
+
   it("reads future envelopes opaquely and rejects replay and mutations without starving supported work", () => {
     const db = createInMemoryFixtureDb();
     let seq = 0;
@@ -336,8 +421,15 @@ describe("ESF2 persisted contract boundaries", () => {
   });
 
   it("accepts only exact aliases and provider-backed scope filters", () => {
-    expect(findHandler("D1", "avg_context_per_turn")?.detectorId).toBe("D1");
-    expect(findHandler("D2", "avg_context_per_turn")?.detectorId).toBe("D2");
+    expect(findHandler("D1", "SOURCE_CONTEXT_TOKENS")?.target.methodVersion).toBe(
+      "d1-source-tokens-v2",
+    );
+    expect(findHandler("D2", "CACHE_READ_TOKENS_PER_WK")?.target.methodVersion).toBe(
+      "d2-floor-context-v2",
+    );
+    expect(findHandler("D4", "ROUTING_ADHERENCE_SCORE")?.target.methodVersion).toBe(
+      "d4-premium-share-v2",
+    );
     expect(findHandler("D8", "cache_read_to_creation_ratio")?.target.methodVersion).toBe(
       "d8-cache-ratio-v2",
     );

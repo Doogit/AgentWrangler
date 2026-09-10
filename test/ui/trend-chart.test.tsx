@@ -275,10 +275,13 @@ describe("TrendChart - headroom section", () => {
     await waitFor(() =>
       expect(container.querySelector("[data-testid='headroom-trend-panel']")).not.toBeNull(),
     );
-    expect(container.textContent).toMatch(/0\.1x headline/);
-    expect(container.textContent).toMatch(/1\.0x upper-bound/);
+    expect(container.textContent).toContain("Daily headroom vs your weekly cap");
+    expect(container.textContent).toContain("0.1x headline - unverified cap coefficient");
+    expect(container.textContent).toContain("1.0x upper-bound - unverified cap coefficient");
     expect(container.textContent).toMatch(/unverified cap coefficient/);
-    expect(container.textContent).toMatch(/no absolute-cap denominator/);
+    expect(container.textContent).toMatch(/share of your configured weekly cap left/);
+    expect(container.textContent).toMatch(/How to read this:/);
+    expect(container.textContent).toMatch(/100% means no estimated cap use/);
   });
 
   it("renders NO_LIMIT as a calibrate-first info state, not an error", async () => {

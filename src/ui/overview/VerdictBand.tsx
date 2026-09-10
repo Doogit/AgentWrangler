@@ -154,6 +154,7 @@ export default function VerdictBand({
       ? "#/recommendations"
       : `#/recommendations?focus=${encodeURIComponent(topRecommendation.rec_id)}`;
   const [promptCopied, setPromptCopied] = useState(false);
+  const [isPromptOpen, setIsPromptOpen] = useState(false);
 
   function handleCopyPrompt() {
     if (promptArtifact === null) return;
@@ -169,32 +170,26 @@ export default function VerdictBand({
       aria-labelledby="verdict-band-title"
       aria-busy={isLoading}
     >
-      <div className="verdict-band-summary">
-        <div>
-          <div className="verdict-band-label" id="verdict-band-title">
-            Usage this period
+      <div className="verdict-band-grid">
+        <div className="verdict-band-summary">
+          <div>
+            <div className="verdict-band-label" id="verdict-band-title">
+              Usage this period
+            </div>
+            <CountUpValue value={currentTotal} />
+            <div className="verdict-band-caption">{preset.toUpperCase()} list-price equivalent</div>
           </div>
-          <CountUpValue value={currentTotal} />
-          <div className="verdict-band-caption">{preset.toUpperCase()} list-price equivalent</div>
+          <DeltaBadge delta={delta} />
         </div>
-        <DeltaBadge delta={delta} />
+        <div className="verdict-band-trend">
+          <TrendSparkline values={values} label={`${preset} spend trend`} />
+          <span>Selected-window spend trend</span>
+        </div>
+        <div className="verdict-band-detail verdict-band-next-step">
+          <strong>Suggested next step:</strong> {wasteSource}
+          {claim !== null && <span className="verdict-band-claim"> · {claim}</span>}
+        </div>
       </div>
-      <div className="verdict-band-trend">
-        <TrendSparkline values={values} label={`${preset} spend trend`} />
-        <span>Selected-window spend trend</span>
-      </div>
-      <div className="verdict-band-detail">
-        <strong>Suggested next step:</strong> {wasteSource}
-        {claim !== null && <span className="verdict-band-claim"> · {claim}</span>}
-      </div>
-      {promptArtifact !== null && (
-        <textarea
-          className="prompt-code verdict-prompt"
-          aria-label="Fix prompt"
-          readOnly
-          value={promptArtifact.text}
-        />
-      )}
       <div className="verdict-band-actions">
         {promptArtifact !== null && (
           <button type="button" className="verdict-band-copy" onClick={handleCopyPrompt}>
@@ -205,6 +200,36 @@ export default function VerdictBand({
           {topRecommendation === null ? "Review recommendations →" : "Review suggestion →"}
         </a>
       </div>
+      {promptArtifact !== null && (
+        <div className="verdict-prompt-drawer">
+          <div className="verdict-prompt-drawer-header">
+            <div>
+              <div className="verdict-prompt-drawer-label">Fix prompt</div>
+              <div className="verdict-prompt-drawer-summary">Paste this into Claude Code</div>
+            </div>
+            <button
+              type="button"
+              className="verdict-prompt-toggle"
+              aria-expanded={isPromptOpen}
+              aria-controls="verdict-fix-prompt"
+              onClick={() => setIsPromptOpen((open) => !open)}
+            >
+              {isPromptOpen ? "Hide fix prompt" : "Show fix prompt"}
+            </button>
+          </div>
+          {isPromptOpen && (
+            <div className="verdict-prompt-panel" id="verdict-fix-prompt">
+              <div className="verdict-prompt-panel-label">Paste this</div>
+              <textarea
+                className="prompt-code verdict-prompt"
+                aria-label="Fix prompt"
+                readOnly
+                value={promptArtifact.text}
+              />
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }

@@ -56,6 +56,50 @@ export const EFFECT_HANDLERS: readonly RegisteredHandler[] = [
     ],
   },
   {
+    detectorId: "D2",
+    aliases: ["floor_context_tokens_scoped"],
+    target: {
+      metricId: "d2-floor-context-scoped",
+      methodVersion: "d2-floor-context-scoped-v1",
+      unit: "tokens",
+      sampleUnit: "session",
+      aggregation: "mean of per-session minima for sessions selected by scoped tool events",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -15,
+      worseningThreshold: 15,
+      eligibleDefinition:
+        "RECONCILED sessions ending in the half-open window with valid exact-scope event ownership; non-provisional turns only",
+      excludedDefinition:
+        "LIVE, provisional, malformed, ambiguous-owner, out-of-window, or out-of-scope evidence",
+      denominatorDefinition: "distinct eligible scoped sessions",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      {
+        guardrailId: "completed-tool-error-rate",
+        methodVersion: "completed-tool-error-rate-v1",
+        unit: "ratio",
+        minimumSessions: 10,
+        directional: true,
+      },
+      {
+        guardrailId: "strict-test-recovery-sequences",
+        methodVersion: "strict-test-recovery-sequences-v1",
+        unit: "count",
+        minimumSessions: 10,
+        directional: false,
+      },
+      {
+        guardrailId: "interruption-burden",
+        methodVersion: "unsupported-v1",
+        unit: "interruptions",
+        minimumSessions: 10,
+        directional: false,
+      },
+    ],
+  },
+  {
     detectorId: "D4",
     aliases: ["model_mix_opus_fraction", "ROUTING_ADHERENCE_SCORE", "premium_share"],
     target: {
@@ -83,6 +127,51 @@ export const EFFECT_HANDLERS: readonly RegisteredHandler[] = [
         guardrailId: "independent-first-review",
         methodVersion: "g2-fra-pending",
         unit: "acceptance",
+      },
+    ],
+  },
+  {
+    detectorId: "D7",
+    aliases: ["loop_flagged_turn_share"],
+    target: {
+      metricId: "d7-loop-flagged-turn-share",
+      methodVersion: "d7-loop-flagged-turn-share-v1",
+      unit: "ratio",
+      sampleUnit: "session",
+      aggregation: "unweighted mean of per-session distinct flagged owner-turn share",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -15,
+      worseningThreshold: 15,
+      eligibleDefinition:
+        "RECONCILED sessions ending in the half-open window with valid exact-scope event ownership; quiet eligible sessions contribute zero",
+      excludedDefinition:
+        "LIVE, provisional, malformed, ambiguous-owner, out-of-window, or out-of-scope evidence",
+      denominatorDefinition:
+        "distinct eligible sessions; exposure is distinct eligible owner turns",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      {
+        guardrailId: "completed-tool-error-rate",
+        methodVersion: "completed-tool-error-rate-v1",
+        unit: "ratio",
+        minimumSessions: 10,
+        directional: true,
+      },
+      {
+        guardrailId: "strict-test-recovery-sequences",
+        methodVersion: "strict-test-recovery-sequences-v1",
+        unit: "count",
+        minimumSessions: 10,
+        directional: false,
+      },
+      {
+        guardrailId: "interruption-burden",
+        methodVersion: "unsupported-v1",
+        unit: "interruptions",
+        minimumSessions: 10,
+        directional: false,
       },
     ],
   },
@@ -123,11 +212,10 @@ export function findHandler(
   const handler = EFFECT_HANDLERS.find(
     (candidate) =>
       candidate.detectorId === detectorId &&
-      (candidate.target.metricId === targetMetric || candidate.aliases.includes(targetMetric)),
+      (candidate.target.metricId === targetMetric || candidate.aliases.includes(targetMetric)) &&
+      (methodVersion === undefined || methodVersion === candidate.target.methodVersion),
   );
-  if (handler === undefined) return null;
-  if (methodVersion !== undefined && methodVersion !== handler.target.methodVersion) return null;
-  return handler;
+  return handler ?? null;
 }
 
 export function directionFor(

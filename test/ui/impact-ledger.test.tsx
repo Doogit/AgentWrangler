@@ -74,6 +74,47 @@ describe("ImpactLedger — states", () => {
 });
 
 describe("ImpactLedger — honesty rails", () => {
+  it("summarizes modeled adopted changes and reveals their breakdown table on request", async () => {
+    const first = entryWith({ state: "MEASURED_EFFECTIVE" });
+    const second = entryWith({
+      rec_id: "rec-D2-global-modeled-summary",
+      detector_id: "D2",
+      lever: "Keep related work together.",
+      state: "MEASURING",
+      modeled_savings_u_per_wk: 800_000,
+      modeled_cap_weighted_u_per_wk: 80_000,
+    });
+    mockOk([first, second]);
+    const headroom = mockEfficiencyHeadroom();
+    if (headroom.data === null) throw new Error("headroom fixture must have data");
+    headroom.data = {
+      ...headroom.data,
+      opportunities: [
+        { rec_id: first.rec_id, modeled_savings_u_per_wk: 420_000 },
+        { rec_id: second.rec_id, modeled_savings_u_per_wk: 80_000 },
+      ],
+      headroom_u_per_wk: 500_000,
+      open_rec_count: 2,
+    };
+    vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(headroom);
+
+    const { container, getByRole } = render(<ImpactLedger />);
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='headroom-summary']")?.textContent).toContain(
+        "2 open modeled opportunities",
+      );
+    });
+    expect(container.textContent ?? "").toContain("$0.50/wk modeled total per week");
+    expect(container.textContent ?? "").toContain("not additive or measured");
+    expect(container.querySelector("table")).toBeNull();
+
+    fireEvent.click(getByRole("button", { name: "See breakdown →" }));
+    expect(getByRole("table").textContent).toContain(first.rec_id);
+    expect(getByRole("table").textContent).toContain(second.rec_id);
+    expect(getByRole("table").textContent).toContain("Modeled $/wk");
+    expect(getByRole("table").textContent).toContain("Status");
+  });
+
   it("renders the projected-value chip next to the cap-weighted figure", async () => {
     mockOk([entryWith({ state: "MEASURED_EFFECTIVE" })]);
     const { container } = render(<ImpactLedger />);

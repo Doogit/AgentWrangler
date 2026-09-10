@@ -8,8 +8,9 @@
  *   - WorkspaceTable: spend column shows real USD (not N/A)
  */
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { EsfObservationCohort } from "../../src/query/api/esf-observations";
 import type { LiveSessionRow, WorkspaceSummary } from "../../src/query/api/overview";
 import * as client from "../../src/ui/api/client";
 import {
@@ -33,15 +34,32 @@ import CacheWriteSpikesChart, {
 } from "../../src/ui/overview/CacheWriteSpikesChart";
 import LiveStrip from "../../src/ui/overview/LiveStrip";
 import OverviewPage from "../../src/ui/overview/OverviewPage";
+import VerdictBand from "../../src/ui/overview/VerdictBand";
 import WorkspaceTable from "../../src/ui/overview/WorkspaceTable";
+import { buildPromptArtifact } from "../../src/ui/recommendations/prompt-templates";
 
 vi.mock("../../src/ui/api/client");
+vi.mock("../../src/ui/api/esf-client", () => ({
+  fetchEsfObservations: vi.fn().mockResolvedValue({ data: null }),
+}));
+
+import { fetchEsfObservations } from "../../src/ui/api/esf-client";
+
+const writeText = vi.fn().mockResolvedValue(undefined);
+let clipboardDescriptor: PropertyDescriptor | undefined;
 
 // @testing-library/react auto-cleanup requires jest globals;
 // in vitest with globals:false we must register it explicitly.
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  if (clipboardDescriptor === undefined) Reflect.deleteProperty(navigator, "clipboard");
+  else Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
+});
 beforeEach(() => {
   vi.clearAllMocks();
+  writeText.mockClear();
+  clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   // OverviewPage also fetches recommendations, success rate, and trends.
   // Give them safe defaults so auto-mocks always return a Promise;
   // individual tests may still override the other client methods.
@@ -56,6 +74,7 @@ beforeEach(() => {
   );
   vi.mocked(client.fetchCacheWriteTrend).mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
   vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
+  vi.mocked(fetchEsfObservations).mockResolvedValue({ data: null } as never);
 });
 
 // ---------------------------------------------------------------------------
@@ -66,6 +85,72 @@ function setupSuccess() {
   vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
   vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
 }
+
+function promptRecommendation() {
+  const recommendations = mockRecommendations();
+  if (recommendations.data === null) throw new Error("expected recommendation fixture data");
+  const recommendation = recommendations.data.active[0];
+  if (recommendation === undefined) throw new Error("expected an active recommendation");
+  return recommendation;
+}
+
+describe("VerdictBand prompt drawer", () => {
+  it("keeps the prompt collapsed until the drawer is opened, then closes it again", () => {
+    const { container } = render(
+      <VerdictBand
+        preset="7d"
+        trend={null}
+        priorTrend={null}
+        isLoading={false}
+        topRecommendation={promptRecommendation()}
+      />,
+    );
+
+    expect(container.querySelector("textarea.verdict-prompt, pre")).toBeNull();
+    expect(screen.getByText("Paste this into Claude Code")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show fix prompt" }));
+    expect(screen.getByLabelText("Fix prompt")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide fix prompt" }));
+    expect(container.querySelector("textarea.verdict-prompt, pre")).toBeNull();
+  });
+
+  it("copies the fix prompt without opening the drawer", () => {
+    const recommendation = promptRecommendation();
+    const artifact = buildPromptArtifact(recommendation);
+    if (artifact === null) throw new Error("expected a prompt artifact");
+    const { container } = render(
+      <VerdictBand
+        preset="7d"
+        trend={null}
+        priorTrend={null}
+        isLoading={false}
+        topRecommendation={recommendation}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy fix prompt" }));
+    expect(writeText).toHaveBeenCalledWith(artifact.text);
+    expect(container.querySelector("textarea.verdict-prompt, pre")).toBeNull();
+  });
+
+  it("keeps the suggested next step in the right-aligned grid cell", () => {
+    const { container } = render(
+      <VerdictBand
+        preset="7d"
+        trend={null}
+        priorTrend={null}
+        isLoading={false}
+        topRecommendation={promptRecommendation()}
+      />,
+    );
+
+    const nextStep = container.querySelector(".verdict-band-next-step");
+    expect(nextStep?.closest(".verdict-band-grid")).toBeTruthy();
+    expect(nextStep?.classList.contains("verdict-band-next-step")).toBe(true);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Three distinct UI states
@@ -598,14 +683,23 @@ describe("CacheEfficiencyKPI", () => {
 // ---------------------------------------------------------------------------
 
 describe("FlavorDecomposition", () => {
-  it("renders the section heading 'Where your tokens go · weight per type'", async () => {
+  it("renders the Overview section headings", async () => {
     setupSuccess();
     const { container } = render(<OverviewPage />);
 
     await waitFor(() => {
       const headings = Array.from(container.querySelectorAll("h2"));
-      const found = headings.some((h) => h.textContent?.includes("Where your tokens go"));
-      expect(found).toBe(true);
+      const headingText = headings.map((h) => h.textContent);
+      expect(headingText).toEqual(
+        expect.arrayContaining([
+          "Summary",
+          "Needs attention",
+          "Where your tokens go",
+          "Workspaces",
+          "Data notes",
+          "Spend vs your limit",
+        ]),
+      );
     });
   });
 
@@ -618,6 +712,85 @@ describe("FlavorDecomposition", () => {
       expect(text).toMatch(/Trimming a cached prompt saves ~10× less than you think\./);
       expect(text).toMatch(/Cache misses are where the real savings are\./);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Overview data notes — bottom placement and evidence disclosure
+// ---------------------------------------------------------------------------
+
+describe("Overview data notes", () => {
+  it("renders Data notes last and lets the evidence control close itself again", async () => {
+    setupSuccess();
+    const cohort: EsfObservationCohort = {
+      cohort_definition_version: "esf-cohort-1",
+      workspace_id: null,
+      from: "2026-08-17T00:00:00.000Z",
+      to: "2026-08-24T00:00:00.000Z",
+      resource: {
+        selected_session_count: 2,
+        priced_cost_u: 1000000,
+        priced_turn_count: 2,
+        unpriced_turn_count: 0,
+        unpriced_session_count: 0,
+        reconciled_priced_session_count: 2,
+        live_priced_session_count: 0,
+      },
+      no_commit_activity: { session_ids: [], session_count: 0, live_session_excluded_count: 0 },
+      observed_test_recovery: {
+        method_version: "esf-observed-test-recovery-1",
+        affected_session_ids: [],
+        recovered_session_ids: [],
+        eligible_reconciled_qualifying_tool_session_count: 0,
+      },
+      allocation_sessions: [],
+      watermark: {
+        version: "esf-cohort-watermark-1",
+        source_fingerprint: "fixture",
+        selected_turn_count: 2,
+        selected_session_count: 2,
+        nonprovisional_turn_count: 2,
+        latest_selected_turn_at: "2026-08-24T00:00:00.000Z",
+        cost_claim_counts: [],
+        parser_version_counts: [],
+      },
+    };
+    vi.mocked(fetchEsfObservations).mockResolvedValue({ data: cohort } as never);
+
+    const { container } = render(<OverviewPage />);
+
+    await waitFor(() => {
+      const headings = Array.from(container.querySelectorAll("h2"));
+      expect(headings[headings.length - 1]?.textContent).toBe("Data notes");
+    });
+
+    const dataNotes = container.querySelector<HTMLDetailsElement>(
+      "[data-testid='overview-data-notes']",
+    );
+    expect(dataNotes).not.toBeNull();
+    const summary = dataNotes?.querySelector("summary");
+    if (summary === null || summary === undefined) throw new Error("Expected Data notes summary");
+    fireEvent.click(summary);
+    const selector = screen.getByRole("combobox", { name: "Observation workspace" });
+    expect(dataNotes?.contains(selector)).toBe(true);
+    const selectedWorkspace = selector.querySelectorAll("option")[1]?.value;
+    expect(selectedWorkspace).toBeTruthy();
+    fireEvent.change(selector, { target: { value: selectedWorkspace } });
+    await waitFor(() =>
+      expect(fetchEsfObservations).toHaveBeenLastCalledWith(
+        selectedWorkspace,
+        expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
+      ),
+    );
+
+    const disclosure = await screen.findByRole("button", { name: "View evidence and limits" });
+    fireEvent.click(disclosure);
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("heading", { name: "Evidence and limits" })).toBeTruthy();
+
+    fireEvent.click(disclosure);
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("heading", { name: "Evidence and limits" })).toBeNull();
   });
 });
 

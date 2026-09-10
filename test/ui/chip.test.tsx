@@ -88,7 +88,7 @@ describe("Chip", () => {
     expect(container.querySelector(".chip")?.textContent).toBe("LIVE");
   });
 
-  it("ChipLegend lists every chip kind with its shared explanation", () => {
+  it("ChipLegend lists each displayed badge with its shared explanation", () => {
     const { container } = render(<ChipLegend />);
     const toggle = container.querySelector(".chip-legend-toggle");
     expect(toggle).not.toBeNull();
@@ -97,10 +97,34 @@ describe("Chip", () => {
 
     const panel = container.querySelector(".chip-legend-panel");
     expect(panel).not.toBeNull();
-    expect(panel?.querySelectorAll(".chip")).toHaveLength(Object.keys(KIND_TOOLTIP).length);
-    for (const explanation of Object.values(KIND_TOOLTIP)) {
-      expect(panel?.textContent).toContain(explanation);
+    const legendKinds = Object.keys(KIND_TOOLTIP).filter((kind) => kind !== "NO_DATA") as Array<
+      keyof typeof KIND_TOOLTIP
+    >;
+    expect(panel?.querySelectorAll(".chip")).toHaveLength(legendKinds.length);
+    for (const kind of legendKinds) {
+      expect(panel?.textContent).toContain(KIND_TOOLTIP[kind]);
     }
+  });
+
+  it("ChipLegend has one entry per badge label and its toggle closes the expanded legend", () => {
+    const { container } = render(<ChipLegend />);
+    const toggle = container.querySelector<HTMLButtonElement>(".chip-legend-toggle");
+    if (toggle === null) throw new Error("ChipLegend toggle is missing");
+
+    expect(container.querySelector(".chip-legend-panel")).toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(toggle);
+    const panel = container.querySelector(".chip-legend-panel");
+    expect(panel).not.toBeNull();
+    const labels = Array.from(panel?.querySelectorAll(".chip") ?? [], (chip) =>
+      chip.textContent?.trim(),
+    );
+    expect(new Set(labels).size).toBe(labels.length);
+
+    fireEvent.click(toggle);
+    expect(container.querySelector(".chip-legend-panel")).toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("every chip has a non-empty text label (color not sole signal)", () => {
