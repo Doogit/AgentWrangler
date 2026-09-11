@@ -26,6 +26,68 @@ afterEach(() => {
 });
 
 describe("buildEvidencePacket", () => {
+  it("excludes LIVE and provisional turns from all measured resource facts", () => {
+    db.prepare("UPDATE sessions SET state = 'LIVE' WHERE session_id = 'sess-a1'").run();
+    db.prepare("UPDATE turns SET provisional = 1 WHERE session_id = 'sess-a2'").run();
+    const packet = buildEvidencePacket(db, scope);
+    const expected = db
+      .prepare(`SELECT SUM(cost_equiv_u) AS cost, SUM(input_tokens) AS tokens,
+      COUNT(*) AS turns FROM turns WHERE session_id = 'sess-a3'`)
+      .get() as {
+      cost: number;
+      tokens: number;
+      turns: number;
+    };
+    expect(packet.facts.current_list_price_equivalent_u).toMatchObject({
+      value: expected.cost,
+      denominator: expected.turns,
+    });
+    expect(packet.facts.raw_token_buckets).toMatchObject({
+      value: { input_tokens: expected.tokens },
+      denominator: expected.turns,
+    });
+    const models = packet.facts.model_mix;
+    if ("state" in models) throw new Error("expected measured models");
+    expect(models.value.reduce((sum, row) => sum + row.turn_count, 0)).toBe(expected.turns);
+    expect(models.denominator).toBe(expected.turns);
+    expect(packet.facts.session_cost_distribution_u).toMatchObject({
+      value: { min: expected.cost, median: expected.cost, max: expected.cost },
+      denominator: 1,
+    });
+  });
+
+  it("keeps wholly unpriced session costs unavailable instead of measuring zero", () => {
+    db.prepare("UPDATE turns SET cost_equiv_u = NULL WHERE workspace_id = 'ws-alpha'").run();
+    const packet = buildEvidencePacket(db, scope);
+    expect(packet.facts.session_cost_distribution_u).toMatchObject({ state: "UNAVAILABLE" });
+    expect(packet.facts.current_list_price_equivalent_u).toMatchObject({ state: "UNAVAILABLE" });
+    expect(packet.facts.raw_token_buckets).not.toHaveProperty("state");
+  });
+
+  it("excludes partially priced sessions and averages the middle pair for an even median", () => {
+    db.prepare("UPDATE turns SET cost_equiv_u = NULL WHERE message_id = 'msg-a2-1'").run();
+    const rows = db
+      .prepare(`SELECT SUM(cost_equiv_u) AS cost FROM turns
+      WHERE session_id IN ('sess-a1', 'sess-a3') GROUP BY session_id ORDER BY cost`)
+      .all() as Array<{ cost: number }>;
+    expect(buildEvidencePacket(db, scope).facts.session_cost_distribution_u).toMatchObject({
+      value: {
+        min: rows[0]?.cost,
+        median: ((rows[0]?.cost ?? 0) + (rows[1]?.cost ?? 0)) / 2,
+        max: rows[1]?.cost,
+      },
+      denominator: 2,
+    });
+  });
+
+  it("does not invent zero token measurements for a provisional-only window", () => {
+    db.prepare("UPDATE turns SET provisional = 1 WHERE workspace_id = 'ws-alpha'").run();
+    const packet = buildEvidencePacket(db, scope);
+    expect(packet.facts.raw_token_buckets).toMatchObject({ state: "UNAVAILABLE" });
+    expect(packet.facts.model_mix).toMatchObject({ state: "UNAVAILABLE" });
+    expect(packet.facts.session_cost_distribution_u).toMatchObject({ state: "UNAVAILABLE" });
+  });
+
   it("is byte-identical with deterministic opaque evidence IDs for identical inputs", () => {
     const first = buildEvidencePacket(db, scope);
     const second = buildEvidencePacket(db, scope);
@@ -101,6 +163,39 @@ describe("buildEvidencePacket", () => {
     const classes = tools.value.map((row) => row.tool_class).sort();
     expect(classes.filter((c) => c === "SEARCH")).toHaveLength(2);
     expect(classes.filter((c) => c === "FILE_READ")).toHaveLength(1);
+  });
+
+  it("applies tool-class selection before the output bound and labels truncation", () => {
+    const insert = db.prepare(
+      "INSERT INTO tool_events (event_id, session_id, ts, tool_name) VALUES (?, 'sess-a1', '2026-01-01T00:10:00.000Z', ?)",
+    );
+    for (let i = 0; i < 33; i++) insert.run(`evt-custom-${i}`, `AAA-custom-${i}`);
+    insert.run("evt-read-after-custom", "Read");
+    const packet = buildEvidencePacket(db, { ...scope, toolClass: "FILE_READ" });
+    expect(packet.facts.tool_observations).toMatchObject({
+      value: [{ tool_class: "FILE_READ", event_count: 1 }],
+    });
+    expect(buildEvidencePacket(db, scope).coverage.exclusions).toContain(
+      "tool observations truncated to the first 32 matching tool identities",
+    );
+  });
+
+  it("gives tool changes their own evidence identity and event denominator", () => {
+    db.prepare(
+      "INSERT INTO tool_events (event_id, session_id, ts, tool_name) VALUES ('evt-new-read', 'sess-a1', '2026-01-01T00:10:00.000Z', 'Read')",
+    ).run();
+    const before = buildEvidencePacket(db, scope);
+    db.prepare(
+      "INSERT INTO tool_events (event_id, session_id, ts, tool_name) VALUES ('evt-new-read-2', 'sess-a1', '2026-01-01T00:11:00.000Z', 'Read')",
+    ).run();
+    const after = buildEvidencePacket(db, scope);
+    const tools = after.facts.tool_observations;
+    if ("state" in tools) throw new Error("expected tools");
+    expect(tools.denominator).toBe(tools.value.reduce((sum, row) => sum + row.event_count, 0));
+    expect(tools.evidence_ids).not.toEqual([after.overlap_groups[0]?.evidence_id]);
+    expect(tools.evidence_ids).not.toEqual(
+      "state" in before.facts.tool_observations ? [] : before.facts.tool_observations.evidence_ids,
+    );
   });
 
   it("represents unavailable data as labeled states, never zero", () => {

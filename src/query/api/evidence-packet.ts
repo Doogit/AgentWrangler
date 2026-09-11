@@ -99,6 +99,7 @@ function defaultPrior(scope: EvidencePacketScope): NonNullable<EvidencePacketSco
 }
 
 interface TurnAggregate {
+  turn_count: number;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
@@ -113,13 +114,14 @@ function turnAggregate(db: Db, scope: EvidencePacketScope): TurnAggregate {
     scope.workspaceId === null ? [scope.from, scope.to] : [scope.from, scope.to, scope.workspaceId];
   return db
     .prepare(
-      `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      `SELECT COUNT(*) AS turn_count, COALESCE(SUM(input_tokens), 0) AS input_tokens,
             COALESCE(SUM(output_tokens), 0) AS output_tokens,
             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
             COALESCE(SUM(cache_write_5m), 0) AS cache_write_5m,
             COALESCE(SUM(cache_write_1h), 0) AS cache_write_1h,
             COALESCE(SUM(cache_write_other), 0) AS cache_write_other
-       FROM turns WHERE ts >= ? AND ts < ?${workspace} AND provisional = 0`,
+       FROM turns WHERE ts >= ? AND ts < ?${workspace} AND provisional = 0
+         AND session_id IN (SELECT session_id FROM sessions WHERE state = 'RECONCILED')`,
     )
     .get(...args) as TurnAggregate;
 }
@@ -157,27 +159,31 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
   const currentId = evidenceId("current-cohort", current.watermark.source_fingerprint);
   const priorId =
     prior === null ? null : evidenceId("prior-cohort", prior.watermark.source_fingerprint);
-  const currentCost = current.resource.priced_cost_u;
+  // ESF resource totals deliberately include LIVE sessions. Packet facts use
+  // its RECONCILED allocation rows to honor this packet's maturity contract.
+  const eligibleSessions = current.allocation_sessions.filter(
+    (row) => row.priced_turn_count + row.unpriced_turn_count > 0,
+  );
+  const currentCost = eligibleSessions.reduce((sum, row) => sum + row.priced_cost_u, 0);
+  const currentPricedTurns = eligibleSessions.reduce((sum, row) => sum + row.priced_turn_count, 0);
+  const priorCost =
+    prior?.allocation_sessions.reduce((sum, row) => sum + row.priced_cost_u, 0) ?? 0;
+  const priorPricedTurns =
+    prior?.allocation_sessions.reduce((sum, row) => sum + row.priced_turn_count, 0) ?? 0;
   const currentCostFact =
-    current.resource.priced_turn_count === 0
+    currentPricedTurns === 0
       ? unavailable()
       : measured(
           currentCost,
           "micro_usd_list_equivalent",
-          current.resource.priced_turn_count,
+          currentPricedTurns,
           [currentId],
           [currentId],
         );
   const priorCostFact =
-    prior === null || prior.resource.priced_turn_count === 0 || priorId === null
+    prior === null || priorPricedTurns === 0 || priorId === null
       ? unavailable(prior === null ? "UNSUPPORTED" : "NO_ELIGIBLE_DATA")
-      : measured(
-          prior.resource.priced_cost_u,
-          "micro_usd_list_equivalent",
-          prior.resource.priced_turn_count,
-          [priorId],
-          [priorId],
-        );
+      : measured(priorCost, "micro_usd_list_equivalent", priorPricedTurns, [priorId], [priorId]);
   const comparison: EvidenceFact<{
     delta: number;
     direction: "INCREASE" | "DECREASE" | "UNCHANGED";
@@ -191,16 +197,16 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
       ? unavailable()
       : measured(
           {
-            delta: currentCost - prior.resource.priced_cost_u,
+            delta: currentCost - priorCost,
             direction:
-              currentCost === prior.resource.priced_cost_u
+              currentCost === priorCost
                 ? "UNCHANGED"
-                : currentCost > prior.resource.priced_cost_u
+                : currentCost > priorCost
                   ? "INCREASE"
                   : "DECREASE",
           },
           "micro_usd_list_equivalent_delta",
-          current.resource.selected_session_count,
+          eligibleSessions.length,
           [currentId, priorId as string],
           [currentId, priorId as string],
         );
@@ -215,16 +221,11 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
     cache_write_other: tokens.cache_write_other,
   };
   const tokenFact =
-    current.watermark.selected_turn_count === 0
+    tokens.turn_count === 0
       ? unavailable()
-      : measured(
-          tokenBuckets,
-          "tokens",
-          current.watermark.selected_turn_count,
-          [currentId],
-          [currentId],
-        );
-  const allocation = current.allocation_sessions
+      : measured(tokenBuckets, "tokens", tokens.turn_count, [currentId], [currentId]);
+  const allocation = eligibleSessions
+    .filter((row) => row.priced_turn_count > 0 && row.unpriced_turn_count === 0)
     .map((row) => row.priced_cost_u)
     .sort((a, b) => a - b);
   const distribution =
@@ -233,7 +234,10 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
       : measured(
           {
             min: allocation[0] as number,
-            median: allocation[Math.floor((allocation.length - 1) / 2)] as number,
+            median:
+              ((allocation[Math.floor((allocation.length - 1) / 2)] as number) +
+                (allocation[Math.floor(allocation.length / 2)] as number)) /
+              2,
             max: allocation[allocation.length - 1] as number,
           },
           "micro_usd_list_equivalent_per_session",
@@ -243,7 +247,9 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
         );
   const rawModelRows = db
     .prepare(
-      `SELECT model, COUNT(*) AS turn_count FROM turns WHERE ts >= ? AND ts < ?${scope.workspaceId === null ? "" : " AND workspace_id = ?"} AND provisional = 0 GROUP BY model ORDER BY model`,
+      `SELECT model, COUNT(*) AS turn_count FROM turns WHERE ts >= ? AND ts < ?${scope.workspaceId === null ? "" : " AND workspace_id = ?"} AND provisional = 0
+       AND session_id IN (SELECT session_id FROM sessions WHERE state = 'RECONCILED')
+       GROUP BY model ORDER BY model`,
     )
     .all(
       ...(scope.workspaceId === null
@@ -257,40 +263,52 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
   const modelMix =
     modelRows.length === 0
       ? unavailable()
-      : measured(
-          modelRows,
-          "turns",
-          current.watermark.selected_turn_count,
-          [currentId],
-          [currentId],
-        );
+      : measured(modelRows, "turns", tokens.turn_count, [currentId], [currentId]);
   const toolRows = db
     .prepare(
       `SELECT tool_name, COUNT(*) AS event_count FROM tool_events te JOIN sessions s USING (session_id)
       WHERE te.ts >= ? AND te.ts < ? AND s.state = 'RECONCILED'${scope.workspaceId === null ? "" : " AND s.workspace_id = ?"}
-      GROUP BY tool_name ORDER BY tool_name LIMIT ?`,
+      GROUP BY tool_name ORDER BY tool_name`,
     )
-    .all(
+    .iterate(
       ...(scope.workspaceId === null
-        ? [scope.from, scope.to, MAX_TOOL_CLASSES]
-        : [scope.from, scope.to, scope.workspaceId, MAX_TOOL_CLASSES]),
-    ) as Array<{ tool_name: string; event_count: number }>;
-  const safeTools = toolRows
-    .map((row) => ({
+        ? [scope.from, scope.to]
+        : [scope.from, scope.to, scope.workspaceId]),
+    ) as IterableIterator<{ tool_name: string; event_count: number }>;
+  const matchingTools = [];
+  for (const row of toolRows) {
+    const toolClass = classifyTool(row.tool_name);
+    if (scope.toolClass !== undefined && toolClass !== scope.toolClass) continue;
+    matchingTools.push({
       tool_id: `tool_${hash({ sourceRevision, name: row.tool_name }).slice(0, 20)}`,
-      tool_class: classifyTool(row.tool_name),
+      tool_class: toolClass,
       event_count: row.event_count,
-    }))
-    .filter((row) => scope.toolClass === undefined || row.tool_class === scope.toolClass);
+    });
+    if (matchingTools.length > MAX_TOOL_CLASSES) break;
+  }
+  const toolsTruncated = matchingTools.length > MAX_TOOL_CLASSES;
+  const safeTools = matchingTools.slice(0, MAX_TOOL_CLASSES);
+  // Tool events are selected by event time, not by the shared turn cohort.
+  const toolEvidenceId = evidenceId(
+    "tool-events",
+    hash({
+      workspaceId: scope.workspaceId,
+      from: scope.from,
+      to: scope.to,
+      toolClass: scope.toolClass ?? null,
+      safeTools,
+      toolsTruncated,
+    }),
+  );
   const toolFact =
     safeTools.length === 0
       ? unavailable()
       : measured(
           safeTools,
           "tool_events",
-          current.resource.selected_session_count,
-          [currentId],
-          [currentId],
+          safeTools.reduce((sum, row) => sum + row.event_count, 0),
+          [toolEvidenceId],
+          [toolEvidenceId],
         );
   const actionRows = (
     scope.workspaceId === null
@@ -327,12 +345,17 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
       reason: expired ? "EVIDENCE_PREDATES_METHOD_REVISION" : null,
     },
     coverage: {
-      eligible_session_count: current.resource.reconciled_priced_session_count,
+      eligible_session_count: eligibleSessions.length,
       excluded_live_session_count: current.resource.live_priced_session_count,
-      unpriced_turn_count: current.resource.unpriced_turn_count,
+      unpriced_turn_count: eligibleSessions.reduce((sum, row) => sum + row.unpriced_turn_count, 0),
       exclusions: [
         "LIVE sessions are excluded from eligible-session facts",
         "unpriced turns are not zero-cost",
+        "session cost distributions exclude sessions with unpriced turns",
+        "tool-class selection applies only to tool observations; resource facts describe the workspace",
+        ...(toolsTruncated
+          ? ["tool observations truncated to the first 32 matching tool identities"]
+          : []),
       ],
     },
     facts: {
@@ -366,9 +389,8 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
           "raw_token_buckets",
           "session_cost_distribution_u",
           "model_mix",
-          "tool_observations",
         ],
-        session_count: current.resource.reconciled_priced_session_count,
+        session_count: eligibleSessions.length,
       },
     ],
   };
