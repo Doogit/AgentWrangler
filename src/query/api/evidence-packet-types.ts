@@ -66,6 +66,8 @@ export interface EvidencePacket {
     eligible_session_count: number;
     excluded_live_session_count: number;
     unpriced_turn_count: number;
+    /** True when the bounded tool list omits matching identities. */
+    tool_observations_truncated: boolean;
     exclusions: string[];
   };
   facts: {

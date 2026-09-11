@@ -385,6 +385,7 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
       eligible_session_count: eligibleSessions.length,
       excluded_live_session_count: excludedLive.session_count,
       unpriced_turn_count: eligibleSessions.reduce((sum, row) => sum + row.unpriced_turn_count, 0),
+      tool_observations_truncated: toolsTruncated,
       exclusions: [
         "LIVE sessions are excluded from eligible-session facts",
         "unpriced turns are not zero-cost",

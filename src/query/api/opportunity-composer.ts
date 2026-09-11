@@ -11,6 +11,7 @@ import {
   type CacheMissCause,
   DECOMPOSITION_VERSION,
   type FamilyEntry,
+  type FamilyId,
   type InsufficientEvidenceEntry,
   type OpportunityComposition,
   type ToolConcentrationCandidate,
@@ -186,6 +187,15 @@ function composeToolConcentration(packet: EvidencePacket): FamilyEntry {
   }
 
   const tools = tool_observations.value;
+  // A bounded prefix cannot establish whole-window shares or absence of failures.
+  // Missing completeness metadata (older packets) also cannot establish either.
+  if (packet.coverage.tool_observations_truncated !== false) {
+    return {
+      outcome: "INSUFFICIENT_EVIDENCE",
+      family: "TOOL_OUTPUT_RETRY_CONCENTRATION",
+      unavailable_reason: "INCOMPLETE_TOOL_OBSERVATIONS",
+    };
+  }
   const total_result_bytes = tools.reduce((s, t) => s + t.result_bytes_total, 0);
 
   // Identify concentration candidates: any tool_id over the byte threshold OR with repeat failures.
@@ -350,11 +360,19 @@ function composeCacheBehavior(packet: EvidencePacket): FamilyEntry {
  * Pure function: identical input → deep-equal output. No DB, no API calls.
  */
 export function composeOpportunities(packet: EvidencePacket): OpportunityComposition {
-  const families: FamilyEntry[] = [
-    composeUsageChange(packet),
-    composeToolConcentration(packet),
-    composeCacheBehavior(packet),
+  const familyIds: FamilyId[] = [
+    "EXPLAIN_USAGE_CHANGE",
+    "TOOL_OUTPUT_RETRY_CONCENTRATION",
+    "CONTEXT_CACHE_BEHAVIOR",
   ];
+  const families: FamilyEntry[] =
+    packet.freshness.status === "CURRENT"
+      ? [composeUsageChange(packet), composeToolConcentration(packet), composeCacheBehavior(packet)]
+      : familyIds.map((family) => ({
+          outcome: "INSUFFICIENT_EVIDENCE",
+          family,
+          unavailable_reason: packet.freshness.reason ?? "EXPIRED_EVIDENCE",
+        }));
 
   return {
     composer_version: COMPOSER_VERSION,

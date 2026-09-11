@@ -15,6 +15,7 @@ import type {
   UsageChangeDetail,
 } from "../../src/query/api/opportunity-composer-types.js";
 import { composeOpportunities } from "../../src/query/api/opportunity-composer.js";
+import { RIQ6_CASES, createRiq6Db } from "../fixtures/riq6/cases.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,65 @@ function asInsufficient(entry: FamilyEntry | undefined): InsufficientEvidenceEnt
   return entry;
 }
 
+describe("composeOpportunities — evidence eligibility", () => {
+  it("withholds all families for the frozen expired-evidence case", () => {
+    const definition = RIQ6_CASES.find((entry) => entry.case_id === "stale-capability");
+    if (!definition) throw new Error("Missing stale-capability fixture");
+    const db = createRiq6Db(definition);
+    try {
+      const packet = buildEvidencePacket(db, definition.scope);
+      expect(packet.freshness.status).toBe("EXPIRED");
+      const result = composeOpportunities(packet);
+      expect(result.families).toHaveLength(3);
+      for (const family of result.families) {
+        expect(family).toMatchObject({
+          outcome: "INSUFFICIENT_EVIDENCE",
+          unavailable_reason: "EVIDENCE_PREDATES_METHOD_REVISION",
+        });
+        expect(family).not.toHaveProperty("next_step");
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([1, 1_000_000])(
+    "withholds tool conclusions when later identities are omitted (first bytes=%i)",
+    (firstBytes) => {
+      const db = createInMemoryFixtureDb();
+      try {
+        db.prepare("DELETE FROM tool_events").run();
+        const insert = db.prepare(
+          "INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_bytes, result_bytes, input_hash, exit_class, commit_sha) VALUES (?, 'sess-a1', '2026-01-01T00:05:00.000Z', ?, 1, ?, NULL, ?, NULL)",
+        );
+        for (let i = 0; i < 32; i++) {
+          insert.run(
+            `evt-bounded-${i}`,
+            `a-tool-${String(i).padStart(2, "0")}`,
+            i === 0 ? firstBytes : 1,
+            "OK",
+          );
+        }
+        for (let i = 0; i < 2; i++) insert.run(`evt-omitted-${i}`, "z-tool", 2_000_000, "ERROR");
+        const packet = buildEvidencePacket(db, {
+          workspaceId: "ws-alpha",
+          from: "2026-01-01T00:00:00.000Z",
+          to: "2026-01-01T03:00:00.000Z",
+        });
+        expect(packet.facts.tool_observations).toHaveProperty("value.length", 32);
+        expect(
+          findFamily(composeOpportunities(packet).families, "TOOL_OUTPUT_RETRY_CONCENTRATION"),
+        ).toMatchObject({
+          outcome: "INSUFFICIENT_EVIDENCE",
+          unavailable_reason: "INCOMPLETE_TOOL_OBSERVATIONS",
+        });
+      } finally {
+        db.close();
+      }
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Minimal valid packet literal factory.
 // All IDs are opaque/synthetic; no raw tool names, paths, or content.
@@ -65,6 +125,7 @@ function makeBasePacket(overrides: Partial<EvidencePacket["facts"]> = {}): Evide
       eligible_session_count: 10,
       excluded_live_session_count: 1,
       unpriced_turn_count: 0,
+      tool_observations_truncated: false,
       exclusions: [],
     },
     facts: {
