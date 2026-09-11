@@ -29,6 +29,15 @@ function addToolEvent(
   ).run(`guard-event-${index}`, ts, inputHash, exitClass);
 }
 
+/** SEC-4 command-marker row: tool_name local_command, cmd- namespace ID. */
+function addCommandMarker(index: number, marker: "/compact" | "/clear" | null): void {
+  const ts = new Date(Date.UTC(2026, 8, 1, 12, 0, index)).toISOString();
+  db.prepare(
+    `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash)
+     VALUES (?, 'sess-a1', ?, 'local_command', ?)`,
+  ).run(`cmd-${String(index).padStart(20, "0")}`, ts, marker);
+}
+
 describe("getLoopGuard", () => {
   it("fails open for an unknown session", () => {
     expect(getLoopGuard("missing").data).toMatchObject({
@@ -92,6 +101,57 @@ describe("getLoopGuard", () => {
       failing_run_len: 2,
       fail_count_threshold: 3,
       window_turns: 2,
+    });
+  });
+
+  it("treats a trailing unclassified NULL marker as breaking the identical run (SEC-4)", () => {
+    addToolEvent(1, "same-input");
+    addToolEvent(2, "same-input");
+    addToolEvent(3, "same-input");
+    addCommandMarker(4, null);
+
+    expect(getLoopGuard("sess-a1").data).toMatchObject({
+      stage: "ok",
+      identical_run_len: 0,
+      failing_run_len: 0,
+      reason: "below_threshold",
+    });
+  });
+
+  it("breaks a failing identical run at an intervening NULL marker (SEC-4)", () => {
+    addToolEvent(1, "same-input");
+    addToolEvent(2, "same-input");
+    addCommandMarker(3, null);
+    addToolEvent(4, "same-input");
+
+    expect(getLoopGuard("sess-a1").data).toMatchObject({
+      stage: "ok",
+      identical_run_len: 1,
+      failing_run_len: 1,
+      reason: "below_threshold",
+    });
+  });
+
+  it("never creates warn/block from consecutive command markers (SEC-4)", () => {
+    // Multiple unknown commands: all NULL, no artificial identical run.
+    addCommandMarker(1, null);
+    addCommandMarker(2, null);
+    addCommandMarker(3, null);
+    expect(getLoopGuard("sess-a1").data).toMatchObject({
+      stage: "ok",
+      identical_run_len: 0,
+      failing_run_len: 0,
+    });
+
+    // Repeated classified markers share input_hash but have no failing exit class.
+    addCommandMarker(4, "/compact");
+    addCommandMarker(5, "/compact");
+    addCommandMarker(6, "/compact");
+    expect(getLoopGuard("sess-a1").data).toMatchObject({
+      stage: "ok",
+      identical_run_len: 3,
+      failing_run_len: 0,
+      reason: "below_threshold",
     });
   });
 

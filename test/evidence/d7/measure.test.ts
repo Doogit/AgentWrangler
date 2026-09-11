@@ -115,6 +115,17 @@ describe("D7 forward coverage", () => {
     expect(report.covered.eventCoverage).toBe(0.8);
     expect(report.exclusions.missingMetadataN).toBe(4);
   });
+  it("keeps SEC-4 command marker rows in the denominator as missing-metadata events", () => {
+    open();
+    for (let i = 0; i < 20; i += 1) insert(i);
+    // SEC-4 marker row shape: NULL input_hash, no tool_event_metadata row.
+    insert(100, { metadata: false, signal: false });
+    insert(101, { metadata: false, signal: false });
+    const report = measure();
+    expect(report.denominator.toolEventsN).toBe(22);
+    expect(report.covered.eventsN).toBe(20);
+    expect(report.exclusions.missingMetadataN).toBe(2);
+  });
   it("counts missing owners and missing signals without removing their events from the denominator", () => {
     open();
     insert(1, { owner: false });

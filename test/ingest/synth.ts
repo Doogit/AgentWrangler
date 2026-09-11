@@ -93,14 +93,29 @@ export function userToolResult(o: {
 export function systemCommand(o: {
   session: string;
   ts: string;
-  command: string;
+  command?: unknown;
+  subtype?: "local_command" | "away_summary";
 }): Record<string, unknown> {
-  return {
+  const record: Record<string, unknown> = {
     type: "system",
-    subtype: "local_command",
+    subtype: o.subtype ?? "local_command",
     timestamp: o.ts,
     sessionId: o.session,
-    command: o.command,
+  };
+  if (o.command !== undefined) record.command = o.command;
+  return record;
+}
+
+/** A bare user slash-command record; only exact marker content is eligible. */
+export function userCommand(o: { session: string; ts: string; content: unknown }): Record<
+  string,
+  unknown
+> {
+  return {
+    type: "user",
+    timestamp: o.ts,
+    sessionId: o.session,
+    message: { content: o.content },
   };
 }
 

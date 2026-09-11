@@ -39,7 +39,7 @@ import {
   saveOffset,
   tailFileChunk,
 } from "./tail.js";
-import type { HealthCounters, TurnProjection } from "./types.js";
+import type { CommandProjection, HealthCounters, TurnProjection } from "./types.js";
 import { LONG_GAP_THRESHOLD_S } from "./types.js";
 import {
   backfillDiscoveredCwd,
@@ -819,7 +819,7 @@ export class Ingestor {
 
     // Command markers → tool_events(local_command) for hygiene evaluation.
     if (proj.command !== null) {
-      this.recordCommand(proj.command.sessionId, proj.command.ts, proj.command.command);
+      this.recordCommand(proj.command);
     }
 
     // Tool-use blocks → tool_events; remember owner + git hint for correlation.
@@ -965,20 +965,15 @@ export class Ingestor {
     }
   }
 
-  private recordCommand(sessionId: string, ts: string, command: string): void {
-    const eventId = `cmd-${crypto
-      .createHash("sha1")
-      .update(`${sessionId}|${ts}|${command}`)
-      .digest("hex")
-      .slice(0, 20)}`;
+  private recordCommand(command: CommandProjection): void {
     this.stInsertToolEvent.run(
-      eventId,
-      sessionId,
-      ts,
+      command.eventId,
+      command.sessionId,
+      command.ts,
       "local_command",
       null,
       null,
-      command,
+      command.command,
       null,
       null,
     );
