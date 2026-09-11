@@ -1,24 +1,30 @@
 import { useCallback, useEffect, useState } from "react";
-import type { WorkspaceSummary } from "../../query/api/overview";
-import { fetchWorkspaces } from "../api/client";
+import type { WorkspaceNameRow } from "../../query/api/overview";
+import { fetchWorkspaceNames } from "../api/client";
 import { workspaceLabel } from "./workspace-label";
 
-let workspaceNamesPromise: Promise<Map<string, WorkspaceSummary>> | undefined;
+let workspaceNamesPromise: Promise<Map<string, WorkspaceNameRow>> | undefined;
 
-function loadWorkspaceNames(): Promise<Map<string, WorkspaceSummary>> {
-  // 30d is the widest canned window the API accepts; workspaces idle longer
-  // than that fall back to the raw-slug label. Promise.resolve tolerates a
-  // stubbed client whose fetchWorkspaces returns undefined.
-  workspaceNamesPromise ??= Promise.resolve(fetchWorkspaces({ preset: "30d" })).then((response) => {
-    const workspaces = response?.data?.items ?? [];
-    return new Map(workspaces.map((workspace) => [workspace.workspace_id, workspace]));
-  });
+function loadWorkspaceNames(): Promise<Map<string, WorkspaceNameRow>> {
+  // /api/workspace-names is unwindowed, so workspaces idle beyond the widest
+  // canned window (30d) still resolve friendly labels (UIR-8). Promise.resolve
+  // tolerates a stubbed client whose fetchWorkspaceNames returns undefined.
+  workspaceNamesPromise ??= Promise.resolve(fetchWorkspaceNames())
+    .then((rows) => {
+      return new Map((rows ?? []).map((row) => [row.workspace_id, row]));
+    })
+    .catch((err: unknown) => {
+      // Don't cache a rejection: the next mount retries instead of rendering
+      // raw slugs for the rest of the page session.
+      workspaceNamesPromise = undefined;
+      throw err;
+    });
   return workspaceNamesPromise;
 }
 
 /** Resolve workspace IDs to the same owner/name labels used by the Workspaces page. */
 export function useWorkspaceNames(): { labelFor: (workspaceId: string) => string } {
-  const [workspaces, setWorkspaces] = useState<Map<string, WorkspaceSummary> | null>(null);
+  const [workspaces, setWorkspaces] = useState<Map<string, WorkspaceNameRow> | null>(null);
 
   useEffect(() => {
     let cancelled = false;

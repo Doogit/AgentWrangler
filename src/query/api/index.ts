@@ -34,6 +34,7 @@ export type {
   ModelMixRow,
   LiveSessionRow,
   WorkspaceSummary,
+  WorkspaceNameRow,
   WorkspaceDetail,
   SessionSummary,
   TurnRow,
@@ -42,6 +43,7 @@ export type {
 export {
   getGlobalOverview,
   listWorkspaces,
+  listWorkspaceNames,
   getWorkspace,
   listSessions,
   getSession,

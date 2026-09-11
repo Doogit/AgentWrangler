@@ -71,9 +71,9 @@ lockfile):
 | better-sqlite3 | **12.x** | synchronous; WAL + FK; prebuilt binary for Node 22 (native module is a non-issue when run from `node_modules` — see Decision) |
 | UI delivery | **localhost HTTP** (no native shell) | daemon serves the SPA on `127.0.0.1`, auto-opened in the browser (Prometheus/Grafana/pgweb pattern) |
 | HTTP server | Node `http` or a minimal router (e.g. Hono/Fastify) | serves the LocalQueryAPI (already loopback per Architecture §2) + static UI assets |
-| UI build | **Vite 6.x** | framework-agnostic; builds the static SPA the daemon serves |
+| UI build | **Vite 6.x** (`>=6.4.3`) | framework-agnostic; builds the static SPA the daemon serves; 6.4.3 floor closes GHSA-4w7w-66w2-5vf9 / GHSA-fx2h-pf6j-xcff and pulls patched esbuild ≥0.25 (GHSA-67mh-4wv8-2f99) |
 | UI framework | React 18.x + TypeScript | standard web charting/table libs; specific chart lib deferred to Session 11 |
-| Test | **Vitest 2.x** | daemon + parser unit/fixture tests (Architecture §14 corpus) |
+| Test | **Vitest 4.x** (`>=4.1.11`) | daemon + parser unit/fixture tests (Architecture §14 corpus); upgraded from 2.x 2026-09-10 — all 2.x/3.x/≤4.1.10 lines carry GHSA-5xrq-8626-4rwp (critical) + GHSA-82fw-gwwq-j7x9; 4.1.11 is the minimal patched line compatible with Vite 6 |
 | Lint/format | **Biome 1.x** | single tool (lint + format); keeps CI + CLAUDE.md footprint small |
 | GitHub client | Octokit (REST + GraphQL) | GraphQL needed for review-thread resolution (S3); note: the outcomes transport uses the `gh` CLI instead (see ADR-103 addendum) |
 | Tokenizer | deferred to ADR-105 | ADR-105 selects by measured agreement on the corpus; do not pin here |
@@ -187,3 +187,4 @@ was used.
 ## Change log
 
 - 2026-08-21 (Session 12): Fixed stale cross-reference: tokenizer-pin note updated from "S5" to "ADR-105" (the actual decision record for the tokenizer selection) — source: SG-S5-05
+- 2026-09-10: Tooling security upgrade — Vitest 2.x → 4.x (`4.1.11`), Vite floor raised to `6.4.3` (major unchanged). Resolves all five `npm audit` development-tool advisories (Vitest critical GHSA-5xrq-8626-4rwp; Vite high GHSA-4w7w-66w2-5vf9; moderate GHSA-82fw-gwwq-j7x9, GHSA-67mh-4wv8-2f99, vite-node). `npm audit` now reports 0 vulnerabilities. Test-semantics note: Vitest 4 enforces the default 5 s timeout on synchronous tests (v2 could not); two legitimately long sync tests now declare explicit `{ timeout: 60_000 }` — no assertions changed. Vitest 4 also removed the `--minWorkers` CLI flag (`--maxWorkers` remains).

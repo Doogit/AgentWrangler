@@ -631,6 +631,32 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
   );
 }
 
+/** Identity fields for labeling a workspace, independent of any activity window. */
+export interface WorkspaceNameRow {
+  workspace_id: string;
+  project_slug: string;
+  repo_path: string | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+}
+
+/**
+ * All registered workspaces' naming metadata, unwindowed — the UIR-8 name
+ * source. listWorkspaces() is windowed, so workspaces idle longer than the
+ * widest canned window (30d) would otherwise fall back to raw-slug labels.
+ * Identity metadata, not a metric claim, hence no ApiResponse envelope
+ * (same convention as /api/reports).
+ */
+export function listWorkspaceNames(): WorkspaceNameRow[] {
+  const db = getQueryDb();
+  return db
+    .prepare(
+      `SELECT workspace_id, project_slug, repo_path, repo_owner, repo_name
+         FROM workspaces ORDER BY workspace_id`,
+    )
+    .all() as WorkspaceNameRow[];
+}
+
 /**
  * Full detail for one workspace over the default (7d) window — getWorkspace has
  * no window filter in the frozen signature, so it uses resolveWindow({}).

@@ -132,7 +132,7 @@ export function projectLine(rawLine: string, ctx: ParseContext): LineProjection 
   if (command === null && rec.type === "user" && message && typeof message.content === "string") {
     const c = message.content;
     if (c === "/clear" || c === "/compact") {
-      command = { sessionId, ts: ts ?? "", command: c };
+      command = projectCommand(sessionId, ts ?? "", c);
     }
   }
 
@@ -384,10 +384,29 @@ function extractCommand(
     rec.type === "system" &&
     (rec.subtype === "local_command" || rec.subtype === "away_summary")
   ) {
-    const raw = typeof rec.command === "string" ? rec.command : String(rec.subtype);
-    return { sessionId, ts: ts ?? "", command: raw };
+    const originalCommand = typeof rec.command === "string" ? rec.command : rec.subtype;
+    return projectCommand(sessionId, ts ?? "", originalCommand);
   }
   return null;
+}
+
+/** Both supported producers use this legacy identity before classification discards text. */
+function projectCommand(sessionId: string, ts: string, originalCommand: string): CommandProjection {
+  return {
+    sessionId,
+    ts,
+    eventId: legacyCommandEventId(sessionId, ts, originalCommand),
+    command:
+      originalCommand === "/compact" || originalCommand === "/clear" ? originalCommand : null,
+  };
+}
+
+function legacyCommandEventId(sessionId: string, ts: string, originalCommand: string): string {
+  return `cmd-${crypto
+    .createHash("sha1")
+    .update(`${sessionId}|${ts}|${originalCommand}`)
+    .digest("hex")
+    .slice(0, 20)}`;
 }
 
 function resolveSessionId(rec: Record<string, unknown>, ctx: ParseContext): string {

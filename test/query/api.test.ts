@@ -15,6 +15,7 @@ import {
   getWorkspace,
   listLiveSessions,
   listSessions,
+  listWorkspaceNames,
   listWorkspaces,
 } from "../../src/query/api/overview.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
@@ -120,6 +121,45 @@ describe("listWorkspaces", () => {
     expect(alpha.usd_per_turn).toBeCloseTo(49_775 / 7 / 1e6, 12);
     expect(alpha.has_live).toBe(false); // activity cutoff is "now"-based
     expect(res.data?.next_cursor).toBeNull();
+  });
+});
+
+describe("listWorkspaceNames", () => {
+  it("returns unwindowed identity rows, including a workspace idle beyond the window (UIR-8)", () => {
+    // ws-idle: registered workspace whose only turn predates WINDOW by months.
+    db.prepare(
+      `INSERT INTO workspaces (workspace_id, project_slug, repo_path, repo_owner, repo_name, registered_at)
+       VALUES ('ws-idle','legacy-etl','C:/Users/dev/GitHub/legacy-etl','acme','legacy-etl','2025-06-01T00:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO sessions (session_id, workspace_id, file_path, first_turn_at, last_turn_at,
+         state, turn_count, cost_equiv_u, hygiene_flags)
+       VALUES ('sess-idle','ws-idle','/logs/idle.jsonl','2025-06-01T00:00:00.000Z',
+         '2025-06-01T01:00:00.000Z','RECONCILED',1,450,'[]')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO turns (message_id, session_id, workspace_id, ts, model,
+         is_sidechain, input_tokens, output_tokens, cache_read_tokens,
+         cache_write_5m, cache_write_1h, cache_write_other, tool_result_bytes,
+         pricing_snapshot_id, cost_equiv_u, cost_claim, provisional, parser_version)
+       VALUES ('msg-idle','sess-idle','ws-idle','2025-06-01T00:30:00.000Z','claude-sonnet',
+         0, 100, 10, 0, 0, 0, 0, NULL, 'snap-sonnet', 450, 'LIST_EQUIV', 0, 'test-v1')`,
+    ).run();
+
+    // The windowed listing (the old name source) omits the idle workspace…
+    const windowed = (listWorkspaces(WINDOW).data?.items ?? []).map((w) => w.workspace_id);
+    expect(windowed).not.toContain("ws-idle");
+
+    // …but the unwindowed name listing includes it, with identity fields intact.
+    const rows = listWorkspaceNames();
+    expect(rows.map((r) => r.workspace_id)).toEqual(["ws-alpha", "ws-beta", "ws-idle"]);
+    expect(rows.find((r) => r.workspace_id === "ws-idle")).toEqual({
+      workspace_id: "ws-idle",
+      project_slug: "legacy-etl",
+      repo_path: "C:/Users/dev/GitHub/legacy-etl",
+      repo_owner: "acme",
+      repo_name: "legacy-etl",
+    });
   });
 });
 

@@ -64,6 +64,7 @@ async function fixture(
     "017_ingest_metric_events",
     "018_effect_cycles",
     "019_work_records",
+    "020_local_command_retention",
   ]) {
     db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(version);
   }

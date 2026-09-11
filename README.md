@@ -84,9 +84,11 @@ five hooks; **Copy install prompt** prepares instructions for three. Copying alo
 ## Privacy and limits
 
 - The daemon binds to **127.0.0.1**. There is no telemetry or hosted product backend.
-- SQLite contains aggregates and structural data, and can also contain local command text
-  and filesystem paths. Treat it as sensitive. The optional PreCompact hook makes separate
-  raw transcript copies on your machine.
+- SQLite contains aggregates and structural data, plus filesystem paths. Command rows keep
+  only `/compact`, `/clear`, or an unclassified marker — other commands and arguments are
+  discarded, though databases or backups from before the upgrade can still hold raw command
+  text (sanitation is logical, not physical erasure). Treat it as sensitive. The optional
+  PreCompact hook makes separate raw transcript copies on your machine.
 - Usage refresh can contact Anthropic using your existing Claude Code sign-in. GitHub
   outcomes sync requires a configured token. [Privacy details](https://github.com/Doogit/AgentWrangler/blob/main/docs/privacy.md).
 - Claude Code format changes can require parser updates. This is a single-user tool.

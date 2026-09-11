@@ -12,7 +12,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
-import { mockCalibrateLimit, mockSettings, mockWorkspaces } from "../../src/ui/api/fixtures";
+import { mockCalibrateLimit, mockSettings, mockWorkspaceNames } from "../../src/ui/api/fixtures";
 import { __resetWorkspaceNamesCache } from "../../src/ui/lib/workspace-names";
 import SettingsPage from "../../src/ui/settings/SettingsPage";
 
@@ -286,7 +286,7 @@ describe("SettingsPage — workspace names summary", () => {
   it("renders the derived owner/name label, not the raw slug or empty-state copy", async () => {
     __resetWorkspaceNamesCache();
     setupSuccess();
-    vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "30d" }));
+    vi.mocked(client.fetchWorkspaceNames).mockResolvedValue(mockWorkspaceNames());
     render(<SettingsPage />);
 
     const summary = await screen.findByLabelText("Auto-derived workspace names");

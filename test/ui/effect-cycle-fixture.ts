@@ -26,7 +26,9 @@ export function makeEffectCycle(overrides: Partial<EffectCycle> = {}): EffectCyc
       sampleUnit: "turn",
       aggregation: "mean",
       deltaSemantics: "RELATIVE_PERCENT",
-      improvementThreshold: 5,
+      // Signed band edges per src/effects/registry.ts: lower-is-better metrics
+      // carry a negative improvement threshold and a positive worsening one.
+      improvementThreshold: -5,
       worseningThreshold: 5,
       eligibleDefinition: "eligible turns",
       excludedDefinition: "excluded turns",

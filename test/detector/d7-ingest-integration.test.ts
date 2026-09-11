@@ -15,7 +15,13 @@ import { runBackscan } from "../../src/ingest/index.js";
 import { listRecommendations } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { migratedMemDb } from "../ingest/dbutil.js";
-import { assistant, userToolResult, writeCorpus } from "../ingest/synth.js";
+import {
+  assistant,
+  systemCommand,
+  userCommand,
+  userToolResult,
+  writeCorpus,
+} from "../ingest/synth.js";
 
 const NOW = new Date("2027-01-08T00:00:00.000Z");
 const INGEST_OPTS = { now: () => NOW, activityWindowSecs: 300 };
@@ -110,5 +116,72 @@ describe("D7 fresh ingestion integration", () => {
       expect(persisted).not.toContain(raw);
       expect(surfaced).not.toContain(raw);
     }
+  });
+
+  it("keeps SEC-4 command markers in D7 denominators and out of persisted content", () => {
+    const session = "d7-sec4-session";
+    const rawCommand = "/deploy --token=SYNTHETIC_SECRET_D7";
+    const lines = [
+      ...Array.from({ length: 3 }, (_, index) => {
+        const toolUseId = `d7-sec4-read-${index}`;
+        return [
+          assistant({
+            id: `d7-sec4-owner-${index}`,
+            session,
+            ts: `2027-01-02T00:00:0${index}.000Z`,
+            input: 100,
+            toolUses: [{ id: toolUseId, name: "Read", input: { file_path: RAW_PATH } }],
+          }),
+          userToolResult({
+            session,
+            ts: `2027-01-02T00:00:1${index}.000Z`,
+            results: [{ toolUseId, text: RAW_RESULT, isError: false }],
+          }),
+        ];
+      }).flat(),
+      systemCommand({ session, ts: "2027-01-02T00:00:20.000Z", command: "/compact" }),
+      systemCommand({ session, ts: "2027-01-02T00:00:21.000Z", command: rawCommand }),
+      userCommand({ session, ts: "2027-01-02T00:00:22.000Z", content: "/clear" }),
+    ];
+    writeCorpus(root, { "d7-sec4": { "session.jsonl": lines } });
+
+    runBackscan(db, [root], INGEST_OPTS);
+    runDetectors(db, { now: NOW });
+
+    // Markers persisted as classified marker or NULL, in the cmd- namespace.
+    const markers = db
+      .prepare(
+        `SELECT event_id, input_hash FROM tool_events
+          WHERE session_id = ? AND tool_name = 'local_command' ORDER BY ts`,
+      )
+      .all(session) as Array<{ event_id: string; input_hash: string | null }>;
+    expect(markers.map((row) => row.input_hash)).toEqual(["/compact", null, "/clear"]);
+    for (const row of markers) {
+      expect(row.event_id).toMatch(/^cmd-[0-9a-f]{20}$/);
+    }
+
+    // The raw command string never reaches any persisted tool-event field.
+    const persisted = JSON.stringify(
+      db.prepare("SELECT * FROM tool_events WHERE session_id = ?").all(session),
+    );
+    expect(persisted).not.toContain(rawCommand);
+    expect(persisted).not.toContain("SYNTHETIC_SECRET_D7");
+
+    // Exact /compact reconciliation is unchanged: mid-task compact flags the
+    // session; compaction_count stays on the separate metric-event signal.
+    const sessionRow = db
+      .prepare("SELECT hygiene_flags, compaction_count FROM sessions WHERE session_id = ?")
+      .get(session) as { hygiene_flags: string; compaction_count: number };
+    expect(JSON.parse(sessionRow.hygiene_flags)).toContain("COMPACT_MID_TASK");
+    expect(sessionRow.compaction_count).toBe(0);
+
+    // Marker rows stay in the D7 coverage denominator as missing-metadata events.
+    const view = listRecommendations().data;
+    if (view === null) throw new Error("expected recommendations view");
+    const rec = view.active.find((candidate) => candidate.detector_id === "D7");
+    expect(rec?.evidence.redundant_read_event_count).toBe(3);
+    expect(rec?.evidence.owner_turn_metadata_covered_event_count).toBe(3);
+    expect(rec?.evidence.owner_turn_metadata_denominator_event_count).toBe(6);
+    expect(rec?.evidence.owner_turn_metadata_coverage).toBe(0.5);
   });
 });

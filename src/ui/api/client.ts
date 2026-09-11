@@ -31,6 +31,7 @@ import type {
   SessionSummary,
   TurnRow,
   WindowFilter,
+  WorkspaceNameRow,
   WorkspaceSummary,
 } from "../../query/api/overview";
 import type { RecommendationsView } from "../../query/api/recommendations";
@@ -79,6 +80,7 @@ import {
   mockTrends,
   mockTurnTimeline,
   mockUpdateSettings,
+  mockWorkspaceNames,
   mockWorkspaceOutcomes,
   mockWorkspaceSessions,
   mockWorkspaces,
@@ -371,6 +373,21 @@ export async function fetchWorkspaces(
     filter,
     `/api/workspaces?${params.toString()}`,
   );
+}
+
+/**
+ * Fetch unwindowed naming metadata for ALL registered workspaces (UIR-8) —
+ * unlike fetchWorkspaces, this includes workspaces idle beyond the widest
+ * canned window, so idle workspaces keep friendly labels.
+ * Endpoint: GET /api/workspace-names (bare array, no envelope)
+ */
+export async function fetchWorkspaceNames(): Promise<WorkspaceNameRow[]> {
+  if (USE_MOCK) {
+    return Promise.resolve(mockWorkspaceNames());
+  }
+  const res = await daemonFetch("/api/workspace-names");
+  if (!res.ok) throw new Error(`/api/workspace-names returned ${res.status}`);
+  return (await res.json()) as WorkspaceNameRow[];
 }
 
 /**

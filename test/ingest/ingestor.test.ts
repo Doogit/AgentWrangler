@@ -17,7 +17,15 @@ import type { Db } from "../../src/db/open.js";
 import { Ingestor, runBackscan } from "../../src/ingest/index.js";
 import { reconcileSessions } from "../../src/ingest/reconcile.js";
 import { migratedMemDb } from "./dbutil.js";
-import { assistant, synthetic, toJsonl, userToolResult, writeCorpus } from "./synth.js";
+import {
+  assistant,
+  synthetic,
+  systemCommand,
+  toJsonl,
+  userCommand,
+  userToolResult,
+  writeCorpus,
+} from "./synth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = path.resolve(__dirname, "../fixtures/ingest");
@@ -506,6 +514,91 @@ describe("back-scan aggregates over the committed corpus", () => {
       )
       .get() as { n: number };
     expect(cmd.n).toBe(1);
+  });
+
+  it("persists only classified command markers with producer-parity deduplication", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-sec4-markers-"));
+    try {
+      const session = "sec4-markers";
+      const ts = "2026-01-03T00:00:00.000Z";
+      writeCorpus(tmp, {
+        "proj-sec4": {
+          "commands-a.jsonl": [
+            systemCommand({ session, ts, subtype: "local_command", command: "/compact" }),
+            systemCommand({ session, ts, subtype: "away_summary", command: "/clear" }),
+            systemCommand({ session, ts, subtype: "away_summary", command: "/compact" }),
+            systemCommand({ session, ts, command: "/deploy --token=SYNTHETIC_SECRET" }),
+            systemCommand({ session, ts, command: "/compact synthetic-note" }),
+            systemCommand({ session, ts, command: " /compact" }),
+            systemCommand({ session, ts, command: "/Compact" }),
+            systemCommand({ session, ts, command: "/compact\0synthetic" }),
+            systemCommand({ session, ts, command: `/${"v".repeat(4096)}` }),
+            systemCommand({ session, ts, subtype: "away_summary" }),
+            systemCommand({ session, ts, command: null }),
+            systemCommand({ session, ts, command: ["/compact"] }),
+            assistant({ id: "sec4-turn-1", session, ts: "2026-01-03T00:01:00.000Z" }),
+            assistant({ id: "sec4-turn-2", session, ts: "2026-01-03T00:02:00.000Z" }),
+          ],
+          "commands-b.jsonl": [
+            userCommand({ session, ts, content: "/compact" }),
+            userCommand({ session, ts, content: "/clear" }),
+            systemCommand({ session, ts, command: "/help alpha" }),
+            systemCommand({ session, ts, command: "/help beta" }),
+          ],
+        },
+      });
+
+      const ingestor = new Ingestor(db, [tmp], OPTS);
+      ingestor.runBackscan();
+      const rows = db
+        .prepare(
+          `SELECT event_id, input_hash, input_bytes, result_bytes, exit_class, commit_sha
+           FROM tool_events WHERE session_id = ? AND tool_name = 'local_command'
+           ORDER BY event_id`,
+        )
+        .all(session) as Array<Record<string, unknown>>;
+      // Identity is SHA-1(session|ts|originalCommand); all lines share session+ts, so rows
+      // deduplicate per distinct original string. 16 source lines → 12 rows: "/compact" appears
+      // three times (local_command, away_summary, bare-user), "/clear" twice (away_summary,
+      // bare-user), and the missing/null/array-command lines all fall back to subtype identity
+      // ("away_summary" once, "local_command" twice → one row).
+      expect(rows).toHaveLength(12);
+      expect(rows.filter((row) => row.input_hash === "/compact")).toHaveLength(1);
+      expect(rows.filter((row) => row.input_hash === "/clear")).toHaveLength(1);
+      expect(rows.filter((row) => row.input_hash === null)).toHaveLength(10);
+      for (const row of rows) {
+        expect(row.input_bytes).toBeNull();
+        expect(row.result_bytes).toBeNull();
+        expect(row.exit_class).toBeNull();
+        expect(row.commit_sha).toBeNull();
+        const bound = JSON.stringify(row);
+        expect(bound).not.toContain("SYNTHETIC_SECRET");
+        expect(bound).not.toContain("synthetic-note");
+      }
+      const unknownIds = rows.filter((row) => row.input_hash === null).map((row) => row.event_id);
+      expect(new Set(unknownIds).size).toBe(10);
+      const state = db
+        .prepare("SELECT compaction_count, hygiene_flags FROM sessions WHERE session_id = ?")
+        .get(session) as { compaction_count: number; hygiene_flags: string };
+      expect(state.compaction_count).toBe(0);
+      expect(JSON.parse(state.hygiene_flags)).toContain("COMPACT_MID_TASK");
+
+      const commandFile = path.join(tmp, "proj-sec4", "commands-a.jsonl");
+      const touched = new Date(fs.statSync(commandFile).mtimeMs + 2000);
+      fs.utimesSync(commandFile, touched, touched);
+      new Ingestor(db, [tmp], OPTS).ingestFile(commandFile, "proj-sec4");
+      const replayed = db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM tool_events WHERE session_id = ? AND tool_name = 'local_command'",
+        )
+        .get(session) as { n: number };
+      expect(replayed.n).toBe(12);
+      expect(
+        db.prepare("SELECT compaction_count FROM sessions WHERE session_id = ?").get(session),
+      ).toEqual({ compaction_count: 0 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it("attaches tool_result bytes to the owning turn (size only, no content)", () => {

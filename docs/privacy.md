@@ -1,6 +1,6 @@
 # Privacy model
 
-AgentWrangler keeps its dashboard data local. Most stored data is aggregates and structural metadata, but the database is not a sanitized export: it can also contain local command text and filesystem paths. The direct-install PreCompact hook can additionally copy full raw transcripts as described below.
+AgentWrangler keeps its dashboard data local. Most stored data is aggregates and structural metadata, but the database is not a sanitized export: it still contains filesystem paths and sensitive local metadata, and pre-upgrade databases and backups can contain local command text. The direct-install PreCompact hook can additionally copy full raw transcripts as described below.
 
 ## Local-only service boundary
 
@@ -12,7 +12,7 @@ AgentWrangler keeps its dashboard data local. Most stored data is aggregates and
 
 SQLite stores aggregate token counts by flavor and model, timestamps, session and workspace ids, turn counts, detector measurements (byte counts, event counts, shares), PR and commit identifiers and states, and file-position anchors used to resume ingestion. The dashboard renders that local aggregate data.
 
-Ingestion also retains filesystem paths and local command markers/text. In particular, a transcript's `local_command` record can be stored verbatim in `tool_events.input_hash`; the column name does not mean every value is hashed. Treat the database and backups as sensitive local data, and do not share raw dumps. Calibration samples are separately held in memory and discarded after the request. The optional GitHub token is read at use time from the environment or Windows Credential Manager; it is not logged or written to SQLite. Screenshots and the demo GIF in this repository use sanitized fixtures, never live data.
+Ingestion also retains filesystem paths and local command markers. Command marker rows retain only exact `/compact`, exact `/clear`, or an unclassified event with no command text; any other command and all arguments are discarded before storage, and a database migration clears legacy raw values and blocks new ones. Limits of that guarantee: it is logical sanitation, not physical erasure — old values may persist in databases or backups made before the upgrade, in WAL frames or free pages, and in raw transcripts or checkpoint copies; and the stable command-derived event IDs are unkeyed, so a party who knows the session and time can test guessed commands against them. The `input_hash` column name does not mean every value is hashed. Treat the database and backups as sensitive local data, and do not share raw dumps. Calibration samples are separately held in memory and discarded after the request. The optional GitHub token is read at use time from the environment or Windows Credential Manager; it is not logged or written to SQLite. Screenshots and the demo GIF in this repository use sanitized fixtures, never live data.
 
 ## Raw transcript checkpoint copies
 

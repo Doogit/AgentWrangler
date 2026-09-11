@@ -81,8 +81,11 @@ describe("UA11 fixture matrix", () => {
     expect(efficiencyHeadroom.headroom_pct).toBeNull();
   });
 
+  // The 30d fixture decomposition runs >5 s synchronously; Vitest 4 enforces the
+  // default timeout on sync tests where Vitest 2 could not.
   it.each(["24h", "7d", "30d"] as const)(
     "keeps every %s decomposition and metadata inside its selected window",
+    { timeout: 60_000 },
     (preset) => {
       const overview = mockGlobalOverview({ preset });
       const workspaces = mockWorkspaces({ preset });

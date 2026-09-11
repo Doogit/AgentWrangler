@@ -113,9 +113,9 @@ function TargetStrip({
   evidence,
 }: { cycle: EffectCycle; evidence: ObservationBundle | null }) {
   const delta = targetDelta(cycle, evidence);
-  // Frozen contracts store signed directional thresholds. Some measures improve
-  // when they decrease (for example D1), while others improve when they rise
-  // (for example D4), so the display range must be ordered rather than negated.
+  // Thresholds are signed band edges (registry convention): lower-is-better
+  // metrics carry a negative improvement threshold, higher-is-better metrics a
+  // negative worsening threshold. The unchanged band spans the two edges.
   const lower = Math.min(
     cycle.targetDefinition.worseningThreshold,
     cycle.targetDefinition.improvementThreshold,
@@ -131,12 +131,12 @@ function TargetStrip({
       guardrail.direction === "ADVERSE" ||
       guardrail.direction === "INSUFFICIENT_DATA",
   );
-  // The material-change band occupies the middle half of the strip. This leaves
-  // visible space on both sides for a measured improvement or worsening.
+  // The material-change band occupies the middle half of the strip (25%–75%),
+  // leaving visible space on both sides for a measured improvement or worsening.
   const position =
     delta === null
       ? 50
-      : Math.max(0, Math.min(100, ((delta - lower * 2) / (upper * 2 - lower * 2 || 1)) * 100));
+      : Math.max(0, Math.min(100, 25 + (50 * (delta - lower)) / (upper - lower || 1)));
   const dotColor = blocked
     ? "var(--amber)"
     : direction === "IMPROVED"
