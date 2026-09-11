@@ -14,6 +14,13 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import type { Db } from "../db/open.js";
+import {
+  bootFileParsed,
+  bootFilesTotal,
+  bootSessionFound,
+  bootTokensCounted,
+  pushBootEvent,
+} from "./boot-progress.js";
 import { runPostIngestHook } from "./detector-hook.js";
 import {
   createDiscoveryCache,
@@ -463,11 +470,32 @@ export class Ingestor {
         ? Math.max(1, Math.floor(batchSize))
         : INITIAL_SCAN_BATCH_SIZE;
 
+    // Boot-progress events (BOOT-1): workspace slugs and counts ONLY — never
+    // file paths (SEC-101). This method only runs for the initial back-scan.
+    const filesBySlug = new Map<string, number>();
+    for (const f of files)
+      filesBySlug.set(f.projectSlug, (filesBySlug.get(f.projectSlug) ?? 0) + 1);
+    bootFilesTotal(files.length);
+    pushBootEvent(
+      "root",
+      `discovered ${files.length} files across ${filesBySlug.size} workspaces`,
+      this.opts.now().toISOString(),
+    );
+    const announcedSlugs = new Set<string>();
+
     for (let start = 0; start < files.length; start += normalizedBatchSize) {
       const end = Math.min(start + normalizedBatchSize, files.length);
       for (let i = start; i < end; i++) {
         const f = files[i];
         if (f === undefined) continue;
+        if (!announcedSlugs.has(f.projectSlug)) {
+          announcedSlugs.add(f.projectSlug);
+          pushBootEvent(
+            "workspace",
+            `scan ${f.projectSlug} → ${filesBySlug.get(f.projectSlug) ?? 0} files`,
+            this.opts.now().toISOString(),
+          );
+        }
         // Yields between chunks WITHIN a large file, on top of the batch yield.
         await this.ingestFileYielding(f.filePath, f.projectSlug);
       }
@@ -509,7 +537,10 @@ export class Ingestor {
       parsedAny ||= step.parsed > 0;
       if (!step.hasMore) break;
     }
-    if (parsedAny) this.health.fileParsed();
+    if (parsedAny) {
+      this.health.fileParsed();
+      bootFileParsed(this.opts.now().getTime());
+    }
   }
 
   /**
@@ -531,7 +562,10 @@ export class Ingestor {
       if (!step.hasMore) break;
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    if (parsedAny) this.health.fileParsed();
+    if (parsedAny) {
+      this.health.fileParsed();
+      bootFileParsed(this.opts.now().getTime());
+    }
     return parsedAny;
   }
 
@@ -852,7 +886,8 @@ export class Ingestor {
     filePath: string,
     ts: string | null,
   ): void {
-    this.stInsertSession.run(sessionId, workspaceId, filePath, ts, ts);
+    const res = this.stInsertSession.run(sessionId, workspaceId, filePath, ts, ts);
+    if (res.changes === 1) bootSessionFound();
   }
 
   private writeTurn(turn: TurnProjection, workspaceId: string): void {
@@ -897,6 +932,15 @@ export class Ingestor {
     // New turn: the session is already ensured; advance its aggregates.
     this.stBumpSession.run(priced.costU ?? 0, turn.ts, turn.ts, turn.ts, turn.ts, turn.sessionId);
     this.health.turnIngested(PARSER_VERSION);
+    bootTokensCounted(
+      turn.inputTokens +
+        turn.outputTokens +
+        (turn.thinkingTokens ?? 0) +
+        turn.cacheReadTokens +
+        turn.cacheWrite5m +
+        turn.cacheWrite1h +
+        turn.cacheWriteOther,
+    );
 
     // If tool_result bytes already accumulated for this turn (results seen first
     // is impossible within a file, but the owner map may hold late updates).

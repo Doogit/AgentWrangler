@@ -11,6 +11,7 @@ import { getReportedWork } from "../query/api/reported-work.js";
 import type * as http from "node:http";
 import type { Db } from "../db/open.js";
 import { getPractices } from "../detector/practice-registry.js";
+import { getBootProgress } from "../ingest/boot-progress.js";
 import { getOAuthStatus } from "../oauth/credentials.js";
 import { getGithubTokenStatus } from "../outcomes/github/credential.js";
 import { manualLink, manualUnlink } from "../outcomes/linker.js";
@@ -1295,6 +1296,9 @@ export function handleApiRequest(
         files_parsed: parser_health.files_parsed,
         lines_quarantined: parser_health.lines_quarantined,
         ...getScanStatus(),
+        // BOOT-1: boot-progress fields exist ONLY pre-ready; the steady-state
+        // /api/status shape is unchanged (UI fixtures must not require them).
+        ...(isReady() ? {} : getBootProgress()),
       });
       return;
     }

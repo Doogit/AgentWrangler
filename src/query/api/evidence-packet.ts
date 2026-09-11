@@ -26,7 +26,7 @@ export {
   type ToolClass,
 } from "./evidence-packet-types.js";
 
-const METHOD = "riq1-evidence-packet-1";
+const METHOD = "riq1-evidence-packet-2";
 const MAX_TOOL_CLASSES = 32;
 const TOOL_CLASSES: readonly ToolClass[] = [
   "FILE_READ",
@@ -278,15 +278,37 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
       : measured(modelRows, "turns", tokens.turn_count, [currentId], [currentId]);
   const toolRows = db
     .prepare(
-      `SELECT tool_name, COUNT(*) AS event_count FROM tool_events te JOIN sessions s USING (session_id)
+      `SELECT te.tool_name,
+              COUNT(*) AS event_count,
+              COALESCE(SUM(COALESCE(te.result_bytes, 0)), 0) AS result_bytes_total,
+              SUM(CASE WHEN te.exit_class IN ('ERROR', 'TEST_FAIL') THEN 1 ELSE 0 END) AS failure_event_count,
+              SUM(CASE
+                    WHEN te.exit_class = 'OK'
+                     AND EXISTS (
+                       SELECT 1 FROM tool_events failed
+                        WHERE failed.session_id = te.session_id
+                          AND failed.tool_name = te.tool_name
+                          AND failed.ts >= ? AND failed.ts < ?
+                          AND failed.exit_class IN ('ERROR', 'TEST_FAIL')
+                          AND failed.ts < te.ts
+                     ) THEN 1
+                    ELSE 0
+                  END) AS recovered_after_failure_count
+         FROM tool_events te JOIN sessions s USING (session_id)
       WHERE te.ts >= ? AND te.ts < ? AND s.state = 'RECONCILED'${scope.workspaceId === null ? "" : " AND s.workspace_id = ?"}
       GROUP BY tool_name ORDER BY tool_name`,
     )
     .iterate(
       ...(scope.workspaceId === null
-        ? [scope.from, scope.to]
-        : [scope.from, scope.to, scope.workspaceId]),
-    ) as IterableIterator<{ tool_name: string; event_count: number }>;
+        ? [scope.from, scope.to, scope.from, scope.to]
+        : [scope.from, scope.to, scope.from, scope.to, scope.workspaceId]),
+    ) as IterableIterator<{
+    tool_name: string;
+    event_count: number;
+    result_bytes_total: number;
+    failure_event_count: number;
+    recovered_after_failure_count: number;
+  }>;
   const matchingTools = [];
   for (const row of toolRows) {
     const toolClass = classifyTool(row.tool_name);
@@ -295,6 +317,9 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
       tool_id: `tool_${hash({ sourceRevision, name: row.tool_name }).slice(0, 20)}`,
       tool_class: toolClass,
       event_count: row.event_count,
+      result_bytes_total: row.result_bytes_total,
+      failure_event_count: row.failure_event_count,
+      recovered_after_failure_count: row.recovered_after_failure_count,
     });
     if (matchingTools.length > MAX_TOOL_CLASSES) break;
   }

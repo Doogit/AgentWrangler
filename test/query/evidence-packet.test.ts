@@ -109,11 +109,12 @@ describe("buildEvidencePacket", () => {
     const second = buildEvidencePacket(db, scope);
 
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
-    expect(first.packet_version).toBe("riq1-1");
+    expect(first.packet_version).toBe("riq1-2");
+    expect(first.query_definition_version).toBe("riq1-query-2");
     expect(first.packet_identity_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(first.facts.current_list_price_equivalent_u).toMatchObject({
       unit: "micro_usd_list_equivalent",
-      method: "riq1-evidence-packet-1",
+      method: "riq1-evidence-packet-2",
     });
     expect(first.facts.current_list_price_equivalent_u).toHaveProperty("provenance");
     expect(first.overlap_groups[0]?.evidence_id).toMatch(/^ev_[a-f0-9]{24}$/);
@@ -140,9 +141,63 @@ describe("buildEvidencePacket", () => {
     const serialized = JSON.stringify(buildEvidencePacket(db, scope));
     for (const forbidden of [...adversarial, "hash-synthetic-0", "input_bytes"]) {
       expect(serialized).not.toContain(forbidden);
+      // JSON escaping rewrites backslashes/newlines; check the escaped spelling too.
+      expect(serialized).not.toContain(JSON.stringify(forbidden).slice(1, -1));
     }
     expect(serialized).toContain('"tool_class":"CUSTOM_TOOL"');
     expect(serialized).toContain('"tool_id":"tool_');
+    expect(serialized).toContain('"result_bytes_total"');
+    expect(serialized).toContain('"failure_event_count"');
+    expect(serialized).toContain('"recovered_after_failure_count"');
+  });
+
+  it("sums tool bytes and D7 failure/recovery classes exactly", () => {
+    const insert = db.prepare(
+      "INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_bytes, result_bytes, input_hash, exit_class, commit_sha) VALUES (?, 'sess-a1', ?, 'Read', 1, ?, NULL, ?, NULL)",
+    );
+    insert.run("evt-aggregate-fail", "2026-01-01T00:10:00.000Z", 11, "TEST_FAIL");
+    insert.run("evt-aggregate-ok", "2026-01-01T00:11:00.000Z", 13, "OK");
+    insert.run("evt-aggregate-ok-later", "2026-01-01T00:12:00.000Z", 17, "OK");
+    insert.run("evt-aggregate-null", "2026-01-01T00:13:00.000Z", null, "TEST_FAIL");
+    insert.run("evt-aggregate-error", "2026-01-01T00:14:00.000Z", 3, "ERROR");
+
+    const tools = buildEvidencePacket(db, scope).facts.tool_observations;
+    if ("state" in tools) throw new Error("expected measured tool observations");
+    expect(tools.value).toContainEqual({
+      tool_id: expect.stringMatching(/^tool_[a-f0-9]{20}$/),
+      tool_class: "FILE_READ",
+      event_count: 5,
+      result_bytes_total: 44,
+      failure_event_count: 3,
+      recovered_after_failure_count: 2,
+    });
+  });
+
+  it("reports a measured zero when a tool has no D7-classified failures", () => {
+    db.prepare(
+      "INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_bytes, result_bytes, input_hash, exit_class, commit_sha) VALUES ('evt-zero-failures', 'sess-a1', '2026-01-01T00:10:00.000Z', 'Read', 1, 5, NULL, 'OK', NULL)",
+    ).run();
+
+    const tools = buildEvidencePacket(db, scope).facts.tool_observations;
+    if ("state" in tools) throw new Error("expected measured tool observations");
+    expect(tools.value).toContainEqual({
+      tool_id: expect.stringMatching(/^tool_[a-f0-9]{20}$/),
+      tool_class: "FILE_READ",
+      event_count: 1,
+      result_bytes_total: 5,
+      failure_event_count: 0,
+      recovered_after_failure_count: 0,
+    });
+  });
+
+  it("keeps tool observations unavailable when there are no tool events", () => {
+    db.prepare("DELETE FROM tool_events").run();
+
+    expect(buildEvidencePacket(db, scope).facts.tool_observations).toEqual({
+      state: "UNAVAILABLE",
+      reason: "NO_ELIGIBLE_DATA",
+      method: "riq1-evidence-packet-2",
+    });
   });
 
   it("excludes tool events from LIVE sessions per the declared RECONCILED-only maturity filter", () => {
@@ -224,7 +279,7 @@ describe("buildEvidencePacket", () => {
     expect(empty.facts.current_list_price_equivalent_u).toEqual({
       state: "UNAVAILABLE",
       reason: "NO_ELIGIBLE_DATA",
-      method: "riq1-evidence-packet-1",
+      method: "riq1-evidence-packet-2",
     });
     expect(empty.facts.task_mix).toMatchObject({ state: "UNKNOWN", reason: "NOT_REPORTED" });
     expect(JSON.stringify(empty.facts.current_list_price_equivalent_u)).not.toContain('"value":0');
@@ -257,7 +312,7 @@ describe("buildEvidencePacket", () => {
     });
     expect(incompatible.facts.comparison).toHaveProperty(
       "method",
-      "riq1-evidence-packet-1: incompatible prior scope, tool class, or duration",
+      "riq1-evidence-packet-2: incompatible prior scope, tool class, or duration",
     );
   });
 
