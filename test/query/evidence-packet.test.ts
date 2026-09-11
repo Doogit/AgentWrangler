@@ -26,6 +26,22 @@ afterEach(() => {
 });
 
 describe("buildEvidencePacket", () => {
+  it("counts excluded LIVE sessions even when their turns are unpriced or provisional", () => {
+    db.prepare(
+      "UPDATE sessions SET state = 'LIVE' WHERE session_id IN ('sess-a1', 'sess-a2')",
+    ).run();
+    db.prepare("UPDATE turns SET cost_equiv_u = NULL WHERE session_id = 'sess-a1'").run();
+    db.prepare("UPDATE turns SET provisional = 1 WHERE session_id = 'sess-a2'").run();
+    expect(buildEvidencePacket(db, scope).coverage.excluded_live_session_count).toBe(2);
+    expect(
+      buildEvidencePacket(db, {
+        ...scope,
+        from: "2031-01-01T00:00:00.000Z",
+        to: "2031-01-01T01:00:00.000Z",
+      }).coverage.excluded_live_session_count,
+    ).toBe(0);
+  });
+
   it("excludes LIVE and provisional turns from all measured resource facts", () => {
     db.prepare("UPDATE sessions SET state = 'LIVE' WHERE session_id = 'sess-a1'").run();
     db.prepare("UPDATE turns SET provisional = 1 WHERE session_id = 'sess-a2'").run();

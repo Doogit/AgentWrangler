@@ -212,6 +212,18 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
         );
 
   const tokens = turnAggregate(db, scope);
+  // Count the excluded cohort independently of pricing/provisional maturity.
+  const excludedLive = db
+    .prepare(
+      `SELECT COUNT(DISTINCT t.session_id) AS session_count
+       FROM turns t JOIN sessions s USING (session_id)
+       WHERE t.ts >= ? AND t.ts < ? AND s.state = 'LIVE'${scope.workspaceId === null ? "" : " AND t.workspace_id = ?"}`,
+    )
+    .get(
+      ...(scope.workspaceId === null
+        ? [scope.from, scope.to]
+        : [scope.from, scope.to, scope.workspaceId]),
+    ) as { session_count: number };
   const tokenBuckets: Record<string, number> = {
     input_tokens: tokens.input_tokens,
     output_tokens: tokens.output_tokens,
@@ -346,7 +358,7 @@ export function buildEvidencePacket(db: Db, scope: EvidencePacketScope): Evidenc
     },
     coverage: {
       eligible_session_count: eligibleSessions.length,
-      excluded_live_session_count: current.resource.live_priced_session_count,
+      excluded_live_session_count: excludedLive.session_count,
       unpriced_turn_count: eligibleSessions.reduce((sum, row) => sum + row.unpriced_turn_count, 0),
       exclusions: [
         "LIVE sessions are excluded from eligible-session facts",
