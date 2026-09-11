@@ -180,6 +180,28 @@ describe("D7 signal detection", () => {
     expect(evidence.owner_turn_metadata_denominator_event_count).toBe(3);
   });
 
+  it("keeps SEC-4 command marker rows in the coverage denominator as missing-metadata events", () => {
+    addSession("command-markers");
+    for (let i = 0; i < 3; i++) {
+      addSingleEventTurn("command-markers", i, { tool: "Bash", inputHash: "same-input" });
+    }
+    // Marker rows from the SEC-4 writer: local_command, cmd- namespace ID,
+    // classified marker or NULL, no tool_event_metadata.
+    const marker = db.prepare(
+      `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash)
+       VALUES (?, 'command-markers', ?, 'local_command', ?)`,
+    );
+    marker.run(`cmd-${"1".repeat(20)}`, new Date(BASE + 3000).toISOString(), "/compact");
+    marker.run(`cmd-${"2".repeat(20)}`, new Date(BASE + 4000).toISOString(), null);
+
+    const outcome = evaluate();
+    const evidence = onlyEvidence(outcome);
+    expect(evidence.identical_call_event_count).toBe(3);
+    expect(evidence.owner_turn_metadata_covered_event_count).toBe(3);
+    expect(evidence.owner_turn_metadata_denominator_event_count).toBe(5);
+    expect(evidence.owner_turn_metadata_coverage).toBe(0.6);
+  });
+
   it("flags three consecutive TEST_FAIL events", () => {
     addSession("test-fail");
     for (let i = 0; i < 3; i++) {
