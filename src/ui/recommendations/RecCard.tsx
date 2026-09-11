@@ -95,7 +95,15 @@ type WriteAction = Exclude<PendingRecommendationAction, null> | CycleAction;
 
 const ACTION_UNDO_WINDOW_MS = 5_000;
 
-function EffectHistory({ recId }: { recId: string }) {
+function EffectHistory({
+  recId,
+  canRetrack,
+  onRetrack,
+}: {
+  recId: string;
+  canRetrack: boolean;
+  onRetrack: () => void;
+}) {
   const [state, setState] = useState<
     | { status: "loading"; cycles: never[]; legacy: never[]; nextCycle: null; nextLegacy: null }
     | {
@@ -223,17 +231,23 @@ function EffectHistory({ recId }: { recId: string }) {
           </button>
         </div>
       )}
-      {state.status !== "loading" && (state.cycles.length > 0 || state.legacy.length > 0) && (
+      {state.status !== "loading" && state.cycles[0] !== undefined && (
+        <EffectEvidence cycle={state.cycles[0]} cycles={state.cycles} />
+      )}
+      {state.status !== "loading" && state.legacy.length > 0 && (
         <ul>
-          {state.cycles.map((item) => (
-            <li key={item.cycleId}>
-              <EffectEvidence cycle={item} />
-            </li>
-          ))}
           {state.legacy.map((item) => (
             <li key={item.cycleId}>
               Legacy target-metric result: {item.verdict ?? item.state.replaceAll("_", " ")} (
               {item.measuredAt.slice(0, 10)}) — read-only
+              {canRetrack && (
+                <>
+                  {" "}
+                  <button type="button" className="rec-action-btn" onClick={onRetrack}>
+                    Retrack with versioned measurement
+                  </button>
+                </>
+              )}
             </li>
           ))}
         </ul>
@@ -1749,7 +1763,12 @@ function SingleRecCard({
                   </button>
                 </div>
               )}
-            <EffectHistory key={`${rec.rec_id}:${historyRefreshKey}`} recId={rec.rec_id} />
+            <EffectHistory
+              key={`${rec.rec_id}:${historyRefreshKey}`}
+              recId={rec.rec_id}
+              canRetrack={canRetrack}
+              onRetrack={requestTrack}
+            />
           </div>
         )}
         {retrackConfirmation && (

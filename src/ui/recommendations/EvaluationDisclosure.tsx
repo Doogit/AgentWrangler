@@ -63,15 +63,27 @@ export default function EvaluationDisclosure({
       </h4>
       {cycle === null ? (
         <>
-          <p>
-            Target: {rec.target_metric}. A baseline and target method are unavailable until a
-            supported completed change starts a frozen cycle.
-          </p>
-          <p>
-            Quality and repair guardrails are unavailable until that cycle records their typed
-            definitions. A proxy or completed action is not an outcome.
-          </p>
-          <p>Comparability is unavailable until matching before and after windows are frozen.</p>
+          <p>Not measured yet — confirm a completed change to start measurement</p>
+          <details>
+            <summary>Evaluation details</summary>
+            <p>
+              Target: {rec.target_metric}. A baseline and target method require a supported
+              completed change to start a frozen cycle.
+            </p>
+            <p>
+              Quality and repair guardrails need that cycle to record their typed definitions. A
+              proxy or completed action is not an outcome.
+            </p>
+            <p>Comparability needs matching before and after windows to be frozen.</p>
+            <p>Stop measurement: {stopMeasurementStatus(cycle, capability)}</p>
+            <p>Rollback: no tracked rollback route yet.</p>
+            <p>
+              Retrack:{" "}
+              {supportsTracking
+                ? "available only after a terminal cycle, no rollback pending, and another supported completed change."
+                : "unavailable because this recommendation does not support tracked cycles."}
+            </p>
+          </details>
         </>
       ) : (
         <>
@@ -84,25 +96,23 @@ export default function EvaluationDisclosure({
             Comparability: {cycle.comparisonStatus ?? "pending"}
             {cycle.comparisonReasons.length > 0 ? ` (${cycle.comparisonReasons.join(", ")})` : ""}.
           </p>
+          <p>Stop measurement: {stopMeasurementStatus(cycle, capability)}</p>
+          <p>
+            Rollback:{" "}
+            {rollbackPending
+              ? "pending."
+              : "use the shown owned rollback or manual-reversion route; stopping measurement alone does not undo the action."}
+          </p>
+          <p>
+            Retrack:{" "}
+            {canRetrack
+              ? "available for a new cycle with a new baseline."
+              : supportsTracking
+                ? "available only after a terminal cycle, no rollback pending, and another supported completed change."
+                : "unavailable because this recommendation does not support tracked cycles."}
+          </p>
         </>
       )}
-      <p>Stop measurement: {stopMeasurementStatus(cycle, capability)}</p>
-      <p>
-        Rollback:{" "}
-        {cycle === null
-          ? "no tracked rollback route yet."
-          : rollbackPending
-            ? "pending."
-            : "use the shown owned rollback or manual-reversion route; stopping measurement alone does not undo the action."}
-      </p>
-      <p>
-        Retrack:{" "}
-        {canRetrack
-          ? "available for a new cycle with a new baseline."
-          : supportsTracking
-            ? "available only after a terminal cycle, no rollback pending, and another supported completed change."
-            : "unavailable because this recommendation does not support tracked cycles."}
-      </p>
       <button type="button" className="rec-action-btn" onClick={onClose}>
         Back
       </button>

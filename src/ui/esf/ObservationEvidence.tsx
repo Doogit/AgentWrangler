@@ -2,39 +2,135 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { EsfObservationCohort } from "../../query/api/esf-observations";
 import type { SessionSummary, WindowFilter } from "../../query/api/overview";
 import { fetchEsfObservations, fetchSessionEsfObservations } from "../api/esf-client";
+import { shortId } from "../lib/short-id";
+import StateChip from "../shell/StateChip";
 
 import { WorkEvidence } from "./WorkEvidence";
 
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ok"; cohort: EsfObservationCohort | null };
+  | {
+      status: "ok";
+      cohort: EsfObservationCohort | null;
+      prior: EsfObservationCohort | null;
+    };
 
 function money(microUsd: number): string {
   return `$${(microUsd / 1_000_000).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export function DateRange({ lead, from, to }: { lead: string; from: string; to: string }) {
+  const elapsed = Date.parse(to) - Date.parse(from);
+  const label =
+    elapsed === 24 * 60 * 60 * 1000
+      ? "last 24 hours"
+      : elapsed === 7 * 24 * 60 * 60 * 1000
+        ? "last 7 days"
+        : Number.isFinite(elapsed) && elapsed > 0
+          ? `last ${Math.round(elapsed / (24 * 60 * 60 * 1000))} days`
+          : "selected window";
   return (
-    <span style={{ overflowWrap: "anywhere" }}>
-      {lead} from {from} up to, but not including, {to}.
-    </span>
+    <div style={{ display: "inline" }}>
+      {lead} for {label}.{" "}
+      <details style={{ display: "inline" }}>
+        <summary style={{ display: "inline", cursor: "pointer" }}>Window contract</summary>{" "}
+        <span style={{ overflowWrap: "anywhere" }}>
+          [{from}, {to})
+        </span>
+      </details>
+    </div>
   );
 }
 
-function SessionLinks({ ids, label }: { ids: string[]; label: string }) {
-  if (ids.length === 0) return <span>No {label.toLowerCase()}.</span>;
-  return (
-    <span>
-      {label}:{" "}
-      {ids.map((id, index) => (
-        <span key={id}>
-          {index > 0 ? ", " : ""}
-          <a href={`#/sessions/${encodeURIComponent(id)}`}>{id}</a>
-        </span>
-      ))}
-    </span>
+function CohortSessionTable({
+  cohort,
+  ids,
+  label,
+}: {
+  cohort: EsfObservationCohort;
+  ids: string[];
+  label: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const allocations = new Map(
+    cohort.allocation_sessions.map((session) => [session.session_id, session]),
   );
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button type="button" className="btn-secondary" onClick={() => setOpen((value) => !value)}>
+        View sessions ({ids.length}) →
+      </button>{" "}
+      <span>{label}</span>
+      {open && (
+        <div className="table-wrap" style={{ marginTop: 8 }}>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Session</th>
+                <th scope="col">State</th>
+                <th scope="col">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ids.length === 0 ? (
+                <tr>
+                  <td colSpan={3}>No sessions in this cohort.</td>
+                </tr>
+              ) : (
+                ids.map((id) => {
+                  const allocation = allocations.get(id);
+                  return (
+                    <tr key={id}>
+                      <td>
+                        <a href={`#/sessions/${encodeURIComponent(id)}`} title={id}>
+                          {shortId(id)}
+                        </a>
+                      </td>
+                      <td>
+                        <StateChip kind="UNKNOWN" />
+                      </td>
+                      <td>
+                        {allocation === undefined ? (
+                          <StateChip kind="UNKNOWN" />
+                        ) : (
+                          <span>
+                            {money(allocation.priced_cost_u)} · {allocation.priced_turn_count}{" "}
+                            priced turns · {allocation.unpriced_turn_count} unpriced turns
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function priorWindow(cohort: EsfObservationCohort): { from: string; to: string } | null {
+  const from = Date.parse(cohort.from);
+  const to = Date.parse(cohort.to);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+  return { from: new Date(from - (to - from)).toISOString(), to: cohort.from };
+}
+
+function mismatchReason(current: EsfObservationCohort, prior: EsfObservationCohort): string | null {
+  if (current.workspace_id !== prior.workspace_id) return "workspace scope differs";
+  if (current.cohort_definition_version !== prior.cohort_definition_version)
+    return "cohort definition differs";
+  if (current.observed_test_recovery.method_version !== prior.observed_test_recovery.method_version)
+    return "test-recovery method differs";
+  const currentDuration = Date.parse(current.to) - Date.parse(current.from);
+  const priorDuration = Date.parse(prior.to) - Date.parse(prior.from);
+  if (!Number.isFinite(priorDuration) || priorDuration !== currentDuration)
+    return "window duration differs";
+  if (prior.to !== current.from) return "window boundary differs";
+  return null;
 }
 
 function DetailDisclosure({
@@ -86,11 +182,11 @@ function DetailDisclosure({
           <h3 ref={headingRef} id={headingId} tabIndex={-1}>
             Evidence and limits
           </h3>
-          <p>
+          <div>
             <DateRange lead="This data includes entries" from={cohort.from} to={cohort.to} />{" "}
             Resource totals include {cohort.resource.selected_session_count} selected sessions;
             priced and unpriced turns are separate.
-          </p>
+          </div>
           <p>
             Repeated test-failure observation uses method{" "}
             {cohort.observed_test_recovery.method_version}:{" "}
@@ -104,23 +200,27 @@ function DetailDisclosure({
             LIVE sessions are excluded from that activity cohort.
           </p>
           <p>
-            <SessionLinks
-              label="Affected stable IDs"
-              ids={cohort.observed_test_recovery.affected_session_ids}
-            />
+            {cohort.observed_test_recovery.affected_session_ids.length} affected ·{" "}
+            {cohort.observed_test_recovery.recovered_session_ids.length ===
+            cohort.observed_test_recovery.affected_session_ids.length
+              ? `all ${cohort.observed_test_recovery.recovered_session_ids.length} later recovered`
+              : `${cohort.observed_test_recovery.recovered_session_ids.length} later recovered`}
           </p>
-          <p>
-            <SessionLinks
-              label="Recovered stable IDs"
-              ids={cohort.observed_test_recovery.recovered_session_ids}
-            />
-          </p>
-          <p>
-            <SessionLinks
-              label="No-commit activity stable IDs"
-              ids={cohort.no_commit_activity.session_ids}
-            />
-          </p>
+          <CohortSessionTable
+            cohort={cohort}
+            label="Affected sessions"
+            ids={cohort.observed_test_recovery.affected_session_ids}
+          />
+          <CohortSessionTable
+            cohort={cohort}
+            label="Recovered sessions"
+            ids={cohort.observed_test_recovery.recovered_session_ids}
+          />
+          <CohortSessionTable
+            cohort={cohort}
+            label="No-commit activity sessions"
+            ids={cohort.no_commit_activity.session_ids}
+          />
           <p>
             Cohort method: {cohort.cohort_definition_version}. Provisional turns excluded from
             money:{" "}
@@ -155,7 +255,18 @@ export function ObservationEvidence({
       ...(preset === undefined ? {} : { preset }),
     })
       .then((response) => {
-        if (active) setState({ status: "ok", cohort: response.data });
+        if (!active) return;
+        const cohort = response.data;
+        setState({ status: "ok", cohort, prior: null });
+        if (cohort === null) return;
+        const prior = priorWindow(cohort);
+        if (prior === null) return;
+        void fetchEsfObservations(workspaceId, prior)
+          .then((priorResponse) => {
+            if (active) setState({ status: "ok", cohort, prior: priorResponse.data });
+          })
+          // Current-window evidence remains useful when a descriptive comparison cannot load.
+          .catch(() => {});
       })
       .catch((error: unknown) => {
         if (active) setState({ status: "error", message: String(error) });
@@ -197,7 +308,7 @@ export function ObservationEvidence({
       )}
       {state.status === "ok" && state.cohort !== null && (
         <>
-          <CohortSummary cohort={state.cohort} launcher={launcher} />
+          <CohortSummary cohort={state.cohort} prior={state.prior} launcher={launcher} />
           <WorkEvidence workspaceId={workspaceId} from={state.cohort.from} to={state.cohort.to} />
         </>
       )}
@@ -207,14 +318,21 @@ export function ObservationEvidence({
 
 function CohortSummary({
   cohort,
+  prior,
   launcher,
-}: { cohort: EsfObservationCohort; launcher: React.RefObject<HTMLButtonElement> }) {
+}: {
+  cohort: EsfObservationCohort;
+  prior: EsfObservationCohort | null;
+  launcher: React.RefObject<HTMLButtonElement>;
+}) {
   const { resource, observed_test_recovery: recovery } = cohort;
+  const priorMismatch = prior === null ? null : mismatchReason(cohort, prior);
+  const comparablePrior = priorMismatch === null ? prior : null;
   if (resource.selected_session_count === 0)
     return <div>No eligible observations in this window.</div>;
   return (
     <>
-      <p style={{ marginTop: 0, fontSize: 12, color: "var(--text-muted)" }}>
+      <div style={{ marginTop: 0, fontSize: 12, color: "var(--text-muted)" }}>
         <DateRange
           lead={
             cohort.workspace_id === null
@@ -224,7 +342,7 @@ function CohortSummary({
           from={cohort.from}
           to={cohort.to}
         />
-      </p>
+      </div>
       <div
         style={{
           display: "grid",
@@ -236,6 +354,9 @@ function CohortSummary({
           <strong>Resource use</strong>
           <div>
             {money(resource.priced_cost_u)} priced · {resource.priced_turn_count} priced turns
+            {comparablePrior !== null && (
+              <> · prior {money(comparablePrior.resource.priced_cost_u)} priced</>
+            )}
           </div>
           <small>
             {resource.unpriced_turn_count} unpriced turns · {resource.live_priced_session_count}{" "}
@@ -245,17 +366,41 @@ function CohortSummary({
         <div>
           <strong>Observed workflow</strong>
           <div>
-            {recovery.affected_session_ids.length} /{" "}
+            {recovery.affected_session_ids.length}/
             {recovery.eligible_reconciled_qualifying_tool_session_count} repeated test-failure
             sessions
+            {comparablePrior !== null && (
+              <>
+                {" "}
+                · prior {comparablePrior.observed_test_recovery.affected_session_ids.length}/
+                {
+                  comparablePrior.observed_test_recovery
+                    .eligible_reconciled_qualifying_tool_session_count
+                }
+              </>
+            )}
           </div>
           <small>{recovery.recovered_session_ids.length} recovered test sequences</small>
         </div>
       </div>
+      {comparablePrior !== null && (
+        <p style={{ marginBottom: 0, fontSize: 12 }}>
+          Prior-window figures are descriptive, not a delta.
+        </p>
+      )}
+      {priorMismatch !== null && (
+        <p style={{ marginBottom: 0, fontSize: 12 }}>
+          Prior window not comparable: {priorMismatch}.
+        </p>
+      )}
       <p style={{ marginBottom: 0, fontSize: 12 }}>
         {cohort.no_commit_activity.session_count} reconciled Bash/edit activity without an observed
-        commit; {cohort.no_commit_activity.live_session_excluded_count} LIVE sessions excluded from
-        this activity cohort.
+        commit
+        {comparablePrior !== null && (
+          <> · prior {comparablePrior.no_commit_activity.session_count}</>
+        )}
+        ; {cohort.no_commit_activity.live_session_excluded_count} LIVE sessions excluded from this
+        activity cohort.
       </p>
       <DetailDisclosure cohort={cohort} launcher={launcher} />
     </>
@@ -272,7 +417,7 @@ export function SessionObservedEvidence({ session }: { session: SessionSummary }
     setState({ status: "loading" });
     void fetchSessionEsfObservations(session.session_id)
       .then((response) => {
-        if (active) setState({ status: "ok", cohort: response.data });
+        if (active) setState({ status: "ok", cohort: response.data, prior: null });
       })
       .catch((error: unknown) => {
         if (active) setState({ status: "error", message: String(error) });
@@ -315,13 +460,13 @@ export function SessionObservedEvidence({ session }: { session: SessionSummary }
       )}
       {cohort !== null && cohort.resource.selected_session_count > 0 && (
         <>
-          <p>
+          <div>
             <DateRange
               lead="This complete session includes data"
               from={cohort.from}
               to={cohort.to}
             />
-          </p>
+          </div>
           <div
             style={{
               display: "grid",
@@ -342,13 +487,17 @@ export function SessionObservedEvidence({ session }: { session: SessionSummary }
             <div>
               <strong>Operational sequence</strong>
               <div>
-                {session.state === "LIVE"
-                  ? "LIVE — excluded from reconciled observation cohort"
-                  : recovered
-                    ? "repeated test failures, then an observed later pass"
-                    : hasFailure
-                      ? "repeated test failures observed"
-                      : "no repeated test-failure sequence observed"}
+                {session.state === "LIVE" ? (
+                  "LIVE — excluded from reconciled observation cohort"
+                ) : recovered ? (
+                  <a href="#session-context-chart">
+                    repeated test failures, then an observed later pass
+                  </a>
+                ) : hasFailure ? (
+                  <a href="#session-context-chart">repeated test failures observed</a>
+                ) : (
+                  "no repeated test-failure sequence observed"
+                )}
               </div>
             </div>
           </div>

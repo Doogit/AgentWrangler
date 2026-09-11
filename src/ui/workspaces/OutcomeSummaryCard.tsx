@@ -33,8 +33,8 @@ export default function OutcomeSummaryCard({ data }: Props) {
         <>
           <div className="kpi-value">{fmtPct(data.success_rate)}</div>
           <div className="kpi-subval">
-            {data.terminal_n} terminal · {data.clean_success_n} clean · {data.with_deferrals_n} with
-            deferrals
+            {data.clean_success_n + data.with_deferrals_n}/{data.terminal_n} observed successful
+            outcomes · {data.clean_success_n} clean · {data.with_deferrals_n} with deferrals
           </div>
           {data.no_ci_success_n > 0 && (
             <div className="kpi-subval" style={{ color: "var(--amber)" }}>
@@ -45,7 +45,8 @@ export default function OutcomeSummaryCard({ data }: Props) {
             className="kpi-fn"
             title="Completed sessions with at least one Bash tool event are eligible."
           >
-            eligible sessions linked to pull requests: {fmtPct(data.linkage_rate)}
+            eligible sessions linked to pull requests: {fmtPct(data.linkage_rate)} (denominator
+            UNAVAILABLE in this aggregate)
           </div>
         </>
       )}

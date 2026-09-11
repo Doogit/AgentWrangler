@@ -1,13 +1,16 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {
   EFFORT_BANDS,
+  type MutationResult,
   OUTCOME_STATES,
   REPAIR_BANDS,
   TASK_INTENTS,
   type WorkRecordView,
 } from "../../../work-records/types";
 import {
+  type PreparedOperation,
   type WorkRecordAction,
+  type WorkResponse,
   listWorkRecords,
   prepareCreateWorkRecord,
   prepareDeleteWorkRecord,
@@ -53,6 +56,27 @@ function WorkRecordScope({
     onMutationComplete?.();
   };
   const operation = useWorkOperation(complete, reload);
+  const create = (attachSession = false) => {
+    const created = prepareCreateWorkRecord(workspaceId, intent);
+    let attached: PreparedOperation<MutationResult> | undefined;
+    const createAndMaybeAttach: PreparedOperation<MutationResult> = {
+      async run(): Promise<WorkResponse<MutationResult>> {
+        const result = await created.run();
+        if (attachSession && sessionId !== undefined) {
+          attached ??= prepareWorkRecordAction(
+            result.data.record.work_record_id,
+            result.data.record.current_revision_no,
+            { action: "attach-session", sessionId },
+          );
+          await attached.run();
+        }
+        return result;
+      },
+    };
+    operation.start(createAndMaybeAttach, (result) =>
+      setSelectedId(result.data.record.work_record_id),
+    );
+  };
   useEffect(() => {
     // The refresh counter deliberately invalidates this read after a mutation.
     void refresh;
@@ -91,13 +115,12 @@ function WorkRecordScope({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          operation.start(prepareCreateWorkRecord(workspaceId, intent), (result) =>
-            setSelectedId(result.data.record.work_record_id),
-          );
+          create();
         }}
       >
-        <fieldset disabled={operation.locked}>
+        <fieldset id="work-record-create" tabIndex={-1} disabled={operation.locked}>
           <legend>Create a local work record</legend>
+          <p>Report outcomes to see cost per useful task.</p>
           <EnumSelect
             label="Task intent"
             value={intent}
@@ -107,6 +130,11 @@ function WorkRecordScope({
           <button className="btn-secondary" type="submit">
             Create work record
           </button>
+          {sessionId !== undefined && (
+            <button className="btn-secondary" type="button" onClick={() => create(true)}>
+              Create and attach this session
+            </button>
+          )}
         </fieldset>
       </form>
       {operation.busy && <output>Saving work record…</output>}
@@ -121,7 +149,20 @@ function WorkRecordScope({
       ) : records === null ? (
         <output>Loading work records…</output>
       ) : records.length === 0 ? (
-        <p>No local work records.</p>
+        <div className="work-record-empty">
+          <p>No local work records.</p>
+          <button
+            className="btn-secondary"
+            type="button"
+            aria-controls="work-record-create"
+            onClick={(event) => {
+              event.preventDefault();
+              document.getElementById("work-record-create")?.focus();
+            }}
+          >
+            Create a work record
+          </button>
+        </div>
       ) : (
         <ul>
           {records.map((record) => (
@@ -173,12 +214,14 @@ function WorkRecordScope({
           }
         />
       )}
-      <WorkAllocationControls
-        workspaceId={workspaceId}
-        from={from}
-        to={to}
-        onMutationComplete={onMutationComplete}
-      />
+      {sessionId === undefined && (
+        <WorkAllocationControls
+          workspaceId={workspaceId}
+          from={from}
+          to={to}
+          onMutationComplete={onMutationComplete}
+        />
+      )}
     </section>
   );
 }

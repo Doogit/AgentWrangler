@@ -17,6 +17,7 @@ import Chip from "../shell/Chip";
 import EmptyState from "../shell/EmptyState";
 import InfoTip from "../shell/InfoTip";
 import { SkeletonRow } from "../shell/Skeleton";
+import StateChip from "../shell/StateChip";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -282,7 +283,7 @@ export default function WorkspacesPage() {
                     Outcome signal{" "}
                     <InfoTip
                       label="What outcome signal means"
-                      content="Share of linked pull requests with a successful observed outcome among closed outcomes, including success with deferred work. This early estimate helps spot patterns only."
+                      content="Numerator: linked pull requests with a successful observed outcome, including success with deferred work. Denominator: linked pull requests with a closed observed outcome. This early estimate helps spot patterns only."
                     />
                   </th>
                 </tr>
@@ -360,10 +361,18 @@ export default function WorkspacesPage() {
                           }
                           title="Outcome signal: based on a limited sample and may change."
                         />{" "}
+                        {outcome !== undefined && (
+                          <span title="Successful closed outcomes / all closed outcomes">
+                            {outcome.success_n}/{outcome.terminal_n}
+                          </span>
+                        )}{" "}
                         <InfoTip
                           label="What this early estimate means"
                           content="This value uses a method that is still being checked. Use it to spot patterns, not to make precise claims."
                         />
+                        <div style={{ marginTop: 4 }}>
+                          Interrupts: <StateChip kind="UNAVAILABLE" reason="not collected" />
+                        </div>
                       </td>
                     </tr>
                   );

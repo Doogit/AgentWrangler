@@ -14,6 +14,7 @@ import type { GithubTokenStatus } from "../../outcomes/github/credential";
 import type { BurnStatus } from "../../query/api/burn-status";
 import type { ContextComposition } from "../../query/api/context-composition";
 import type { CostPerSuccess } from "../../query/api/cost-per-success";
+import type { DeliveryMetrics } from "../../query/api/delivery";
 import type { ClosureProxy } from "../../query/api/effectiveness";
 import type { EfficiencyHeadroom } from "../../query/api/efficiency-headroom";
 import type { HeadroomTrendData } from "../../query/api/headroom-trend";
@@ -1010,4 +1011,22 @@ export async function fetchCostPerSuccess(
   const res = await daemonFetch(`${path}${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(`${path} returned ${res.status}`);
   return res.json() as Promise<ApiResponse<CostPerSuccess>>;
+}
+
+/**
+ * Fetch observed per-workspace delivery metrics for the selected window.
+ * Endpoint: GET /api/workspaces/:id/delivery?from=/to=
+ */
+export async function fetchWorkspaceDelivery(
+  workspaceId: string,
+  filter: WindowFilter,
+): Promise<ApiResponse<DeliveryMetrics>> {
+  const params = new URLSearchParams();
+  if (filter.preset !== undefined) params.set("preset", filter.preset);
+  if (filter.from !== undefined) params.set("from", filter.from);
+  if (filter.to !== undefined) params.set("to", filter.to);
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/delivery`;
+  const res = await daemonFetch(`${path}?${params.toString()}`);
+  if (!res.ok) throw new Error(`${path} returned ${res.status}`);
+  return res.json() as Promise<ApiResponse<DeliveryMetrics>>;
 }

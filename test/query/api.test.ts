@@ -245,6 +245,34 @@ describe("getTurnTimeline", () => {
     expect((page2.data?.items ?? []).map((t) => t.message_id)).toEqual(["msg-a1-3"]);
     expect(page2.data?.next_cursor).toBeNull();
   });
+
+  it("counts observed completed-test failure/pass events per owning turn (ESFV-8)", () => {
+    const insertEvent = db.prepare(
+      `INSERT INTO tool_events (event_id, session_id, ts, tool_name, result_bytes, exit_class)
+       VALUES (?, ?, ?, 'Bash', ?, ?)`,
+    );
+    const insertMeta = db.prepare(
+      `INSERT INTO tool_event_metadata (event_id, owner_message_id, block_index, is_test_command)
+       VALUES (?, ?, 0, ?)`,
+    );
+    insertEvent.run("te-fail", "sess-a1", "2026-01-01T00:00:01.000Z", 10, "TEST_FAIL");
+    insertMeta.run("te-fail", "msg-a1-2", 1);
+    insertEvent.run("te-pass", "sess-a1", "2026-01-01T00:00:02.000Z", 8, "OK");
+    insertMeta.run("te-pass", "msg-a1-3", 1);
+    // Excluded: not a test command.
+    insertEvent.run("te-nontest", "sess-a1", "2026-01-01T00:00:03.000Z", 8, "TEST_FAIL");
+    insertMeta.run("te-nontest", "msg-a1-2", 0);
+    // Excluded: no recorded result (incomplete event).
+    insertEvent.run("te-noresult", "sess-a1", "2026-01-01T00:00:04.000Z", null, "TEST_FAIL");
+    insertMeta.run("te-noresult", "msg-a1-2", 1);
+
+    const items = getTurnTimeline("sess-a1").data?.items ?? [];
+    expect(items.map((t) => [t.message_id, t.test_fail_events, t.test_pass_events])).toEqual([
+      ["msg-a1-1", 0, 0],
+      ["msg-a1-2", 1, 0],
+      ["msg-a1-3", 0, 1],
+    ]);
+  });
 });
 
 describe("listLiveSessions", () => {

@@ -65,3 +65,54 @@
   border-color: var(--cyan);
   color: var(--text);
 }
+.work-outcome-summary {
+  margin-block: .75rem;
+}
+.work-outcome-terminal-bar,
+.work-outcome-outside {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+}
+.work-outcome-terminal-bar {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.work-outcome-segment {
+  min-width: max-content;
+  padding: .4rem .55rem;
+  color: var(--text);
+  font-size: .8rem;
+  font-weight: 700;
+}
+.work-outcome-useful {
+  background: color-mix(in srgb, var(--green) 35%, var(--panel2));
+}
+.work-outcome-partial {
+  background: color-mix(in srgb, var(--amber) 35%, var(--panel2));
+}
+.work-outcome-unsuccessful {
+  background: color-mix(in srgb, var(--red) 35%, var(--panel2));
+}
+.work-outcome-abandoned {
+  background: color-mix(in srgb, var(--violet) 35%, var(--panel2));
+}
+.work-outcome-outside {
+  margin-top: .4rem;
+}
+.work-outcome-active {
+  background: color-mix(in srgb, var(--cyan) 25%, var(--panel2));
+}
+.work-outcome-unknown {
+  background: color-mix(in srgb, var(--panel) 55%, var(--text-muted));
+}
+.work-outcome-unreported {
+  border: 1px dashed var(--text-muted);
+  background: var(--panel2);
+}
+.work-outcome-summary p {
+  margin: .4rem 0 0;
+  font-size: .8rem;
+  color: var(--text-muted);
+}
