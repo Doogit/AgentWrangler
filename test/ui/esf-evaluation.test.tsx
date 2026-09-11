@@ -359,6 +359,39 @@ describe("ESF4 evaluation disclosures", () => {
     expect(container.querySelector(".effect-target-strip-blocked")).not.toBeNull();
     expect(container.querySelector(".effect-target-lane .chip-exact")).toBeNull();
     expect(container.textContent).not.toContain("net effect");
+    // delta -20% is far left of the -5/+5 band: position clamps to 0.
+    expect(container.querySelector<HTMLElement>(".effect-target-dot")?.style.left).toBe(
+      "calc(0% - 0.35rem)",
+    );
+  });
+
+  it("positions the target dot proportionally inside the material-change band", () => {
+    const unavailableMix = { available: false, total: 0, counts: {} };
+    const finalEvidence: ObservationBundle = {
+      metricId: "low-cost-repair",
+      methodVersion: "esf-1",
+      queryDefinitionVersion: "esf-1",
+      scopeFingerprint: "opaque",
+      parserVersions: [],
+      parserMix: { before: unavailableMix, after: unavailableMix },
+      before: { value: 100, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      after: { value: 98, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      modelMix: { before: unavailableMix, after: unavailableMix },
+      toolMix: { before: unavailableMix, after: unavailableMix },
+      taskMix: { before: unavailableMix, after: unavailableMix },
+      guardrails: [],
+    };
+    const cycle = makeEffectCycle({
+      state: "FINALIZED",
+      finalEvidence,
+      targetDirection: "UNCHANGED",
+      guardrailDefinitions: [],
+    });
+    const { container } = render(<EffectEvidence cycle={cycle} />);
+    // delta -2% inside the -5/+5 band: position = 25 + 50 * (-2 - (-5)) / 10 = 40.
+    expect(container.querySelector<HTMLElement>(".effect-target-dot")?.style.left).toBe(
+      "calc(40% - 0.35rem)",
+    );
   });
 
   it("orders signed target thresholds for both decreasing and increasing metrics", () => {

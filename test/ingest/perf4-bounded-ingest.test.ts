@@ -250,80 +250,88 @@ describe("event-loop yielding", () => {
 });
 
 describe("resumable legacy-prefix seeding", () => {
-  it("re-seeds a large consumed prefix in bounded windows, resuming after an interrupt", () => {
-    // ~5 MiB file so seeding needs more than one 4 MiB window.
-    const session = "perf4-seed";
-    const pad = "p".repeat(1024);
-    const rows: string[] = [];
-    for (let i = 0; i < 4600; i++) {
-      rows.push(
-        JSON.stringify({
-          ...userPrompt({
-            session,
-            ts: `2026-01-05T00:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0").slice(-3)}Z`,
+  // ~5 MiB fixture ingested three times synchronously — legitimately exceeds the 5 s
+  // default; Vitest 4 enforces the timeout on sync tests where Vitest 2 could not.
+  it(
+    "re-seeds a large consumed prefix in bounded windows, resuming after an interrupt",
+    { timeout: 60_000 },
+    () => {
+      // ~5 MiB file so seeding needs more than one 4 MiB window.
+      const session = "perf4-seed";
+      const pad = "p".repeat(1024);
+      const rows: string[] = [];
+      for (let i = 0; i < 4600; i++) {
+        rows.push(
+          JSON.stringify({
+            ...userPrompt({
+              session,
+              ts: `2026-01-05T00:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0").slice(-3)}Z`,
+            }),
+            uuid: `seed-${i}`,
+            pad,
           }),
-          uuid: `seed-${i}`,
-          pad,
-        }),
-      );
-    }
-    const dir = path.join(tmp, SLUG);
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "legacy.jsonl");
-    fs.writeFileSync(file, `${rows.join("\n")}\n`, "utf8");
-    expect(fs.statSync(file).size).toBeGreaterThan(4 * 1024 * 1024);
-
-    new Ingestor(db, [tmp], OPTS).ingestFile(file, SLUG);
-    const eventCount = () =>
-      (db.prepare("SELECT COUNT(*) AS n FROM ingest_metric_events").get() as { n: number }).n;
-    const userTurns = () =>
-      (
-        db
-          .prepare("SELECT user_turn_count AS n FROM sessions WHERE session_id = ?")
-          .get(session) as { n: number }
-      ).n;
-    expect(eventCount()).toBe(4600);
-    expect(userTurns()).toBe(4600);
-
-    // Simulate a pre-ledger upgrade: offset kept, baseline + ledger dropped.
-    db.prepare("DELETE FROM ingest_metric_baselines").run();
-    db.prepare("DELETE FROM ingest_metric_events").run();
-
-    // Interrupt seeding partway: the first window's progress must persist at a
-    // line boundary strictly inside the prefix.
-    const resumed = new Ingestor(db, [tmp], OPTS);
-    type RecordFn = (raw: string, proj: unknown, applyAggregates: boolean) => void;
-    const target = resumed as unknown as { recordMetricEvent: RecordFn };
-    const orig = target.recordMetricEvent.bind(resumed);
-    let calls = 0;
-    let armed = true;
-    target.recordMetricEvent = (raw, proj, applyAggregates) => {
-      calls++;
-      if (armed && calls > 3900) {
-        armed = false;
-        throw new Error("injected seeding interrupt");
+        );
       }
-      orig(raw, proj, applyAggregates);
-    };
-    expect(() => resumed.ingestFile(file, SLUG)).toThrow("injected seeding interrupt");
-    const baseline = db.prepare("SELECT seeded_offset FROM ingest_metric_baselines").get() as {
-      seeded_offset: number;
-    };
-    const storedOffset = (
-      db.prepare("SELECT byte_offset FROM ingest_offsets").get() as { byte_offset: number }
-    ).byte_offset;
-    expect(baseline.seeded_offset).toBeGreaterThan(0);
-    expect(baseline.seeded_offset).toBeLessThan(storedOffset);
+      const dir = path.join(tmp, SLUG);
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "legacy.jsonl");
+      fs.writeFileSync(file, `${rows.join("\n")}\n`, "utf8");
+      expect(fs.statSync(file).size).toBeGreaterThan(4 * 1024 * 1024);
 
-    // Resume to completion: every event registered exactly once, aggregates untouched.
-    resumed.ingestFile(file, SLUG);
-    expect(eventCount()).toBe(4600);
-    expect(userTurns()).toBe(4600);
-    const finalBaseline = db.prepare("SELECT seeded_offset FROM ingest_metric_baselines").get() as {
-      seeded_offset: number;
-    };
-    expect(finalBaseline.seeded_offset).toBe(storedOffset);
-  });
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, SLUG);
+      const eventCount = () =>
+        (db.prepare("SELECT COUNT(*) AS n FROM ingest_metric_events").get() as { n: number }).n;
+      const userTurns = () =>
+        (
+          db
+            .prepare("SELECT user_turn_count AS n FROM sessions WHERE session_id = ?")
+            .get(session) as { n: number }
+        ).n;
+      expect(eventCount()).toBe(4600);
+      expect(userTurns()).toBe(4600);
+
+      // Simulate a pre-ledger upgrade: offset kept, baseline + ledger dropped.
+      db.prepare("DELETE FROM ingest_metric_baselines").run();
+      db.prepare("DELETE FROM ingest_metric_events").run();
+
+      // Interrupt seeding partway: the first window's progress must persist at a
+      // line boundary strictly inside the prefix.
+      const resumed = new Ingestor(db, [tmp], OPTS);
+      type RecordFn = (raw: string, proj: unknown, applyAggregates: boolean) => void;
+      const target = resumed as unknown as { recordMetricEvent: RecordFn };
+      const orig = target.recordMetricEvent.bind(resumed);
+      let calls = 0;
+      let armed = true;
+      target.recordMetricEvent = (raw, proj, applyAggregates) => {
+        calls++;
+        if (armed && calls > 3900) {
+          armed = false;
+          throw new Error("injected seeding interrupt");
+        }
+        orig(raw, proj, applyAggregates);
+      };
+      expect(() => resumed.ingestFile(file, SLUG)).toThrow("injected seeding interrupt");
+      const baseline = db.prepare("SELECT seeded_offset FROM ingest_metric_baselines").get() as {
+        seeded_offset: number;
+      };
+      const storedOffset = (
+        db.prepare("SELECT byte_offset FROM ingest_offsets").get() as { byte_offset: number }
+      ).byte_offset;
+      expect(baseline.seeded_offset).toBeGreaterThan(0);
+      expect(baseline.seeded_offset).toBeLessThan(storedOffset);
+
+      // Resume to completion: every event registered exactly once, aggregates untouched.
+      resumed.ingestFile(file, SLUG);
+      expect(eventCount()).toBe(4600);
+      expect(userTurns()).toBe(4600);
+      const finalBaseline = db
+        .prepare("SELECT seeded_offset FROM ingest_metric_baselines")
+        .get() as {
+        seeded_offset: number;
+      };
+      expect(finalBaseline.seeded_offset).toBe(storedOffset);
+    },
+  );
 });
 
 describe("durable quarantine identity", () => {

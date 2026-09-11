@@ -12,7 +12,7 @@
 
 ### 1.2 Record processing (per line)
 
-Consume the fields proven by the 2026-08-21 review (§1 of that report) — `timestamp`, `message.id`/`uuid`, `message.model`, the five `usage` token fields incl. the `cache_creation.ephemeral_5m/1h` split, `session_id`/`sessionId` (parser prefers `session_id` when both present; either accepted — source: G-01)/filename, project dir, `effort` (optional; present post-2026-08-14 — source: G-06) — plus: sidechain/subagent markers, tool-use/tool-result blocks (**names and byte sizes only**; `tool_result_bytes` = SUM of all tool_result blocks in a turn — source: G-07), system records of types `local_command` (`type=system subtype=local_command`; covers `/clear`, `/compact`; command name read from the `content` field) and `away_summary` (both ingested and used to populate `sessions.hygiene_flags` — source: G-02 / FW-09), and commit SHAs appearing in tool metadata.
+Consume the fields proven by the 2026-08-21 review (§1 of that report) — `timestamp`, `message.id`/`uuid`, `message.model`, the five `usage` token fields incl. the `cache_creation.ephemeral_5m/1h` split, `session_id`/`sessionId` (parser prefers `session_id` when both present; either accepted — source: G-01)/filename, project dir, `effort` (optional; present post-2026-08-14 — source: G-06) — plus: sidechain/subagent markers, tool-use/tool-result blocks (**names and byte sizes only**; `tool_result_bytes` = SUM of all tool_result blocks in a turn — source: G-07), system records of types `local_command` (`type=system subtype=local_command`; covers `/clear`, `/compact`; the command is read from the record's `command` field — top-level `content` is ignored for command classification and identity; a bare user message whose `message.content` is exactly `/compact` or `/clear` is also recognized) and `away_summary` (both ingested and used to populate `sessions.hygiene_flags` — source: G-02 / FW-09), and commit SHAs appearing in tool metadata.
 
 Rules:
 
@@ -21,9 +21,11 @@ Rules:
 - **Projection (SEC-101):** content fields are read for sizes, canonical hashes, structural result classes,
   and SHAs, then discarded in-process. Ingestion-2 persists no tool input/output, Bash command, or file path:
   D7 receives only canonical SHA-256 input/path identities, within-message block order, an owner message id,
-  result bytes, and `OK | ERROR | TEST_FAIL`. The test-command classifier is stored as a boolean only. Existing
-  synthetic `local_command` markers remain an explicit exception: `/clear` and `/compact` are persisted in the
-  legacy `tool_events.input_hash` field for session-hygiene detection.
+  result bytes, and `OK | ERROR | TEST_FAIL`. The test-command classifier is stored as a boolean only.
+  `local_command` markers are the one command surface (SEC-4): the legacy `tool_events.input_hash` field
+  stores exact `/compact`, exact `/clear`, or SQL NULL (unclassified) — every other command, and all
+  arguments, are discarded before binding; migration 020 clears legacy raw values in place and database
+  write guards reject invalid marker writes.
 - **Pricing:** each turn priced against the freshest non-stale snapshot for its model tier; no snapshot ⇒ `cost_equiv_u = NULL` (tokens still counted); stale ⇒ `cost_claim = LIST_EQUIV_STALE`.
 - **Parser versioning:** `parser_version` on every row; unknown fields ignored; a line that fails JSON parse or lacks required fields ⇒ `ingest_quarantine` pointer (file, line, error class — no content).
 

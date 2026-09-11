@@ -33,6 +33,7 @@ import type {
   SessionSummary,
   TurnRow,
   WindowFilter,
+  WorkspaceNameRow,
   WorkspaceSummary,
 } from "../../query/api/overview";
 import type {
@@ -376,6 +377,59 @@ export function mockWorkspaces(filter: WindowFilter): ApiResponse<PagedList<Work
     data: { items, next_cursor: null },
     meta: baseMeta(window, items.length),
   };
+}
+
+/**
+ * Unwindowed naming metadata for ALL workspaces (UIR-8) — the mockWorkspaces
+ * identity fields plus ws-idle, a workspace absent from every windowed
+ * mockWorkspaces response, so tests can prove >30d-idle workspaces still
+ * resolve friendly labels.
+ */
+export function mockWorkspaceNames(): WorkspaceNameRow[] {
+  return [
+    {
+      workspace_id: "ws-1",
+      project_slug: "orbit-api",
+      repo_path: "C:/Users/dev/GitHub/orbit-api",
+      repo_owner: "acme",
+      repo_name: "orbit-api",
+    },
+    {
+      workspace_id: "ws-2",
+      project_slug: "support-portal",
+      repo_path: "C:/Users/dev/GitHub/support-portal",
+      repo_owner: "acme",
+      repo_name: "support-portal",
+    },
+    {
+      workspace_id: "ws-3",
+      project_slug: "data-janitor",
+      repo_path: "C:/Users/dev/GitHub/data-janitor",
+      repo_owner: "acme",
+      repo_name: "data-janitor",
+    },
+    {
+      workspace_id: "ws-4",
+      project_slug: "admin-console",
+      repo_path: "C:/Users/dev/GitHub/admin-console",
+      repo_owner: "acme",
+      repo_name: "admin-console",
+    },
+    {
+      workspace_id: "ws-5",
+      project_slug: "AgentWrangler",
+      repo_path: "C:/Users/dev/GitHub/AgentWrangler",
+      repo_owner: "acme",
+      repo_name: "AgentWrangler",
+    },
+    {
+      workspace_id: "ws-idle",
+      project_slug: "legacy-etl",
+      repo_path: "C:/Users/dev/GitHub/legacy-etl",
+      repo_owner: "acme",
+      repo_name: "legacy-etl",
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------

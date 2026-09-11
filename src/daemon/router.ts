@@ -54,6 +54,7 @@ import {
   listLiveSessions,
   listRecommendations,
   listSessions,
+  listWorkspaceNames,
   listWorkspaceOutcomes,
   listWorkspaces,
   openTerminalForRec,
@@ -684,6 +685,12 @@ export function handleApiRequest(
     // GET /api/workspaces  (per-workspace comparison table)
     if (method === "GET" && pathname === "/api/workspaces") {
       sendJson(res, 200, listWorkspaces(parseWindowFilter(url)));
+      return;
+    }
+
+    // GET /api/workspace-names  (unwindowed naming metadata for all workspaces — UIR-8)
+    if (method === "GET" && pathname === "/api/workspace-names") {
+      sendJson(res, 200, listWorkspaceNames());
       return;
     }
 

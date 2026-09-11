@@ -473,6 +473,13 @@ a {
   white-space: nowrap;
 }
 
+/* State chips can carry long reasons; wrap instead of overflowing narrow viewports. */
+.chip[class*="state-chip-"] {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
 /* EXACT — green: directly measured, deduplicated */
 .chip-exact {
   background: rgba(113, 216, 155, 0.09);

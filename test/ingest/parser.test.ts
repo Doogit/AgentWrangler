@@ -2,14 +2,23 @@
  * test/ingest/parser.test.ts — SEC-101 projection unit tests.
  */
 
+import * as crypto from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { isTestCommand, projectLine } from "../../src/ingest/parser.js";
-import { assistant, synthetic, systemCommand, userToolResult } from "./synth.js";
+import { assistant, synthetic, systemCommand, userCommand, userToolResult } from "./synth.js";
 
 const ctx = { defaultSessionId: "file-stem" };
 
 function line(obj: unknown): string {
   return JSON.stringify(obj);
+}
+
+function legacyCommandId(sessionId: string, ts: string, originalCommand: string): string {
+  return `cmd-${crypto
+    .createHash("sha1")
+    .update(`${sessionId}|${ts}|${originalCommand}`)
+    .digest("hex")
+    .slice(0, 20)}`;
 }
 
 describe("projectLine — turns", () => {
@@ -362,5 +371,79 @@ describe("projectLine — tolerance and structural extraction", () => {
     const r = projectLine(line(systemCommand({ session: "s", ts: "t", command: "/compact" })), ctx);
     if (r.kind !== "record") throw new Error("record");
     expect(r.command?.command).toBe("/compact");
+    expect(r.command?.eventId).toBe(legacyCommandId("s", "t", "/compact"));
+  });
+
+  it("classifies exact system markers for both accepted subtypes with legacy IDs", () => {
+    for (const subtype of ["local_command", "away_summary"] as const) {
+      for (const marker of ["/compact", "/clear"] as const) {
+        const r = projectLine(
+          line(systemCommand({ session: "sys", ts: "time", subtype, command: marker })),
+          ctx,
+        );
+        if (r.kind !== "record" || r.command === null) throw new Error("command record");
+        expect(r.command).toEqual({
+          sessionId: "sys",
+          ts: "time",
+          eventId: legacyCommandId("sys", "time", marker),
+          command: marker,
+        });
+      }
+    }
+  });
+
+  it("shares exact-marker identity with the bare-user producer without broadening it", () => {
+    for (const marker of ["/compact", "/clear"] as const) {
+      const r = projectLine(
+        line(userCommand({ session: "user", ts: "time", content: marker })),
+        ctx,
+      );
+      if (r.kind !== "record" || r.command === null) throw new Error("user command record");
+      expect(r.command).toEqual({
+        sessionId: "user",
+        ts: "time",
+        eventId: legacyCommandId("user", "time", marker),
+        command: marker,
+      });
+    }
+    for (const content of ["/compact note", " /compact", "/Compact", ["/compact"]]) {
+      const r = projectLine(line(userCommand({ session: "user", ts: "time", content })), ctx);
+      if (r.kind !== "record") throw new Error("record");
+      expect(r.command).toBeNull();
+    }
+  });
+
+  it("retains no unclassified command text while preserving its legacy identity", () => {
+    const variants = [
+      "/help",
+      "/deploy --token=SYNTHETIC_SECRET",
+      "/compact synthetic-note",
+      " /compact",
+      "/Compact",
+      "/compact\0suffix",
+      `/${"z".repeat(4096)}`,
+    ];
+    for (const source of variants) {
+      const r = projectLine(
+        line(systemCommand({ session: "privacy", ts: "same-time", command: source })),
+        ctx,
+      );
+      if (r.kind !== "record" || r.command === null) throw new Error("command record");
+      expect(r.command.command).toBeNull();
+      expect(r.command.eventId).toBe(legacyCommandId("privacy", "same-time", source));
+      expect(JSON.stringify(r.command)).not.toContain(source);
+    }
+  });
+
+  it("uses subtype identity for missing or non-string system commands", () => {
+    for (const command of [undefined, null, ["/compact"]]) {
+      const r = projectLine(
+        line(systemCommand({ session: "fallback", ts: "time", subtype: "away_summary", command })),
+        ctx,
+      );
+      if (r.kind !== "record" || r.command === null) throw new Error("command record");
+      expect(r.command.command).toBeNull();
+      expect(r.command.eventId).toBe(legacyCommandId("fallback", "time", "away_summary"));
+    }
   });
 });

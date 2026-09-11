@@ -43,7 +43,7 @@ describe("019 work-record migration", () => {
                 '2026-01-03T00:00:00Z', 1, 2, 1, 1, 100, 'EFFECTIVE');
     `);
 
-    expect(runMigrations(db)).toEqual(["019_work_records"]);
+    expect(runMigrations(db)).toEqual(["019_work_records", "020_local_command_retention"]);
     for (const table of TABLES) {
       expect(
         db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table),

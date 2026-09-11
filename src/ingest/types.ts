@@ -7,7 +7,7 @@
  */
 
 /** Parser projection version, stamped on every turn row (NFR-106 drift signal). */
-export const PARSER_VERSION = "ingest-2";
+export const PARSER_VERSION = "ingest-3";
 
 /** EF3 long-gap threshold in seconds; UI declares it in its tooltip. */
 export const LONG_GAP_THRESHOLD_S = 300;
@@ -68,8 +68,10 @@ export interface ToolResultProjection {
 export interface CommandProjection {
   sessionId: string;
   ts: string;
-  /** Structural command name, e.g. "/clear" or "/compact"; never free-form content. */
-  command: string;
+  /** Existing cmd- SHA-1 identity, derived before command text is discarded. */
+  eventId: string;
+  /** Exact retained marker, or null for an unclassified command. */
+  command: "/compact" | "/clear" | null;
 }
 
 /**

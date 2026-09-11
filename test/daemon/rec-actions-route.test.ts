@@ -76,7 +76,10 @@ const PROPOSED_REC_SQL = `
 
 beforeAll(async () => {
   db = createInMemoryFixtureDb();
-  server = createServer(db, 0, ".");
+  // null uiRoot (no-UI test mode, like the other route tests): a real path makes
+  // sirv crawl the whole tree at construction — "." from the repo root can
+  // exceed the 10 s hook timeout as .worktrees/ grows.
+  server = createServer(db, 0, null);
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       port = (server.address() as { port: number }).port;
