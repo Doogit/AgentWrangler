@@ -1,10 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReportedWorkSummary } from "../../src/query/api/reported-work";
 import { buildResponse } from "../../src/query/envelope";
 import {
   prepareCreateWorkRecord,
   prepareWorkRecordAction,
 } from "../../src/ui/api/work-records-client";
+import { WorkEvidence } from "../../src/ui/esf/WorkEvidence";
 import { WorkRecordControls } from "../../src/ui/esf/work-records/WorkRecordControls";
 import type { AllocationSummary, WorkRecordView } from "../../src/work-records/types";
 
@@ -90,12 +92,49 @@ let calls: Array<{ path: string; init: RequestInit; body: Record<string, unknown
 let failWrite: "network" | "conflict" | null;
 let issued: number;
 let frozen: AllocationSummary;
+let savedReports: Array<{
+  allocation_revision_id: string;
+  created_at: string;
+  cohort_from: string;
+  cohort_to: string;
+  allocated_session_count: number;
+  eligible_session_count: number;
+}>;
+let reportedSummary: ReportedWorkSummary;
 beforeEach(() => {
   rows = [];
   calls = [];
   failWrite = null;
   issued = 0;
   frozen = allocation();
+  savedReports = [
+    {
+      allocation_revision_id: "allocation-1",
+      created_at: from,
+      cohort_from: from,
+      cohort_to: to,
+      allocated_session_count: 0,
+      eligible_session_count: 1,
+    },
+  ];
+  reportedSummary = {
+    workspace_id: "ws",
+    as_of: to,
+    records_total: 0,
+    archived_count: 0,
+    reported: 0,
+    useful: 0,
+    reported_terminal: 0,
+    outcome_counts: {
+      ACTIVE: 0,
+      USEFUL: 0,
+      PARTIAL: 0,
+      UNSUCCESSFUL: 0,
+      ABANDONED: 0,
+      UNKNOWN: 0,
+      UNREPORTED: 0,
+    },
+  };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, init: RequestInit = {}) => {
@@ -104,6 +143,9 @@ beforeEach(() => {
       if (path === "/api/token") return response({ token: `token-${calls.length}` });
       if (path.endsWith("/ids"))
         return response(envelope({ id: `issued-${++issued}`, expires_at: to }));
+      if (path.startsWith("/api/work-records/summary")) return response(envelope(reportedSummary));
+      if (path.startsWith("/api/work-records/allocations?"))
+        return response(envelope(savedReports));
       if (init.method === "POST" || init.method === "DELETE") {
         if (failWrite === "network") {
           failWrite = null;
@@ -115,6 +157,17 @@ beforeEach(() => {
         }
         if (path.endsWith("/recompute")) {
           frozen.allocation_revision_id = String(body.allocation_revision_id);
+          savedReports = [
+            {
+              allocation_revision_id: frozen.allocation_revision_id,
+              created_at: to,
+              cohort_from: from,
+              cohort_to: to,
+              allocated_session_count: frozen.allocated_session_count,
+              eligible_session_count: frozen.eligible_session_count,
+            },
+            ...savedReports,
+          ];
           return response(envelope({ allocation: frozen, replayed: false }));
         }
         if (path.endsWith("/delete")) {
@@ -179,11 +232,11 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-const mount = (onMutationComplete: () => void = vi.fn()) =>
+const mount = (onMutationComplete: () => void = vi.fn(), sessionId?: string) =>
   render(
     <WorkRecordControls
       workspaceId="ws"
-      sessionId="session-1"
+      {...(sessionId === undefined ? {} : { sessionId })}
       from={from}
       to={to}
       onMutationComplete={onMutationComplete}
@@ -197,12 +250,67 @@ const writes = () =>
   );
 async function selectRecord() {
   rows = [record()];
-  mount();
+  mount(vi.fn(), "session-1");
   click(await screen.findByRole("button", { name: "record-1" }).then(() => "record-1"));
   await screen.findByRole("heading", { name: "Work record record-1" });
 }
 
 describe("standalone work-record controls", () => {
+  it("offers the same create path and benefit on every empty work-record surface", async () => {
+    render(<WorkEvidence workspaceId="ws" from={from} to={to} />);
+    const createButtons = await screen.findAllByRole("button", { name: "Create a work record" });
+    expect(createButtons).toHaveLength(2);
+    for (const button of createButtons)
+      expect(button.getAttribute("aria-controls")).toBe("work-record-create");
+    expect(screen.getAllByText("Report outcomes to see cost per useful task.")).toHaveLength(2);
+  });
+  it("creates and attaches the session in one action", async () => {
+    mount(vi.fn(), "session-1");
+    await screen.findByText("No local work records.");
+    click("Create and attach this session");
+    await screen.findByRole("heading", { name: "Work record issued-1" });
+    expect(writes()).toHaveLength(2);
+    expect(writes()[1]).toMatchObject({
+      path: "/api/work-records/issued-1/sessions",
+      body: { session_id: "session-1" },
+    });
+    expect(screen.getByRole("button", { name: "Detach session session-1" })).toBeTruthy();
+  });
+  it("shows terminal outcomes in one bar and keeps non-terminal states separate", async () => {
+    reportedSummary = {
+      ...reportedSummary,
+      records_total: 7,
+      reported: 6,
+      useful: 2,
+      reported_terminal: 4,
+      outcome_counts: {
+        ACTIVE: 1,
+        USEFUL: 2,
+        PARTIAL: 1,
+        UNSUCCESSFUL: 1,
+        ABANDONED: 0,
+        UNKNOWN: 1,
+        UNREPORTED: 1,
+      },
+    };
+    render(<WorkEvidence workspaceId="ws" from={from} to={to} />);
+    const bar = await screen.findByTestId("reported-work-outcome-bar");
+    expect(bar.getAttribute("aria-label")).toBe("4 reported terminal records");
+    expect(bar.textContent).toContain("USEFUL 2");
+    expect(bar.textContent).toContain("PARTIAL 1");
+    expect(bar.textContent).toContain("UNSUCCESSFUL 1");
+    expect(bar.textContent).toContain("ABANDONED 0");
+    expect(bar.textContent).not.toContain("UNKNOWN");
+    expect(bar.textContent).not.toContain("UNREPORTED");
+    expect(screen.getByText("UNKNOWN 1").className).not.toBe(
+      screen.getByText("UNSUCCESSFUL 1").className,
+    );
+    expect(screen.getByText("UNREPORTED 1").className).not.toBe(
+      screen.getByText("UNSUCCESSFUL 1").className,
+    );
+    expect(screen.getByText("Feedback coverage: 6 / 7 current records.")).toBeTruthy();
+    expect(bar.querySelector("ul")).toBeNull();
+  });
   it("uses fresh tokens for issuance and writes, retaining the exact create request on retry", async () => {
     mount();
     await screen.findByText("No local work records.");
@@ -309,9 +417,25 @@ describe("standalone work-record controls", () => {
       body: { confirm: true, expected_revision_no: 0 },
     });
   });
-  it("recomputes the selected cohort and reads the same frozen ID with separate qualifications", async () => {
+  it("lists saved reports without an ID entry and renders conservation figures", async () => {
     mount();
-    click("Recompute allocation");
+    expect(
+      await screen.findByText(
+        "a saved report freezes membership + pricing at a moment so later edits don't rewrite old claims.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "ID" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Created" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Window" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Coverage" })).toBeTruthy();
+    click("allocation-1");
+    await screen.findByRole("heading", { name: "Report allocation-1" });
+    expect(
+      screen.getByText(
+        /Conservation \(priced micro-USD\): 0 allocated \+ 12 unallocated = 12 total/,
+      ),
+    ).toBeTruthy();
+    click("Save a new report");
     await screen.findByRole("heading", { name: "Report issued-2" });
     expect(writes()[0]?.body).toMatchObject({
       workspace_id: "ws",
@@ -322,19 +446,13 @@ describe("standalone work-record controls", () => {
     expect(screen.getByText(/Feedback coverage: 0 \/ 1/)).toBeTruthy();
     expect(
       screen.getByText(/Useful work \(reported\): 0 \/ 0 terminal records/).textContent,
-    ).toContain("unknown (no reported terminal records)");
+    ).toContain("UNKNOWN (no reported terminal records)");
     expect(screen.getByText(/Terminal attempt cost \(priced micro-USD\): 0/)).toBeTruthy();
     expect(screen.getByText(/Allocation coverage \(sessions\): 0 \/ 1/)).toBeTruthy();
     expect(screen.getByText(/Pricing coverage: 1 priced turns; 2 unpriced/)).toBeTruthy();
     expect(screen.getByText(/Frozen pricing qualification/)).toBeTruthy();
     expect(screen.getByText("UNREPORTED: 1")).toBeTruthy();
     expect(screen.getByText("UNKNOWN: 0")).toBeTruthy();
-    click("Read frozen report");
-    await waitFor(() =>
-      expect(calls.some((call) => call.path === "/api/work-records/allocations/issued-2")).toBe(
-        true,
-      ),
-    );
     expect(writes()).toHaveLength(1);
     await screen.findByText(/Status: PARTIAL/);
   });
@@ -372,7 +490,7 @@ describe("standalone work-record controls", () => {
     ];
     frozen.terminal_attempt_priced_cost_u = 12;
     mount();
-    click("Recompute allocation");
+    click("Save a new report");
     await screen.findByRole("heading", { name: "Report issued-2" });
     expect(
       screen.getByText(/Useful work \(reported\): 1 \/ 2 terminal records/).textContent,
@@ -380,17 +498,15 @@ describe("standalone work-record controls", () => {
     expect(screen.getByText(/Feedback coverage: 3 \/ 4/)).toBeTruthy();
     expect(screen.getByText(/Terminal attempt cost \(priced micro-USD\): 12/)).toBeTruthy();
     expect(screen.getByText(/Cost per useful record/).textContent).toContain(
-      "unavailable (INCOMPLETE_COST_COVERAGE)",
+      "UNAVAILABLE (INCOMPLETE_COST_COVERAGE)",
     );
-    click("Read frozen report");
-    await screen.findByText(/Status: PARTIAL/);
     expect(screen.getByText(/Useful work \(reported\): 1 \/ 2 terminal records/)).toBeTruthy();
     expect(writes()).toHaveLength(1);
   });
   it("hides previous-scope evidence and distinguishes loading, unavailable and empty", async () => {
     const view = mount();
     await screen.findByText("No local work records.");
-    click("Recompute allocation");
+    click("Save a new report");
     await screen.findByRole("heading", { name: "Report issued-2" });
     vi.mocked(fetch).mockImplementation(async () => response(envelope(null)));
     view.rerender(<WorkRecordControls workspaceId="other" from={from} to={to} />);
@@ -407,7 +523,7 @@ describe("standalone work-record controls", () => {
   it("retries allocation with the same IDs, cohort and evidence timestamp", async () => {
     mount();
     failWrite = "network";
-    click("Recompute allocation");
+    click("Save a new report");
     await screen.findByRole("button", { name: "Retry same request" });
     click("Retry same request");
     await screen.findByRole("heading", { name: "Report issued-2" });
@@ -425,14 +541,21 @@ describe("standalone work-record controls", () => {
     expect(screen.queryByRole("button", { name: "Retry same request" })).toBeNull();
     expect(writes()).toHaveLength(1);
   });
-  it("rejects frozen readback from a different cohort", async () => {
+  it("rejects a listed saved report from a different cohort", async () => {
+    const savedReport = savedReports[0];
+    if (savedReport === undefined) throw new Error("saved report fixture missing");
+    savedReport.cohort_to = "2026-09-03T00:00:00.000Z";
     frozen.cohort_to = "2026-09-03T00:00:00.000Z";
     mount();
-    fireEvent.change(screen.getByLabelText("Frozen report ID"), {
-      target: { value: "allocation-1" },
-    });
-    click("Read frozen report");
+    click(await screen.findByRole("button", { name: "allocation-1" }).then(() => "allocation-1"));
     await screen.findByText(/Only reports matching this workspace and cohort/);
     expect(screen.queryByRole("heading", { name: "Report allocation-1" })).toBeNull();
+  });
+  it("does not mount saved cost reports for a session, while workspace evidence mounts them", async () => {
+    const sessionView = mount(vi.fn(), "session-1");
+    expect(screen.queryByRole("region", { name: "Saved cost reports" })).toBeNull();
+    sessionView.unmount();
+    mount();
+    expect(await screen.findByRole("region", { name: "Saved cost reports" })).toBeTruthy();
   });
 });

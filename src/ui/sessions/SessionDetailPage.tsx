@@ -255,12 +255,63 @@ interface ContextGrowthRow extends TurnRow {
   cache_write_total: number;
 }
 
+interface ContextTestObservation extends ContextGrowthRow {
+  observation_key: string;
+  observation_kind: "failure" | "pass";
+}
+
+const OBSERVED_TEST_EVENT_CAVEAT =
+  "Test outcomes are separate from task success or failure. 'Failed then passed' only means a later test pass was observed; it does not link the tests.";
+
 function contextGrowthRows(turns: TurnRow[]): ContextGrowthRow[] {
   return turns.map((turn, index) => ({
     ...turn,
     idx: index + 1,
     cache_write_total: turn.cache_write_5m + turn.cache_write_1h + turn.cache_write_other,
   }));
+}
+
+function observedCompletedTestEvents(
+  rows: ContextGrowthRow[],
+  kind: "failure" | "pass",
+): ContextTestObservation[] {
+  return rows.flatMap((row) => {
+    const count = (kind === "failure" ? row.test_fail_events : row.test_pass_events) ?? 0;
+    return count > 0
+      ? [{ ...row, observation_key: `${row.message_id}-${kind}`, observation_kind: kind }]
+      : [];
+  });
+}
+
+function ObservedTestEventGlyph({
+  cx,
+  cy,
+  payload,
+}: {
+  cx: number | undefined;
+  cy: number | undefined;
+  payload?: unknown;
+}) {
+  if (cx === undefined || cy === undefined || payload === undefined) return null;
+  const observation = payload as ContextTestObservation;
+  const points = `${cx},${cy - 4} ${cx + 4},${cy} ${cx},${cy + 4} ${cx - 4},${cy}`;
+  const failure = observation.observation_kind === "failure";
+  return (
+    <g
+      data-testid="timeline-observation-marker"
+      data-turn={observation.idx}
+      data-observation-kind={observation.observation_kind}
+      aria-label={`Observed completed-test ${failure ? "failure" : "pass"} at turn ${observation.idx}`}
+    >
+      <title>{OBSERVED_TEST_EVENT_CAVEAT}</title>
+      <polygon
+        points={points}
+        fill={failure ? "var(--text-muted)" : "var(--panel)"}
+        stroke="var(--text-muted)"
+        strokeWidth={1.5}
+      />
+    </g>
+  );
 }
 
 interface ContextGrowthTooltipProps {
@@ -301,10 +352,17 @@ export function ContextGrowthChart({
 
   const rows = contextGrowthRows(turns);
   const cacheWriteRows = rows.filter((row) => row.cache_write_total > 0);
+  const testFailureRows = observedCompletedTestEvents(rows, "failure");
+  const testPassRows = observedCompletedTestEvents(rows, "pass");
   const compactionNote = compactionCount > 0 ? ` · ${compactionCount} compaction(s)` : "";
 
   return (
-    <div className="card" data-testid="context-growth-chart" style={{ marginBottom: 13 }}>
+    <div
+      className="card"
+      id="session-context-chart"
+      data-testid="context-growth-chart"
+      style={{ marginBottom: 13 }}
+    >
       <div className="section-head">
         <h2>
           Context per turn{" "}
@@ -367,6 +425,26 @@ export function ContextGrowthChart({
               isAnimationActive={false}
             />
           )}
+          {testFailureRows.length > 0 && (
+            <Scatter
+              data={testFailureRows}
+              dataKey="context_tokens"
+              name="Observed completed-test failure"
+              fill="var(--text-muted)"
+              shape={ObservedTestEventGlyph}
+              isAnimationActive={false}
+            />
+          )}
+          {testPassRows.length > 0 && (
+            <Scatter
+              data={testPassRows}
+              dataKey="context_tokens"
+              name="Observed completed-test pass"
+              fill="var(--text-muted)"
+              shape={ObservedTestEventGlyph}
+              isAnimationActive={false}
+            />
+          )}
           <ReferenceLine
             y={160_000}
             stroke="var(--red)"
@@ -378,6 +456,12 @@ export function ContextGrowthChart({
       </ResponsiveContainer>
       <p className="kpi-fn" style={{ margin: "0 16px 12px" }}>
         {`Context for each turn · amber dots show a cache write · red line marks 80% of the 200K context window${compactionNote}`}
+        {(testFailureRows.length > 0 || testPassRows.length > 0) && (
+          <span data-testid="timeline-observation-legend">
+            {" · ◆ observed completed-test failure · ◇ observed completed-test pass — "}
+            observations, not task outcomes
+          </span>
+        )}
       </p>
     </div>
   );
@@ -674,7 +758,9 @@ export default function SessionDetailPage({
 
       <ContextGrowthChart turns={turns} compactionCount={session.compaction_count} />
 
-      <SessionObservedEvidence session={session} />
+      <div id="session-observed-evidence">
+        <SessionObservedEvidence session={session} />
+      </div>
 
       <div className="card session-timeline">
         <div className="section-head">

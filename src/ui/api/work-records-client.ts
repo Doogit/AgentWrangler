@@ -70,6 +70,18 @@ export const listWorkRecords = (workspaceId: string) =>
 export const getWorkRecord = (id: string) => request<WorkRecordView>(pathFor(id));
 export const getWorkAllocation = (id: string) =>
   request<AllocationSummary>(`${base}/allocations/${encodeURIComponent(id)}`);
+export interface SavedCostReport {
+  allocation_revision_id: string;
+  created_at: string;
+  cohort_from: string;
+  cohort_to: string;
+  allocated_session_count: number;
+  eligible_session_count: number;
+}
+export const listSavedCostReports = (workspaceId: string) =>
+  request<SavedCostReport[]>(
+    `${base}/allocations?${new URLSearchParams({ workspace_id: workspaceId })}`,
+  );
 export const issueWorkRecordId = (kind: OpaqueIdKind) =>
   request<IssuedOpaqueId>(`${base}/ids`, "POST", JSON.stringify({ kind }));
 

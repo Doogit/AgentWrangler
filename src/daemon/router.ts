@@ -213,6 +213,26 @@ function workRecordId(pathname: string): string | null {
   return match?.[1] === undefined ? null : decodeURIComponent(match[1]);
 }
 
+function listSavedCostReports(db: Db, workspaceId: string) {
+  return db
+    .prepare(`SELECT r.allocation_revision_id, r.created_at, r.cohort_from, r.cohort_to,
+      SUM(CASE WHEN a.disposition = 'OWNED' THEN 1 ELSE 0 END) AS allocated_session_count,
+      COUNT(a.session_id) AS eligible_session_count
+    FROM work_allocation_revisions r
+    LEFT JOIN work_session_allocations a ON a.allocation_revision_id = r.allocation_revision_id
+    WHERE r.workspace_id = ?
+    GROUP BY r.allocation_revision_id
+    ORDER BY r.created_at DESC, r.allocation_revision_id DESC`)
+    .all(workspaceId) as Array<{
+    allocation_revision_id: string;
+    created_at: string;
+    cohort_from: string;
+    cohort_to: string;
+    allocated_session_count: number;
+    eligible_session_count: number;
+  }>;
+}
+
 function workRecordAction(
   pathname: string,
 ): { recordId: string; action: string; relatedId?: string } | null {
@@ -384,6 +404,17 @@ export function handleApiRequest(
       }
       const records = listWorkRecords(_db, workspaceId, includeArchived === "true");
       sendJson(res, 200, workRecordResponse(records, { n: records.length, workspaceId }));
+      return;
+    }
+
+    if (method === "GET" && pathname === "/api/work-records/allocations") {
+      const workspaceId = new URLSearchParams(url.split("?")[1] ?? "").get("workspace_id");
+      if (workspaceId === null || workspaceId.length === 0) {
+        sendJson(res, 400, { error: "workspace_id is required" });
+        return;
+      }
+      const reports = listSavedCostReports(_db, workspaceId);
+      sendJson(res, 200, workRecordResponse(reports, { n: reports.length, workspaceId }));
       return;
     }
 

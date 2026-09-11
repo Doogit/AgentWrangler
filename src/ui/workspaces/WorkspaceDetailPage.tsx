@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import type { ContextComposition } from "../../query/api/context-composition";
 import type { CostPerSuccess } from "../../query/api/cost-per-success";
+import type { DeliveryMetrics } from "../../query/api/delivery";
 import type { ClosureProxy } from "../../query/api/effectiveness";
 import type { WorkspaceOutcomeSummary } from "../../query/api/outcomes";
 import type {
@@ -24,6 +25,7 @@ import {
   fetchClosureProxy,
   fetchContextComposition,
   fetchCostPerSuccess,
+  fetchWorkspaceDelivery,
   fetchWorkspaceOutcomes,
   fetchWorkspaceSessions,
   fetchWorkspaces,
@@ -118,6 +120,9 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
   const [costPerSuccessState, setCostPerSuccessState] = useState<LoadState<CostPerSuccess>>({
     status: "loading",
   });
+  const [deliveryState, setDeliveryState] = useState<LoadState<DeliveryMetrics>>({
+    status: "loading",
+  });
 
   useEffect(() => {
     let active = true;
@@ -127,6 +132,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
     setOutcomeState({ status: "loading" });
     setClosureProxyState({ status: "loading" });
     setCostPerSuccessState({ status: "loading" });
+    setDeliveryState({ status: "loading" });
     fetchWorkspaces({ preset })
       .then((v) => {
         if (!active) return;
@@ -147,12 +153,21 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
           .catch((e: unknown) => {
             if (active) setCostPerSuccessState({ status: "error", message: String(e) });
           });
+
+        Promise.resolve(fetchWorkspaceDelivery(workspaceId, selectedWindow))
+          .then((v) => {
+            if (active && v !== undefined) setDeliveryState({ status: "ok", value: v });
+          })
+          .catch((e: unknown) => {
+            if (active) setDeliveryState({ status: "error", message: String(e) });
+          });
       })
       .catch((e: unknown) => {
         if (active) {
           setWsListState({ status: "error", message: String(e) });
           setSessionsState({ status: "error", message: "Selected cohort unavailable" });
           setCostPerSuccessState({ status: "error", message: "Selected cohort unavailable" });
+          setDeliveryState({ status: "error", message: "Selected cohort unavailable" });
         }
       });
 
@@ -205,14 +220,11 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
   const outcomeData = outcomeState.status === "ok" ? outcomeState.value.data : null;
   const workspaceOutcome = outcomeData?.find((o) => o.workspace_id === workspaceId) ?? null;
   const outcomeRows = workspaceOutcome !== null ? [workspaceOutcome] : null;
-  const workspaceSpend = workspace
-    ? new Map([[workspaceId, workspace.usd_per_turn]])
-    : new Map<string, number | null>();
-
   const closureProxy = closureProxyState.status === "ok" ? closureProxyState.value.data : null;
 
   const costPerSuccess =
     costPerSuccessState.status === "ok" ? costPerSuccessState.value.data : null;
+  const delivery = deliveryState.status === "ok" ? deliveryState.value.data : null;
 
   return (
     <div>
@@ -453,7 +465,78 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
           />
         )}
         {outcomeState.status === "ok" && workspaceOutcome !== null && (
-          <WorkspaceOutcomeTable rows={outcomeRows} workspaceSpendById={workspaceSpend} />
+          <WorkspaceOutcomeTable rows={outcomeRows} />
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 13 }} data-testid="workspace-delivery-card">
+        <div className="section-head">
+          <h2>Observed delivery proxy</h2>
+          <div className="chips">
+            <Chip kind="OBS_PROXY" />
+          </div>
+        </div>
+        {deliveryState.status === "loading" && (
+          <div aria-busy="true" aria-label="Loading delivery metrics">
+            <SkeletonBlock />
+          </div>
+        )}
+        {deliveryState.status === "error" && (
+          <div className="banner banner-error" role="alert">
+            <span>Delivery metrics unavailable — {deliveryState.message}</span>
+          </div>
+        )}
+        {deliveryState.status === "ok" && delivery !== null && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: 10,
+              padding: "8px 16px 12px",
+            }}
+          >
+            <div className="kpi card">
+              <div className="kpi-label">Commit-session rate</div>
+              <div className="kpi-value">
+                {delivery.commit_session_rate === null
+                  ? "UNAVAILABLE"
+                  : `${(delivery.commit_session_rate * 100).toFixed(1)}%`}
+              </div>
+              <div className="kpi-subval">
+                {delivery.commit_session_count}/{delivery.total_session_count} sessions with an
+                observed commit
+              </div>
+            </div>
+            <div className="kpi card">
+              <div className="kpi-label">Spend per commit session</div>
+              <div className="kpi-value">
+                {delivery.spend_per_commit_session_u === null
+                  ? "UNAVAILABLE"
+                  : fmtUsd(delivery.spend_per_commit_session_u)}
+              </div>
+              <div className="kpi-subval">
+                {delivery.commit_session_count}/{delivery.total_session_count} commit-session
+                coverage
+              </div>
+            </div>
+            <div className="kpi card">
+              <div className="kpi-label">Bash/edit activity without an observed commit</div>
+              <div className="kpi-value">
+                {delivery.no_commit_activity_session_count}/{delivery.total_session_count}
+              </div>
+              <div className="kpi-subval">reconciled activity sessions</div>
+            </div>
+          </div>
+        )}
+        {deliveryState.status === "ok" && delivery === null && (
+          <div className="kpi-off" style={{ padding: "8px 16px 12px" }}>
+            UNAVAILABLE
+          </div>
+        )}
+        {deliveryState.status === "ok" && (
+          <p className="kpi-fn" style={{ margin: "0 16px 12px" }}>
+            {deliveryState.value.meta.qualification.note}
+          </p>
         )}
       </div>
 
@@ -534,8 +617,8 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                 <span>
                   {(closureProxy.no_later_workspace_session_share ??
                     closureProxy.resolved_share) !== null
-                    ? `${closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count} of ${(closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count) + (closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count)} reconciled no-commit sessions had no later workspace session within 48h (${Math.round((closureProxy.no_later_workspace_session_share ?? closureProxy.resolved_share ?? 0) * 100)}%)`
-                    : `${closureProxy.no_commit_session_count} no-commit sessions — all PENDING (48h window not elapsed)`}
+                    ? `${closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count}/${(closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count) + (closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count)} reconciled no-commit sessions had no later workspace session within 48h (${closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count} of ${(closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count) + (closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count)}; ${Math.round((closureProxy.no_later_workspace_session_share ?? closureProxy.resolved_share ?? 0) * 100)}%)`
+                    : `${closureProxy.no_commit_session_count}/${closureProxy.no_commit_session_count} no-commit sessions — all PENDING (48h window not elapsed)`}
                 </span>
               )}
             </div>
@@ -566,6 +649,32 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
               A later session can be unrelated work; burst-working operators can false-flag this
               observation. PENDING sessions are excluded from the observation denominator.
             </p>
+            <div
+              aria-label="48 hour follow-up composition"
+              data-testid="closure-follow-up-bar"
+              style={{ display: "flex", height: 8, marginTop: 8, overflow: "hidden" }}
+            >
+              <span
+                style={{
+                  background: "var(--accent)",
+                  flexGrow:
+                    closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count,
+                }}
+                title={`No later session: ${closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count}`}
+              />
+              <span
+                style={{
+                  background: "var(--amber)",
+                  flexGrow:
+                    closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count,
+                }}
+                title={`Later session: ${closureProxy.later_workspace_session_count ?? closureProxy.unresolved_count}`}
+              />
+              <span
+                style={{ background: "var(--muted)", flexGrow: closureProxy.pending_count }}
+                title={`PENDING: ${closureProxy.pending_count}`}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -663,6 +772,30 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
                   : "—"}
               </dd>
             </dl>
+            <div style={{ marginTop: 8 }} data-testid="r4a-coverage-bar">
+              <div
+                style={{ display: "flex", height: 8, overflow: "hidden" }}
+                aria-label="Linked-session coverage"
+              >
+                <span
+                  style={{
+                    background: "var(--accent)",
+                    flexGrow: costPerSuccess.linkage_coverage_pct ?? 0,
+                  }}
+                  title={`Linked-session coverage: ${costPerSuccess.linkage_coverage_pct ?? "UNAVAILABLE"}`}
+                />
+                <span
+                  style={{
+                    background: "var(--muted)",
+                    flexGrow: 100 - (costPerSuccess.linkage_coverage_pct ?? 0),
+                  }}
+                  title="unlinked spend excluded — survivorship"
+                />
+              </div>
+              <div className="kpi-subval" style={{ marginTop: 4 }}>
+                unlinked spend excluded — survivorship
+              </div>
+            </div>
             <p className="kpi-fn" style={{ marginTop: 8, marginBottom: 0 }}>
               {costPerSuccess.linkage_coverage_pct !== null
                 ? `Only ${Math.round(costPerSuccess.linkage_coverage_pct)}% of in-window sessions are linked to a PR — unlinked spend is excluded. `

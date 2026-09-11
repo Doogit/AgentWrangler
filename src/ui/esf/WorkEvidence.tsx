@@ -2,6 +2,15 @@ import { useEffect, useState } from "react";
 import type { ReportedWorkSummary } from "../../query/api/reported-work";
 import type { ApiResponse } from "../../query/envelope";
 import { WorkRecordControls } from "./work-records/WorkRecordControls";
+import "./work-records/work-records.css";
+
+const TERMINAL_OUTCOMES = ["USEFUL", "PARTIAL", "UNSUCCESSFUL", "ABANDONED"] as const;
+const OUTSIDE_TERMINAL_OUTCOMES = ["ACTIVE", "UNKNOWN", "UNREPORTED"] as const;
+
+function focusCreateForm(event: React.MouseEvent<HTMLButtonElement>) {
+  event.preventDefault();
+  document.getElementById("work-record-create")?.focus();
+}
 
 export function WorkEvidence({
   workspaceId,
@@ -89,7 +98,20 @@ function ReportedWork({ workspaceId, refresh }: { workspaceId: string | null; re
       {status === "ok" && data !== null && (
         <>
           {data.records_total === 0 ? (
-            <p>No current work records in this scope.</p>
+            <div className="work-record-empty">
+              <p>No current work records in this scope.</p>
+              <p>Report outcomes to see cost per useful task.</p>
+              {workspaceId !== null && (
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  aria-controls="work-record-create"
+                  onClick={focusCreateForm}
+                >
+                  Create a work record
+                </button>
+              )}
+            </div>
           ) : (
             <>
               <p>
@@ -101,6 +123,7 @@ function ReportedWork({ workspaceId, refresh }: { workspaceId: string | null; re
               <p>
                 Feedback coverage: {data.reported} / {data.records_total} current records.
               </p>
+              <OutcomeBar data={data} />
             </>
           )}
           <details>
@@ -110,13 +133,6 @@ function ReportedWork({ workspaceId, refresh }: { workspaceId: string | null; re
               are absent. Allocation coverage requires a frozen report for its named cohort; pricing
               coverage is shown with resource use.
             </p>
-            <ul>
-              {Object.entries(data.outcome_counts).map(([outcome, count]) => (
-                <li key={outcome}>
-                  {outcome}: {count}
-                </li>
-              ))}
-            </ul>
             <p>
               UNREPORTED means no feedback. UNKNOWN is explicitly reported. Activity does not
               determine either.
@@ -125,5 +141,44 @@ function ReportedWork({ workspaceId, refresh }: { workspaceId: string | null; re
         </>
       )}
     </section>
+  );
+}
+
+function OutcomeBar({ data }: { data: ReportedWorkSummary }) {
+  return (
+    <div className="work-outcome-summary" aria-label="Reported work outcomes">
+      <div
+        className="work-outcome-terminal-bar"
+        aria-label={`${data.reported_terminal} reported terminal records`}
+        data-testid="reported-work-outcome-bar"
+      >
+        {TERMINAL_OUTCOMES.map((outcome) => {
+          const count = data.outcome_counts[outcome];
+          return (
+            <span
+              key={outcome}
+              className={`work-outcome-segment work-outcome-${outcome.toLowerCase()}`}
+              style={{ flexGrow: count, flexBasis: 0 }}
+            >
+              {outcome} {count}
+            </span>
+          );
+        })}
+      </div>
+      <div className="work-outcome-outside" aria-label="Outcomes outside the terminal denominator">
+        {OUTSIDE_TERMINAL_OUTCOMES.map((outcome) => (
+          <span
+            key={outcome}
+            className={`work-outcome-segment work-outcome-${outcome.toLowerCase()}`}
+          >
+            {outcome} {data.outcome_counts[outcome]}
+          </span>
+        ))}
+      </div>
+      <p>
+        Terminal denominator: {data.reported_terminal} records (USEFUL, PARTIAL, UNSUCCESSFUL,
+        ABANDONED only). ACTIVE, UNKNOWN, and UNREPORTED are outside this denominator.
+      </p>
+    </div>
   );
 }

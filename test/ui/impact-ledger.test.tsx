@@ -163,8 +163,9 @@ describe("ImpactLedger — honesty rails", () => {
     entry.effect_cycle = makeEffectCycle({ state: "OPEN_MEASURING" });
     mockOk([entry]);
     const { container } = render(<ImpactLedger />);
-    await waitFor(() => expect(container.textContent ?? "").toContain("OPEN MEASURING"));
-    expect(container.textContent ?? "").toContain("Scheduled check: 2026-09-30");
+    await waitFor(() => expect(container.textContent ?? "").toContain("Measuring · day"));
+    expect(container.textContent ?? "").toContain("after-window sessions 0/3");
+    expect(container.textContent ?? "").toContain("Scheduled observation end: 2026-09-30");
     expect(container.textContent ?? "").not.toContain("Legacy target-metric result");
   });
 
@@ -238,12 +239,20 @@ describe("ImpactLedger — honesty rails", () => {
     });
     mockOk([entry]);
     const { container } = render(<ImpactLedger />);
-    await waitFor(() => expect(container.textContent ?? "").toContain("Follow-up: 80 tokens"));
-    expect(container.textContent ?? "").toContain("latency: adverse");
-    expect(container.textContent ?? "").toContain("cost: unsupported");
-    expect(container.textContent ?? "").toContain("quality: insufficient data");
-    expect(container.textContent ?? "").toContain("coverage: visibility unavailable");
-    expect(container.textContent ?? "").toContain("CONFOUNDED · ROLLBACK_IN_WINDOW");
+    await waitFor(() =>
+      expect(container.textContent ?? "").toContain(
+        "Follow-up evidence: observed aggregate value: 80 tokens",
+      ),
+    );
+    expect(container.textContent ?? "").toContain("Final evidence");
+    expect(container.textContent ?? "").toContain("latency: 100 ms → 100 ms ADVERSE");
+    expect(container.textContent ?? "").toContain("cost: UNAVAILABLE — guardrail is unsupported");
+    expect(container.textContent ?? "").toContain(
+      "quality: 100 score → 100 score INSUFFICIENT DATA",
+    );
+    expect(container.textContent ?? "").toContain("coverage: UNREPORTED");
+    expect(container.textContent ?? "").toContain("CONFOUNDED");
+    expect(container.textContent ?? "").toContain("ROLLBACK_IN_WINDOW");
     expect(container.textContent ?? "").toContain(
       "Rollback: USER_ATTESTED (2026-09-16) · Attribution: closed 2026-09-17",
     );
@@ -258,7 +267,7 @@ describe("ImpactLedger — honesty rails", () => {
     mockOk([entry]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() =>
-      expect(container.textContent ?? "").toContain("unsupported version (read-only)"),
+      expect(container.textContent ?? "").toContain("unsupported version; read-only"),
     );
     expect(container.textContent ?? "").not.toContain("Target direction");
   });

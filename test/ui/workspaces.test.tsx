@@ -74,19 +74,19 @@ describe("OutcomeSummaryCard", () => {
 // ---------------------------------------------------------------------------
 
 describe("WorkspaceOutcomeTable", () => {
-  it("shows EARLY ESTIMATE chip on table header", () => {
-    render(<WorkspaceOutcomeTable rows={[]} />);
-    expect(screen.getByRole("status", { name: "EARLY ESTIMATE" })).toBeTruthy();
-  });
-
   it("shows empty state banner when rows is null", () => {
     render(<WorkspaceOutcomeTable rows={null} />);
     // Should show empty-state message
     expect(screen.getByText(/No linked work items/i)).toBeTruthy();
   });
 
-  it("renders per-workspace rows", () => {
-    render(
+  it("shows empty state banner when rows is empty (ESFV-5 stat cards)", () => {
+    render(<WorkspaceOutcomeTable rows={[]} />);
+    expect(screen.getByText(/No linked work items/i)).toBeTruthy();
+  });
+
+  it("renders stat cards with denominators instead of a one-row table (ESFV-5)", () => {
+    const { container } = render(
       <WorkspaceOutcomeTable
         rows={[
           {
@@ -104,37 +104,38 @@ describe("WorkspaceOutcomeTable", () => {
         ]}
       />,
     );
-    expect(screen.getByText("MyProject")).toBeTruthy();
-    expect(screen.getByText("75.0%")).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Standard-model share" })).toBeTruthy();
-    expect(screen.getByText("80%")).toBeTruthy();
+    // No table with one data row remains (ESFV-5 acceptance).
+    expect(container.querySelector("table")).toBeNull();
+    const cards = screen.getByTestId("workspace-outcome-stat-cards");
+    expect(cards.textContent).toContain("75.0%");
+    // Denominator adjacency: every rate renders its n/N beside it.
+    expect(cards.textContent).toContain("3/4 terminal work items");
+    expect(cards.textContent).toContain("4/5");
+    expect(cards.textContent).toContain("1/5");
+    // Maturity qualification is preserved on the card set.
+    expect(screen.getByRole("status", { name: "EARLY ESTIMATE" })).toBeTruthy();
   });
 
-  it("formats 0, 100, mixed, and no-turn routing proxy scores as 0-100 values", () => {
-    const base = {
-      total_n: 0,
-      in_progress_n: 0,
-      terminal_n: 0,
-      success_n: 0,
-      failure_n: 0,
-      success_rate: null,
-      linkage_rate: null,
-    };
+  it("labels an unavailable success rate rather than rendering blank (ESFV-5)", () => {
     render(
       <WorkspaceOutcomeTable
         rows={[
-          { ...base, workspace_id: "ws-zero", project_slug: "Zero", adherence_score: 0 },
-          { ...base, workspace_id: "ws-full", project_slug: "Full", adherence_score: 100 },
-          { ...base, workspace_id: "ws-mixed", project_slug: "Mixed", adherence_score: 50 },
-          { ...base, workspace_id: "ws-empty", project_slug: "Empty", adherence_score: null },
+          {
+            workspace_id: "ws-zero",
+            project_slug: "Zero",
+            total_n: 0,
+            in_progress_n: 0,
+            terminal_n: 0,
+            success_n: 0,
+            failure_n: 0,
+            success_rate: null,
+            linkage_rate: null,
+            adherence_score: null,
+          },
         ]}
       />,
     );
-
-    expect(screen.getByText("0%")).toBeTruthy();
-    expect(screen.getByText("100%")).toBeTruthy();
-    expect(screen.getByText("50%")).toBeTruthy();
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("workspace-outcome-stat-cards").textContent).toContain("UNAVAILABLE");
   });
 });
 
@@ -226,6 +227,13 @@ describe("WorkspacesPage — RV1a spend table", () => {
     await waitFor(() => {
       expect(screen.getByText(/acme\/orbit-api/)).toBeTruthy();
     });
+    expect(screen.getByText("5/6")).toHaveProperty(
+      "title",
+      "Successful closed outcomes / all closed outcomes",
+    );
+    expect(screen.getAllByRole("status", { name: "UNAVAILABLE — not collected" })).not.toHaveLength(
+      0,
+    );
   });
 
   it("hides transient workspaces by default and shows them when toggled", async () => {

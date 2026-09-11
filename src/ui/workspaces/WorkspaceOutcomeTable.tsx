@@ -1,93 +1,79 @@
-/**
- * src/ui/workspaces/WorkspaceOutcomeTable.tsx — Per-workspace outcome table.
- *
- * Renders EXPERIMENTAL chip on the table header. Shows empty state when
- * no linked work items exist.
- */
+/** Workspace outcome stat cards with explicit observation coverage. */
 
+import type { ReactNode } from "react";
 import type { WorkspaceOutcomeSummary } from "../../query/api/outcomes";
 import Chip from "../shell/Chip";
 
 interface Props {
   rows: WorkspaceOutcomeSummary[] | null;
+  /** Retained for existing callers while the table presentation is removed. */
   workspaceSpendById?: ReadonlyMap<string, number | null>;
 }
 
-function fmtPct(v: number | null): string {
-  if (v === null) return "—";
-  return `${(v * 100).toFixed(1)}%`;
+function fmtPct(value: number | null): string {
+  return value === null ? "UNAVAILABLE" : `${(value * 100).toFixed(1)}%`;
 }
 
-function fmtScore(v: number | null): string {
-  if (v === null) return "\u2014";
-  return `${v.toFixed(0)}%`;
-}
-
-function fmtUsdPerTurn(v: number | null | undefined): string {
-  if (v == null) return "\u2014";
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(v);
-}
-
-export default function WorkspaceOutcomeTable({ rows, workspaceSpendById }: Props) {
+function StatCard({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="card" style={{ marginBottom: 13 }}>
-      <div className="section-head">
-        <h2>Workspace outcomes</h2>
-        <div className="chips">
-          <Chip kind="EXPERIMENTAL" />
-        </div>
-      </div>
+    <div
+      style={{
+        minWidth: 0,
+        padding: 12,
+        border: "1px solid var(--line)",
+        borderRadius: 6,
+        background: "var(--panel2)",
+      }}
+    >
+      <div className="kpi-label">{label}</div>
+      {children}
+    </div>
+  );
+}
 
-      {rows === null || rows.length === 0 ? (
-        <div className="banner banner-info">
-          <span>
-            No linked work items. Map a repository in Settings and configure a GitHub token to
-            enable outcome linkage.
-          </span>
+export default function WorkspaceOutcomeTable({ rows }: Props) {
+  const row = rows?.[0] ?? null;
+
+  if (row === null) {
+    return (
+      <div className="banner banner-info">
+        No linked work items. Map a repository in Settings and configure a GitHub token to enable
+        outcome linkage.
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-testid="workspace-outcome-stat-cards"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+        gap: 10,
+      }}
+    >
+      <StatCard label="Successful outcome">
+        <div className="kpi-value">{fmtPct(row.success_rate)}</div>
+        <div className="kpi-subval">
+          {row.success_n}/{row.terminal_n} terminal work items
         </div>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Workspace</th>
-                <th>Est. value / turn</th>
-                <th title="100 minus premium-model (Opus/Fable) share across non-sidechain, non-provisional turns">
-                  Standard-model share
-                </th>
-                <th>Pull requests</th>
-                <th>Open</th>
-                <th>Successful outcome</th>
-                <th>Needs follow-up</th>
-                <th>Successful-outcome signal</th>
-                <th title="Completed sessions with at least one Bash tool event are eligible.">
-                  Eligible sessions linked
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.workspace_id}>
-                  <td>{row.project_slug}</td>
-                  <td>{fmtUsdPerTurn(workspaceSpendById?.get(row.workspace_id))}</td>
-                  <td>{fmtScore(row.adherence_score)}</td>
-                  <td>{row.total_n}</td>
-                  <td>{row.in_progress_n}</td>
-                  <td>{row.success_n}</td>
-                  <td>{row.failure_n}</td>
-                  <td>{fmtPct(row.success_rate)}</td>
-                  <td>{fmtPct(row.linkage_rate)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      </StatCard>
+      <StatCard label="Terminal linked work">
+        <div className="kpi-value">
+          {row.terminal_n}/{row.total_n}
         </div>
-      )}
+        <div className="kpi-subval">terminal linked work items</div>
+      </StatCard>
+      <StatCard label="Open linked work">
+        <div className="kpi-value">
+          {row.in_progress_n}/{row.total_n}
+        </div>
+        <div className="kpi-subval">OPEN/UNREPORTED linked work items</div>
+      </StatCard>
+      <div style={{ gridColumn: "1 / -1", color: "var(--text-muted)", fontSize: 11 }}>
+        Linked work items are early observed signals; outcome methodology remains under validation.{" "}
+        <Chip kind="EXPERIMENTAL" />
+      </div>
     </div>
   );
 }

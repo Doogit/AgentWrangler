@@ -69,8 +69,8 @@ function contextData(residualShare: number): ContextComposition {
 }
 
 describe("workspaces below-the-line UI", () => {
-  it("joins per-workspace spend into the outcome table", () => {
-    render(
+  it("accepts the spend map without rendering a table (ESFV-5 stat cards)", () => {
+    const { container } = render(
       <WorkspaceOutcomeTable
         rows={outcomeRows}
         workspaceSpendById={
@@ -82,9 +82,10 @@ describe("workspaces below-the-line UI", () => {
       />,
     );
 
-    expect(screen.getByRole("columnheader", { name: "Est. value / turn" })).toBeTruthy();
-    expect(screen.getByText("$0.04")).toBeTruthy();
-    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    // ESFV-5 replaced the nine-column table with stat cards; per-workspace
+    // spend stays on the Workspaces list (RV1a spend table).
+    expect(container.querySelector("table")).toBeNull();
+    expect(screen.getByTestId("workspace-outcome-stat-cards")).toBeTruthy();
   });
 
   it("shows in-segment percentages for shares wider than 20%", () => {

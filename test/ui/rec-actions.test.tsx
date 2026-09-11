@@ -511,7 +511,11 @@ describe("RecCard — ESF2 lifecycle evidence and controls", () => {
     );
     expect(view.getByText(/read-only/)).toBeDefined();
     fireEvent.click(view.getByRole("button", { name: "Load more history" }));
-    await waitFor(() => expect(view.getByText(/Cycle 1: STOPPED/)).toBeDefined());
+    // ESFV-6: fetched prior cycles appear as timeline chips; selecting one
+    // renders that frozen cycle in the verdict lanes.
+    await waitFor(() => expect(view.getByRole("button", { name: /#1 STOPPED/ })).toBeDefined());
+    fireEvent.click(view.getByRole("button", { name: /#1 STOPPED/ }));
+    expect(view.getByText(/Cycle 1: STOPPED/)).toBeDefined();
   });
 
   it("retries a failed history read and reuses a lifecycle retry key", async () => {
@@ -1092,7 +1096,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     );
     reopened.unmount();
     const ledgerView = render(<ImpactLedger />);
-    await waitFor(() => expect(ledgerView.container.textContent).toContain("OPEN MEASURING"));
+    await waitFor(() => expect(ledgerView.container.textContent).toContain("Measuring · day"));
     expect(ledgerView.container.textContent).toContain("2026-09-30");
   });
 

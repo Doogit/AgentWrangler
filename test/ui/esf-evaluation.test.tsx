@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ObservationBundle } from "../../src/effects/types";
 import type { RecommendationCard } from "../../src/query/api/recommendations";
 import EffectEvidence from "../../src/ui/recommendations/EffectEvidence";
@@ -50,16 +51,21 @@ describe("ESF4 evaluation disclosures", () => {
     expect(screen.queryByRole("heading", { name: "Recommendation details" })).toBeNull();
   });
 
-  it("keeps a named evaluation route available before a cycle exists", () => {
+  it("shows one pre-track summary before its expandable qualifications", () => {
     render(<RecCard rec={rec()} />);
     fireEvent.click(screen.getByRole("button", { name: "Evaluation" }));
     const evaluation = screen.getByRole("region", { name: "Evaluation" });
+    expect(evaluation.querySelector("p")?.textContent).toBe(
+      "Not measured yet — confirm a completed change to start measurement",
+    );
+    expect(evaluation.querySelector("details")?.open).toBe(false);
+    expect(evaluation.textContent).not.toContain("unavailable until");
+
+    fireEvent.click(screen.getByText("Evaluation details"));
     expect(evaluation.textContent).toContain("Target: context_tokens");
-    expect(evaluation.textContent).toContain("Quality and repair guardrails are unavailable");
-    expect(evaluation.textContent).toContain("Comparability is unavailable");
-    expect(evaluation.textContent).toContain("Stop measurement");
-    expect(evaluation.textContent).toContain("Rollback");
-    expect(evaluation.textContent).toContain("Retrack");
+    expect(evaluation.textContent).toContain(
+      "Quality and repair guardrails need that cycle to record their typed definitions",
+    );
   });
 
   it("focuses Evaluation and restores its launcher after Escape or Back", () => {
@@ -194,7 +200,10 @@ describe("ESF4 evaluation disclosures", () => {
       ],
     };
     const cycle = makeEffectCycle({
-      provisionalEvidence: evidence,
+      state: "FINALIZED",
+      finalEvidence: evidence,
+      targetDirection: "IMPROVED",
+      comparisonStatus: "COMPARABLE",
       guardrailDefinitions: [
         {
           guardrailId: "reported-useful-completion-repair",
@@ -214,15 +223,12 @@ describe("ESF4 evaluation disclosures", () => {
     expect(text).toContain("Distinct sessions: 9. Exposures: 10.");
     expect(text).toContain("sonnet: 6 / 20 turns (30%)");
     expect(text).toContain("sonnet: 11 / 20 turns (55%)");
-    expect(text).toContain(
-      "reported-useful-completion-repair: baseline value: 2 completion. Denominator: 10. Follow-up value: 5 completion. Denominator: 10.",
+    const guardrails = screen.getByLabelText("Guardrail verdict").textContent ?? "";
+    expect(guardrails).toContain(
+      "reported-useful-completion-repair: 2 completion → 5 completion ADVERSE",
     );
-    expect(text).toContain(
-      "native-token-repair: baseline value: 30 tokens. Denominator: 30. Follow-up value: 30 tokens. Denominator: 30.",
-    );
-    expect(text).not.toContain("native-token-repair: baseline 30 / 30");
-    expect(text).toContain("SYNTHETIC_SUPPLIED_GUARDRAIL_SEAM");
-    expect(screen.getByText(/reported-useful-completion-repair: adverse/i)).toBeTruthy();
+    expect(guardrails).toContain("native-token-repair: 30 tokens → 30 tokens STABLE");
+    expect(guardrails).toContain("SYNTHETIC_SUPPLIED_GUARDRAIL_SEAM");
     result.unmount();
 
     render(
@@ -237,5 +243,188 @@ describe("ESF4 evaluation disclosures", () => {
       />,
     );
     expect(screen.getAllByText(/Distinct sessions: 1\. Exposures: 10\./)).toHaveLength(2);
+  });
+
+  it("shows open-cycle day and after-window gate progress rather than hiding maturity", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-11T00:00:00.000Z"));
+    const cycle = makeEffectCycle({
+      provisionalEvidence: {
+        metricId: "target",
+        methodVersion: "esf-1",
+        queryDefinitionVersion: "esf-1",
+        scopeFingerprint: "opaque",
+        parserVersions: [],
+        parserMix: {
+          before: { available: false, total: 0, counts: {} },
+          after: { available: false, total: 0, counts: {} },
+        },
+        before: { value: 100, denominator: 10, exposureN: 10, sessionN: 3, excluded: {} },
+        after: { value: 80, denominator: 10, exposureN: 10, sessionN: 2, excluded: {} },
+        modelMix: {
+          before: { available: false, total: 0, counts: {} },
+          after: { available: false, total: 0, counts: {} },
+        },
+        toolMix: {
+          before: { available: false, total: 0, counts: {} },
+          after: { available: false, total: 0, counts: {} },
+        },
+        taskMix: {
+          before: { available: false, total: 0, counts: {} },
+          after: { available: false, total: 0, counts: {} },
+        },
+        guardrails: [],
+      },
+    });
+    render(<EffectEvidence cycle={cycle} />);
+    expect(screen.getByTestId("effect-evidence").textContent).toContain(
+      "Measuring · day 10 of 29 · after-window sessions 2/3",
+    );
+    expect(screen.getByText("PENDING — 2 of 3 gate")).toBeTruthy();
+    vi.useRealTimers();
+  });
+
+  it("renders terminal target, every guardrail movement, and comparability without a net-effect success badge", () => {
+    const unavailableMix = { available: false, total: 0, counts: {} };
+    const finalEvidence: ObservationBundle = {
+      metricId: "low-cost-repair",
+      methodVersion: "esf-1",
+      queryDefinitionVersion: "esf-1",
+      scopeFingerprint: "opaque",
+      parserVersions: [],
+      parserMix: { before: unavailableMix, after: unavailableMix },
+      before: { value: 100, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      after: { value: 80, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      modelMix: { before: unavailableMix, after: unavailableMix },
+      toolMix: { before: unavailableMix, after: unavailableMix },
+      taskMix: { before: unavailableMix, after: unavailableMix },
+      guardrails: [
+        {
+          guardrailId: "repair-quality",
+          methodVersion: "esf-1",
+          availability: "SUPPORTED",
+          unit: "score",
+          before: { value: 9, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+          after: { value: 5, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+          direction: "ADVERSE",
+          reasonCodes: ["QUALITY_DECLINED"],
+          evidence: {},
+        },
+        {
+          guardrailId: "latency",
+          methodVersion: "esf-1",
+          availability: "SUPPORTED",
+          unit: "ms",
+          before: { value: 30, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+          after: { value: 32, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+          direction: "STABLE",
+          reasonCodes: [],
+          evidence: {},
+        },
+      ],
+    };
+    const cycle = makeEffectCycle({
+      state: "FINALIZED",
+      finalEvidence,
+      targetDirection: "IMPROVED",
+      comparisonStatus: "CONFOUNDED",
+      comparisonReasons: ["OVERLAPPING_INTERVENTION"],
+      guardrailDefinitions: [
+        { guardrailId: "repair-quality", methodVersion: "esf-1", unit: "score" },
+        { guardrailId: "latency", methodVersion: "esf-1", unit: "ms" },
+      ],
+    });
+    const { container } = render(<EffectEvidence cycle={cycle} />);
+
+    expect(screen.getByText("Final evidence")).toBeTruthy();
+    expect(screen.getByLabelText("Target verdict").textContent).toContain("IMPROVED · dot -20%");
+    expect(screen.getByLabelText("Target verdict").textContent).toContain(
+      "material-change band -5% to +5%",
+    );
+    expect(screen.getByLabelText("Guardrail verdict").textContent).toContain(
+      "repair-quality: 9 score → 5 score ADVERSE",
+    );
+    expect(screen.getByLabelText("Guardrail verdict").textContent).toContain(
+      "latency: 30 ms → 32 ms STABLE",
+    );
+    expect(screen.getByLabelText("Comparability verdict").textContent).toContain("CONFOUNDED");
+    expect(screen.getByLabelText("Comparability verdict").textContent).toContain(
+      "OVERLAPPING_INTERVENTION",
+    );
+    expect(container.querySelector(".effect-target-strip-blocked")).not.toBeNull();
+    expect(container.querySelector(".effect-target-lane .chip-exact")).toBeNull();
+    expect(container.textContent).not.toContain("net effect");
+  });
+
+  it("selects immutable fetched cycles and appends the next cursor page without aggregating them", () => {
+    const unavailableMix = { available: false, total: 0, counts: {} };
+    const frozenEvidence = (afterValue: number): ObservationBundle => ({
+      metricId: "aggregate-metric",
+      methodVersion: "frozen-method",
+      queryDefinitionVersion: "frozen-query",
+      scopeFingerprint: "opaque",
+      parserVersions: [],
+      parserMix: { before: unavailableMix, after: unavailableMix },
+      before: { value: 100, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      after: { value: afterValue, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      modelMix: { before: unavailableMix, after: unavailableMix },
+      toolMix: { before: unavailableMix, after: unavailableMix },
+      taskMix: { before: unavailableMix, after: unavailableMix },
+      guardrails: [],
+    });
+    const latest = makeEffectCycle({
+      cycleId: "cycle-3",
+      cycleNo: 3,
+      contractVersion: "esf-effect-3",
+      state: "FINALIZED",
+      finalEvidence: frozenEvidence(70),
+      targetDirection: "IMPROVED",
+      comparisonStatus: "COMPARABLE",
+    });
+    const second = makeEffectCycle({
+      cycleId: "cycle-2",
+      cycleNo: 2,
+      contractVersion: "esf-effect-2",
+      state: "STOPPED",
+      finalEvidence: frozenEvidence(90),
+      targetDirection: "WORSENED",
+      comparisonStatus: "CONFOUNDED",
+    });
+    const first = makeEffectCycle({
+      cycleId: "cycle-1",
+      cycleNo: 1,
+      contractVersion: "esf-effect-1",
+      state: "FINALIZED",
+      finalEvidence: frozenEvidence(80),
+      targetDirection: "IMPROVED",
+      comparisonStatus: "COMPARABLE",
+    });
+
+    function HistoryHarness() {
+      const [cycles, setCycles] = useState([latest, second]);
+      return (
+        <EffectEvidence
+          cycle={latest}
+          cycles={cycles}
+          nextCycleCursor={cycles.length === 2 ? "older-cycles" : null}
+          onLoadMore={() => setCycles((current) => [...current, first])}
+        />
+      );
+    }
+
+    render(<HistoryHarness />);
+    expect(screen.getByRole("button", { name: /#3 FINALIZED.*target improved/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /#2 STOPPED.*target worsened/i })).toBeTruthy();
+    expect(screen.getByText("esf-effect-3")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /#2 STOPPED.*target worsened/i }));
+    expect(screen.getByText("esf-effect-2")).toBeTruthy();
+    expect(
+      screen.getByText(/Follow-up evidence: observed aggregate value: 90 tokens\./),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more cycles" }));
+    expect(screen.getByRole("button", { name: /#1 FINALIZED.*target improved/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more cycles" })).toBeNull();
   });
 });

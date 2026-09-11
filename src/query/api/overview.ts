@@ -261,6 +261,13 @@ export interface TurnRow {
   cost_claim: string;
   provisional: boolean;
   effort: string | null;
+  /**
+   * Observed completed-test events owned by this turn (metadata counts only,
+   * per the esf-observed-test-recovery-1 predicate: is_test_command with a
+   * recorded result). Optional so pre-existing fixtures remain valid.
+   */
+  test_fail_events?: number;
+  test_pass_events?: number;
 }
 
 /** Paginated list wrapper. */
@@ -1034,7 +1041,17 @@ export function getTurnTimeline(
       `SELECT message_id, session_id, ts, model, is_sidechain,
               input_tokens, output_tokens, thinking_tokens, cache_read_tokens,
               cache_write_5m, cache_write_1h, cache_write_other,
-              context_tokens, cost_equiv_u, cost_claim, provisional, effort
+              context_tokens, cost_equiv_u, cost_claim, provisional, effort,
+              (SELECT COUNT(*) FROM tool_events te
+                 JOIN tool_event_metadata tem ON tem.event_id = te.event_id
+                WHERE tem.owner_message_id = turns.message_id
+                  AND tem.is_test_command = 1 AND te.result_bytes IS NOT NULL
+                  AND te.exit_class = 'TEST_FAIL') AS test_fail_events,
+              (SELECT COUNT(*) FROM tool_events te
+                 JOIN tool_event_metadata tem ON tem.event_id = te.event_id
+                WHERE tem.owner_message_id = turns.message_id
+                  AND tem.is_test_command = 1 AND te.result_bytes IS NOT NULL
+                  AND te.exit_class = 'OK') AS test_pass_events
          FROM turns
         WHERE session_id = ?
         ORDER BY ts ASC, message_id ASC
@@ -1058,6 +1075,8 @@ export function getTurnTimeline(
     cost_claim: string;
     provisional: number;
     effort: string | null;
+    test_fail_events: number;
+    test_pass_events: number;
   }>;
 
   const items: TurnRow[] = rows.map((r) => ({
@@ -1078,6 +1097,8 @@ export function getTurnTimeline(
     cost_claim: r.cost_claim,
     provisional: r.provisional !== 0,
     effort: r.effort,
+    test_fail_events: r.test_fail_events,
+    test_pass_events: r.test_pass_events,
   }));
 
   return makeResponse<PagedList<TurnRow>>(

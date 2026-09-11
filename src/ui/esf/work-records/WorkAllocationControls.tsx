@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { AllocationSummary } from "../../../work-records/types";
-import type { WorkResponse } from "../../api/work-records-client";
-import { getWorkAllocation, prepareWorkAllocation } from "../../api/work-records-client";
+import {
+  type SavedCostReport,
+  type WorkResponse,
+  getWorkAllocation,
+  listSavedCostReports,
+  prepareWorkAllocation,
+} from "../../api/work-records-client";
 import { errorMessage, useWorkOperation } from "./operations";
 
 export interface WorkAllocationControlsProps {
@@ -22,9 +27,11 @@ function AllocationScope({
   onMutationComplete,
 }: WorkAllocationControlsProps) {
   const [report, setReport] = useState<WorkResponse<AllocationSummary> | null>(null);
-  const [readId, setReadId] = useState("");
+  const [savedReports, setSavedReports] = useState<SavedCostReport[] | null>(null);
   const [readError, setReadError] = useState<unknown>(null);
   const [reading, setReading] = useState(false);
+  const [listError, setListError] = useState<unknown>(null);
+  const [listRefresh, setListRefresh] = useState(0);
   const generation = useRef(0);
   useEffect(
     () => () => {
@@ -40,12 +47,12 @@ function AllocationScope({
     Number.isFinite(Date.parse(to)) &&
     Date.parse(from) < Date.parse(to) &&
     Date.parse(to) <= Date.now();
-  async function read() {
+  async function read(id: string) {
     const requestGeneration = ++generation.current;
     setReading(true);
     setReadError(null);
     try {
-      const result = await getWorkAllocation(readId.trim());
+      const result = await getWorkAllocation(id);
       if (
         result.data.workspace_id !== workspaceId ||
         Date.parse(result.data.cohort_from) !== Date.parse(from) ||
@@ -62,12 +69,25 @@ function AllocationScope({
       if (requestGeneration === generation.current) setReading(false);
     }
   }
+  function refreshSavedReports() {
+    setListRefresh((value) => value + 1);
+  }
+  useEffect(() => {
+    void listRefresh;
+    setListError(null);
+    void listSavedCostReports(workspaceId)
+      .then((result) => setSavedReports(result.data))
+      .catch((error: unknown) => {
+        setSavedReports(null);
+        setListError(error);
+      });
+  }, [workspaceId, listRefresh]);
   return (
-    <section className="work-record-allocation" aria-label="Work allocation">
-      <h4>Frozen work allocation</h4>
+    <section className="work-record-allocation" aria-label="Saved cost reports">
+      <h4>Saved cost reports</h4>
       <p>
-        Workspace {workspaceId} · [{from}, {to}). Recompute explicitly to capture current evidence;
-        saved reports do not follow later membership or pricing changes.
+        a saved report freezes membership + pricing at a moment so later edits don't rewrite old
+        claims.
       </p>
       {!validWindow && <p>Allocation unavailable: choose a valid completed half-open cohort.</p>}
       <button
@@ -84,36 +104,57 @@ function AllocationScope({
             ),
             (result) => {
               setReport({ ...result, data: result.data.allocation });
-              setReadId(result.data.allocation.allocation_revision_id);
+              refreshSavedReports();
             },
           );
         }}
       >
-        Recompute allocation
+        Save a new report
       </button>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          void read();
-        }}
-      >
-        <label>
-          Frozen report ID
-          <input
-            value={readId}
-            onChange={(event) => setReadId(event.target.value)}
-            disabled={reading || operation.locked}
-          />
-        </label>
-        <button
-          className="btn-secondary"
-          type="submit"
-          disabled={!readId.trim() || reading || operation.locked}
-        >
-          Read frozen report
-        </button>
-      </form>
-      {operation.busy && <output>Recomputing allocation…</output>}
+      {savedReports !== null && (
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Created</th>
+              <th>Window</th>
+              <th>Coverage</th>
+            </tr>
+          </thead>
+          <tbody>
+            {savedReports.map((savedReport) => (
+              <tr key={savedReport.allocation_revision_id}>
+                <td>
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    disabled={reading || operation.locked}
+                    onClick={() => void read(savedReport.allocation_revision_id)}
+                  >
+                    {savedReport.allocation_revision_id}
+                  </button>
+                </td>
+                <td>{savedReport.created_at}</td>
+                <td>
+                  [{savedReport.cohort_from}, {savedReport.cohort_to})
+                </td>
+                <td>
+                  {savedReport.allocated_session_count} / {savedReport.eligible_session_count}
+                </td>
+              </tr>
+            ))}
+            {savedReports.length === 0 && (
+              <tr>
+                <td colSpan={4}>No saved cost reports.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      )}
+      {listError !== null && (
+        <p role="alert">{errorMessage(listError)} Saved reports are UNAVAILABLE.</p>
+      )}
+      {operation.busy && <output>Saving new report…</output>}
       {operation.notice}
       {reading && <output>Loading frozen report…</output>}
       {readError !== null && (
@@ -125,14 +166,14 @@ function AllocationScope({
             className="btn-secondary"
             type="button"
             disabled={reading}
-            onClick={() => void read()}
+            onClick={() => refreshSavedReports()}
           >
-            Retry frozen report
+            Refresh saved reports
           </button>
         </div>
       )}
       {report === null && !reading && readError === null && (
-        <p>No frozen report selected. Coverage is unknown until a report is computed or read.</p>
+        <p>No saved report selected. Coverage is UNKNOWN until a report is saved or read.</p>
       )}
       {report !== null && !reading && <WorkAllocationReport report={report} />}
     </section>
@@ -155,18 +196,18 @@ export function WorkAllocationReport({ report }: { report: WorkResponse<Allocati
       </p>
       <p>
         Feedback coverage: {data.feedback_coverage.numerator} / {data.feedback_coverage.denominator}
-        {data.feedback_coverage.value === null && " · unknown (no eligible denominator)"}. Terminal
+        {data.feedback_coverage.value === null && " · UNKNOWN (no eligible denominator)"}. Terminal
         reported records: {data.reported_terminal_records}.
       </p>
       <p>
         Allocation coverage (sessions): {data.allocation_session_coverage.numerator} /{" "}
         {data.allocation_session_coverage.denominator}
-        {data.allocation_session_coverage.value === null && " · unknown (no eligible denominator)"}.
+        {data.allocation_session_coverage.value === null && " · UNKNOWN (no eligible denominator)"}.
       </p>
       <p>
         Allocation coverage (priced cost, micro-USD): {data.allocation_cost_coverage.numerator_u} /{" "}
         {data.allocation_cost_coverage.denominator_u}
-        {data.allocation_cost_coverage.value === null && " · unknown (no priced denominator)"}.
+        {data.allocation_cost_coverage.value === null && " · UNKNOWN (no priced denominator)"}.
       </p>
       <p>
         Pricing coverage: {data.priced_turn_count} priced turns; {data.unpriced_turn_count} unpriced
@@ -175,6 +216,10 @@ export function WorkAllocationReport({ report }: { report: WorkResponse<Allocati
       <p>
         Priced cost (micro-USD): {data.eligible_priced_cost_u} eligible;{" "}
         {data.allocated_priced_cost_u} allocated; {data.unallocated_priced_cost_u} unallocated.
+      </p>
+      <p>
+        Conservation (priced micro-USD): {data.allocated_priced_cost_u} allocated +{" "}
+        {data.unallocated_priced_cost_u} unallocated = {data.eligible_priced_cost_u} total.
       </p>
       <p>
         Unallocated sessions: {data.unallocated_ungrouped_count} ungrouped;{" "}
@@ -192,7 +237,7 @@ export function WorkAllocationReport({ report }: { report: WorkResponse<Allocati
         Useful work (reported): {data.useful_work_rate.numerator} /{" "}
         {data.useful_work_rate.denominator} terminal records ·{" "}
         {data.useful_work_rate.value === null
-          ? "unknown (no reported terminal records)"
+          ? "UNKNOWN (no reported terminal records)"
           : `${(data.useful_work_rate.value * 100).toLocaleString("en-US", { maximumFractionDigits: 1 })}%`}
         . Only USEFUL, PARTIAL, UNSUCCESSFUL and ABANDONED enter this denominator. This is reported
         feedback, not an agent success rate.
@@ -205,7 +250,7 @@ export function WorkAllocationReport({ report }: { report: WorkResponse<Allocati
       <p>
         Cost per useful record (priced micro-USD):{" "}
         {data.cost_per_useful_u ??
-          `unavailable (${data.cost_per_useful_unavailable_reason ?? "unknown"})`}
+          `UNAVAILABLE (${data.cost_per_useful_unavailable_reason ?? "UNKNOWN"})`}
         .
       </p>
       <p>
