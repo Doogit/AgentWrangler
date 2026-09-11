@@ -442,5 +442,25 @@ describe("ESF3 work-record routes", () => {
       data: { allocation_revision_id: allocationId },
       meta: { claim_kind: "EXPERIMENTAL", qualification: { claim_kinds_count: 2 } },
     });
+    const listed = await request(port, {
+      path: "/api/work-records/allocations?workspace_id=ws-route",
+    });
+    expect(listed.status).toBe(200);
+    expect(JSON.parse(listed.body).data).toEqual([
+      expect.objectContaining({
+        allocation_revision_id: allocationId,
+        cohort_from: "2026-09-09T00:00:00.000Z",
+        cohort_to: "2026-09-10T00:00:00.000Z",
+        // The membership was attached after this report's evidence cutoff.
+        allocated_session_count: 0,
+        eligible_session_count: 1,
+      }),
+    ]);
+    const otherWorkspace = await request(port, {
+      path: "/api/work-records/allocations?workspace_id=other",
+    });
+    expect(otherWorkspace.status).toBe(200);
+    expect(JSON.parse(otherWorkspace.body).data).toEqual([]);
+    expect((await request(port, { path: "/api/work-records/allocations" })).status).toBe(400);
   });
 });

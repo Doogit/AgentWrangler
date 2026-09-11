@@ -329,6 +329,11 @@ describe("ESF4 evaluation disclosures", () => {
       targetDirection: "IMPROVED",
       comparisonStatus: "CONFOUNDED",
       comparisonReasons: ["OVERLAPPING_INTERVENTION"],
+      targetDefinition: {
+        ...makeEffectCycle().targetDefinition,
+        improvementThreshold: -5,
+        worseningThreshold: 5,
+      },
       guardrailDefinitions: [
         { guardrailId: "repair-quality", methodVersion: "esf-1", unit: "score" },
         { guardrailId: "latency", methodVersion: "esf-1", unit: "ms" },
@@ -354,6 +359,52 @@ describe("ESF4 evaluation disclosures", () => {
     expect(container.querySelector(".effect-target-strip-blocked")).not.toBeNull();
     expect(container.querySelector(".effect-target-lane .chip-exact")).toBeNull();
     expect(container.textContent).not.toContain("net effect");
+  });
+
+  it("orders signed target thresholds for both decreasing and increasing metrics", () => {
+    const finalEvidence: ObservationBundle = {
+      metricId: "model-routing-adherence",
+      methodVersion: "esf-1",
+      queryDefinitionVersion: "esf-1",
+      scopeFingerprint: "opaque",
+      parserVersions: [],
+      parserMix: {
+        before: { available: false, total: 0, counts: {} },
+        after: { available: false, total: 0, counts: {} },
+      },
+      before: { value: 60, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      after: { value: 75, denominator: 10, exposureN: 10, sessionN: 10, excluded: {} },
+      modelMix: {
+        before: { available: false, total: 0, counts: {} },
+        after: { available: false, total: 0, counts: {} },
+      },
+      toolMix: {
+        before: { available: false, total: 0, counts: {} },
+        after: { available: false, total: 0, counts: {} },
+      },
+      taskMix: {
+        before: { available: false, total: 0, counts: {} },
+        after: { available: false, total: 0, counts: {} },
+      },
+      guardrails: [],
+    };
+    const cycle = makeEffectCycle({
+      state: "FINALIZED",
+      finalEvidence,
+      targetDirection: "IMPROVED",
+      targetDefinition: {
+        ...makeEffectCycle().targetDefinition,
+        deltaSemantics: "PERCENTAGE_POINTS",
+        improvementThreshold: 10,
+        worseningThreshold: -10,
+      },
+    });
+
+    render(<EffectEvidence cycle={cycle} />);
+
+    expect(screen.getByLabelText("Target verdict").textContent).toContain(
+      "material-change band -10 pp to +10 pp",
+    );
   });
 
   it("selects immutable fetched cycles and appends the next cursor page without aggregating them", () => {

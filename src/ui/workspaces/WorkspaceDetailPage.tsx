@@ -656,7 +656,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
             >
               <span
                 style={{
-                  background: "var(--accent)",
+                  background: "var(--series-1)",
                   flexGrow:
                     closureProxy.no_later_workspace_session_count ?? closureProxy.resolved_count,
                 }}
@@ -779,7 +779,7 @@ export default function WorkspaceDetailPage({ workspaceId, onBack }: Props) {
               >
                 <span
                   style={{
-                    background: "var(--accent)",
+                    background: "var(--series-1)",
                     flexGrow: costPerSuccess.linkage_coverage_pct ?? 0,
                   }}
                   title={`Linked-session coverage: ${costPerSuccess.linkage_coverage_pct ?? "UNAVAILABLE"}`}

@@ -110,7 +110,8 @@ describe("ESF observation evidence", () => {
     fireEvent.click(screen.getByRole("button", { name: "View sessions (6) →" }));
     expect(screen.getByText("$0.12 · 3 priced turns · 1 unpriced turns")).toBeTruthy();
     expect(screen.getAllByRole("status", { name: "UNKNOWN" }).length).toBeGreaterThan(0);
-    expect(screen.getAllByTitle("2026-08-23T23:00:00.000Z")).toHaveLength(6);
+    expect(screen.queryByRole("columnheader", { name: "Last active" })).toBeNull();
+    expect(screen.queryByTitle("2026-08-23T23:00:00.000Z")).toBeNull();
     fireEvent.click(launcher);
     await waitFor(() =>
       expect(screen.queryByRole("heading", { name: "Evidence and limits" })).toBeNull(),

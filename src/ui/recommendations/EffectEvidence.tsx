@@ -113,8 +113,17 @@ function TargetStrip({
   evidence,
 }: { cycle: EffectCycle; evidence: ObservationBundle | null }) {
   const delta = targetDelta(cycle, evidence);
-  const lower = -cycle.targetDefinition.worseningThreshold;
-  const upper = cycle.targetDefinition.improvementThreshold;
+  // Frozen contracts store signed directional thresholds. Some measures improve
+  // when they decrease (for example D1), while others improve when they rise
+  // (for example D4), so the display range must be ordered rather than negated.
+  const lower = Math.min(
+    cycle.targetDefinition.worseningThreshold,
+    cycle.targetDefinition.improvementThreshold,
+  );
+  const upper = Math.max(
+    cycle.targetDefinition.worseningThreshold,
+    cycle.targetDefinition.improvementThreshold,
+  );
   const direction = cycle.targetDirection ?? "INSUFFICIENT_DATA";
   const blocked = (evidence?.guardrails ?? []).some(
     (guardrail) =>

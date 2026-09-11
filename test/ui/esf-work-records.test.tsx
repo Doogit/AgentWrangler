@@ -541,16 +541,29 @@ describe("standalone work-record controls", () => {
     expect(screen.queryByRole("button", { name: "Retry same request" })).toBeNull();
     expect(writes()).toHaveLength(1);
   });
-  it("rejects a listed saved report from a different cohort", async () => {
+  it("opens a historical saved report using its frozen cohort, not the dashboard window", async () => {
     const savedReport = savedReports[0];
     if (savedReport === undefined) throw new Error("saved report fixture missing");
     savedReport.cohort_to = "2026-09-03T00:00:00.000Z";
     frozen.cohort_to = "2026-09-03T00:00:00.000Z";
     mount();
     click(await screen.findByRole("button", { name: "allocation-1" }).then(() => "allocation-1"));
-    await screen.findByText(/Only reports matching this workspace and cohort/);
-    expect(screen.queryByRole("heading", { name: "Report allocation-1" })).toBeNull();
+    await screen.findByRole("heading", { name: "Report allocation-1" });
+    expect(screen.getByText(/Workspace ws.*Evidence as of/).textContent).toContain(
+      "2026-09-03T00:00:00.000Z",
+    );
+    expect(writes()).toHaveLength(0);
   });
+  it.each(["workspace_id", "cohort_to", "allocation_revision_id"] as const)(
+    "rejects a saved report whose %s differs from the selected report",
+    async (field) => {
+      frozen[field] = field === "cohort_to" ? "2026-09-03T00:00:00.000Z" : "other";
+      mount();
+      fireEvent.click(await screen.findByRole("button", { name: "allocation-1" }));
+      await screen.findByText(/Only reports matching this workspace and the selected saved report/);
+      expect(screen.queryByRole("heading", { name: "Report allocation-1" })).toBeNull();
+    },
+  );
   it("does not mount saved cost reports for a session, while workspace evidence mounts them", async () => {
     const sessionView = mount(vi.fn(), "session-1");
     expect(screen.queryByRole("region", { name: "Saved cost reports" })).toBeNull();

@@ -47,16 +47,17 @@ function AllocationScope({
     Number.isFinite(Date.parse(to)) &&
     Date.parse(from) < Date.parse(to) &&
     Date.parse(to) <= Date.now();
-  async function read(id: string) {
+  async function read(selected: SavedCostReport) {
     const requestGeneration = ++generation.current;
     setReading(true);
     setReadError(null);
     try {
-      const result = await getWorkAllocation(id);
+      const result = await getWorkAllocation(selected.allocation_revision_id);
       if (
         result.data.workspace_id !== workspaceId ||
-        Date.parse(result.data.cohort_from) !== Date.parse(from) ||
-        Date.parse(result.data.cohort_to) !== Date.parse(to)
+        result.data.allocation_revision_id !== selected.allocation_revision_id ||
+        Date.parse(result.data.cohort_from) !== Date.parse(selected.cohort_from) ||
+        Date.parse(result.data.cohort_to) !== Date.parse(selected.cohort_to)
       )
         throw new Error("scope mismatch");
       if (requestGeneration === generation.current) setReport(result);
@@ -129,7 +130,7 @@ function AllocationScope({
                     className="btn-secondary"
                     type="button"
                     disabled={reading || operation.locked}
-                    onClick={() => void read(savedReport.allocation_revision_id)}
+                    onClick={() => void read(savedReport)}
                   >
                     {savedReport.allocation_revision_id}
                   </button>
@@ -160,7 +161,8 @@ function AllocationScope({
       {readError !== null && (
         <div role="alert">
           <p>
-            {errorMessage(readError)} Only reports matching this workspace and cohort can be shown.
+            {errorMessage(readError)} Only reports matching this workspace and the selected saved
+            report can be shown.
           </p>
           <button
             className="btn-secondary"

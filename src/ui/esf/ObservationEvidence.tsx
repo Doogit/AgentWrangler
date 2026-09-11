@@ -2,7 +2,6 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { EsfObservationCohort } from "../../query/api/esf-observations";
 import type { SessionSummary, WindowFilter } from "../../query/api/overview";
 import { fetchEsfObservations, fetchSessionEsfObservations } from "../api/esf-client";
-import { relativeTime } from "../lib/relative-time";
 import { shortId } from "../lib/short-id";
 import StateChip from "../shell/StateChip";
 
@@ -71,13 +70,12 @@ function CohortSessionTable({
                 <th scope="col">Session</th>
                 <th scope="col">State</th>
                 <th scope="col">Cost</th>
-                <th scope="col">Last active</th>
               </tr>
             </thead>
             <tbody>
               {ids.length === 0 ? (
                 <tr>
-                  <td colSpan={4}>No sessions in this cohort.</td>
+                  <td colSpan={3}>No sessions in this cohort.</td>
                 </tr>
               ) : (
                 ids.map((id) => {
@@ -100,18 +98,6 @@ function CohortSessionTable({
                             {money(allocation.priced_cost_u)} · {allocation.priced_turn_count}{" "}
                             priced turns · {allocation.unpriced_turn_count} unpriced turns
                           </span>
-                        )}
-                      </td>
-                      <td>
-                        {cohort.watermark.latest_selected_turn_at === null ? (
-                          <StateChip kind="UNKNOWN" />
-                        ) : (
-                          <time
-                            dateTime={cohort.watermark.latest_selected_turn_at}
-                            title={cohort.watermark.latest_selected_turn_at}
-                          >
-                            {relativeTime(cohort.watermark.latest_selected_turn_at)}
-                          </time>
                         )}
                       </td>
                     </tr>
