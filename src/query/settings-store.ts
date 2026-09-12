@@ -510,6 +510,8 @@ export const RESET_DATA_TABLES = [
   "work_record_tombstones",
   "work_records",
   "recommendation_effects",
+  "recommendation_feedback",
+  "recommendation_goal_preference",
   "recommendations",
   "analysis_runs",
   "session_work_links",

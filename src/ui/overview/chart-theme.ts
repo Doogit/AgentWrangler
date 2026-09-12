@@ -12,7 +12,7 @@ export const gridProps = {
   axisLine: false,
   tickLine: false,
   grid: {
-    stroke: "rgba(255, 255, 255, 0.07)",
+    stroke: "var(--line)",
     strokeDasharray: "5",
     horizontal: true,
     vertical: false,
@@ -52,10 +52,10 @@ export function CustomTooltip({
     "div",
     {
       style: {
-        background: "#1e293b",
-        border: "1px solid rgba(255, 255, 255, 0.12)",
+        background: "var(--panel-2)",
+        border: "1px solid var(--line)",
         borderRadius: 8,
-        boxShadow: "0 10px 24px rgba(0, 0, 0, 0.3)",
+        boxShadow: "var(--shadow)",
         color: "var(--text)",
         fontSize: 11,
         padding: "8px 10px",

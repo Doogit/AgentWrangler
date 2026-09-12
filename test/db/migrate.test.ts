@@ -93,7 +93,7 @@ describe("runMigrations", () => {
       expect(rows.length).toBe(applied.length);
       // The first migration must be 001_observe.
       expect(rows[0]?.version).toBe("001_observe");
-      expect(rows.at(-1)?.version).toBe("020_local_command_retention");
+      expect(rows.at(-1)?.version).toBe("021_recommendation_feedback");
     } finally {
       db.close();
     }
@@ -111,6 +111,25 @@ describe("runMigrations", () => {
       expect(cols.has("compaction_count"), "expected compaction_count column").toBe(true);
       expect(cols.has("api_error_count"), "expected api_error_count column").toBe(true);
       expect(cols.has("interrupt_count"), "expected interrupt_count column").toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("creates recommendation feedback and goal preference tables", () => {
+    const db = openDb(dbPath);
+    try {
+      runMigrations(db);
+      const tables = new Set(
+        (
+          db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{
+            name: string;
+          }>
+        ).map((row) => row.name),
+      );
+
+      expect(tables.has("recommendation_feedback")).toBe(true);
+      expect(tables.has("recommendation_goal_preference")).toBe(true);
     } finally {
       db.close();
     }
@@ -148,6 +167,7 @@ describe("runMigrations", () => {
         "018_effect_cycles",
         "019_work_records",
         "020_local_command_retention",
+        "021_recommendation_feedback",
       ]);
       const row = db
         .prepare(
@@ -194,6 +214,7 @@ describe("runMigrations", () => {
         "018_effect_cycles",
         "019_work_records",
         "020_local_command_retention",
+        "021_recommendation_feedback",
       ]);
       expect(db.prepare("SELECT * FROM recommendation_effects").all()).toEqual(legacy);
       expect(db.prepare("SELECT * FROM recommendations").all()).toEqual(recommendations);
