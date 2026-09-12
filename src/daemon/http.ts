@@ -30,53 +30,178 @@ import { isReady } from "./readiness.js";
 import { handleApiRequest } from "./router.js";
 import { createStaticHandler } from "./static.js";
 
-/** Inline loading page served while the daemon's initial back-scan is running. */
+/**
+ * Inline loading page served while the daemon's initial back-scan is running
+ * (BOOT-2, Option E): docked terminal panel streaming boot_scan_events on top,
+ * three live counters + a determinate progress bar below, fade into the app on
+ * ready (no white-flash hard reload). Self-contained by design — the SPA's
+ * assets are not servable pre-ready, so design-token VALUES are copied from
+ * src/ui/styles.css (dark theme) with that file as the source of truth.
+ * Falls back to the plain "Scanning transcripts — N of M files" line when the
+ * BOOT-1 fields are absent (older daemon mid-upgrade).
+ */
 const LOADING_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>AgentWrangler — Starting up</title>
 <style>
+/* Token values copied from src/ui/styles.css (dark theme) — keep in sync. */
+:root{
+  --bg:#0b0f1a;--panel:#111827;--panel2:#1a2233;--line:rgba(255,255,255,.07);
+  --text:#e2e8f0;--text2:#94a3b8;--muted:#9aa9bd;
+  --cyan:#22d3ee;--violet:#a78bfa;--green:#34d399;
+  --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,Consolas,Menlo,monospace;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0b0f17;color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}
-.wrap{padding:2rem}
-h1{font-size:1.5rem;font-weight:700;color:#f0f6fc;letter-spacing:.05em}
-h2{font-size:1rem;font-weight:400;color:#38bdf8;margin:.75rem 0 .5rem}
-p{font-size:.875rem;color:#8b949e;max-width:36ch;margin:0 auto 2rem}
-.spinner{width:40px;height:40px;border:3px solid #1e293b;border-top-color:#38bdf8;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto}
-.count{font-variant-numeric:tabular-nums;color:#8b949e;font-size:.875rem;margin:1.25rem auto 0;min-height:1.2em}
-@keyframes spin{to{transform:rotate(360deg)}}
+html{background:var(--bg)}
+body{
+  background:var(--bg);
+  color:var(--text);font-family:var(--sans);min-height:100vh;
+  display:grid;place-content:center;gap:28px;padding:24px 0;
+}
+body.leaving .log,body.leaving .hero{opacity:0}
+.log,.hero{opacity:1;transition:opacity .4s ease}
+.log{
+  background:#0a0e16;margin:0 auto;width:min(480px,calc(100vw - 36px));
+  border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  display:grid;grid-template-rows:26px 1fr;height:158px;
+}
+.log-head{
+  display:flex;align-items:center;gap:8px;padding:0 12px;
+  background:var(--panel);border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:10px;color:var(--muted);
+  letter-spacing:.08em;text-transform:uppercase;
+}
+.log-head .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.log-body{
+  padding:8px 12px;font-family:var(--mono);font-size:10.5px;line-height:1.7;
+  color:var(--text2);overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;
+}
+.log-body .ln{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.log-body .ok{color:var(--green)}
+.log-body .hl{color:var(--cyan)}
+.hero{display:grid;place-content:center;gap:16px;text-align:center;padding:0 16px}
+.headline{font-size:15px;font-weight:600}
+.headline span{color:var(--cyan)}
+.counters{display:flex;gap:34px;justify-content:center;flex-wrap:wrap}
+.counter .cv{font-family:var(--mono);font-size:30px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.counter:nth-child(1) .cv{color:var(--cyan)}
+.counter:nth-child(2) .cv{color:var(--violet)}
+.counter:nth-child(3) .cv{color:var(--green)}
+.counter .cl{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px}
+.pbar{width:300px;max-width:80vw;height:6px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:0 auto}
+.pbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet));border-radius:99px;transition:width .25s ease-out}
+.status{font-family:var(--mono);font-size:11.5px;color:var(--muted);min-height:1.2em;font-variant-numeric:tabular-nums}
+@media (prefers-reduced-motion:reduce){
+  .log,.hero,.pbar i{transition:none}
+}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>AgentWrangler</h1>
-  <h2>Starting up…</h2>
-  <p>Scanning your Claude Code transcripts — this can take a few minutes on first run; later loads are instant.</p>
-  <div class="spinner"></div>
-  <p class="count" id="count" aria-live="polite"></p>
+<div class="log" id="log" hidden>
+  <div class="log-head"><span class="dot"></span>boot scan · <span id="rate">— files/s</span></div>
+  <div class="log-body" id="logbody"></div>
+</div>
+<div class="hero">
+  <div class="headline">Preparing your <span>Claude Code</span> data…</div>
+  <div class="counters">
+    <div class="counter"><div class="cv" id="c-files">0</div><div class="cl">files scanned</div></div>
+    <div class="counter"><div class="cv" id="c-sess">0</div><div class="cl">sessions found</div></div>
+    <div class="counter"><div class="cv" id="c-tok">0</div><div class="cl">tokens counted</div></div>
+  </div>
+  <div class="pbar"><i id="fill"></i></div>
+  <div class="status" id="status" aria-live="polite">Scanning transcript roots…</div>
 </div>
 <script>
-(function poll(){
-  fetch('/api/ready')
-    .then(function(r){return r.json();})
-    .then(function(d){
-      if(d.ready){location.reload();return;}
-      // Reuse the first-run onboarding counter so a large first scan shows live
-      // progress instead of a bare spinner. Cadence unchanged (1s).
-      fetch('/api/status')
-        .then(function(r){return r.json();})
-        .then(function(s){
-          if(s&&typeof s.files_seen==='number'&&s.files_seen>0){
-            document.getElementById('count').textContent=
-              'Scanning transcripts — '+s.files_parsed+' of '+s.files_seen+' files';
-          }
-        })
-        .catch(function(){})
-        .then(function(){setTimeout(poll,1000);});
-    })
-    .catch(function(){setTimeout(poll,1000);});
+(function(){
+  var reduced=false;
+  try{reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(e){}
+  var lastSeq=0,prevFiles=null,prevT=null,rateEma=null,leaving=false;
+  function $(id){return document.getElementById(id);}
+  function fmt(n){return Number(n||0).toLocaleString('en-US');}
+  function fmtTok(n){
+    n=Number(n||0);
+    if(n>=1e9)return (n/1e9).toFixed(1)+'B';
+    if(n>=1e6)return (n/1e6).toFixed(1)+'M';
+    if(n>=1e3)return (n/1e3).toFixed(1)+'K';
+    return String(n);
+  }
+  function finish(){
+    if(leaving)return;
+    leaving=true;
+    // Fade out, then swap to the app behind the transition — no white flash.
+    document.body.className='leaving';
+    setTimeout(function(){location.reload();},reduced?0:450);
+  }
+  function renderLog(events){
+    var body=$('logbody');
+    for(var i=0;i<events.length;i++){
+      var ev=events[i];
+      if(!ev||typeof ev.seq!=='number'||ev.seq<=lastSeq)continue;
+      lastSeq=ev.seq;
+      var el=document.createElement('div');
+      el.className='ln'+(ev.kind==='stage'?' hl':ev.kind==='root'?' ok':'');
+      el.textContent=String(ev.text||'');
+      body.appendChild(el);
+      while(body.children.length>6)body.removeChild(body.firstChild);
+    }
+  }
+  function render(s){
+    if(!s)return;
+    var files=typeof s.files_parsed==='number'?s.files_parsed:0;
+    var seen=typeof s.files_seen==='number'?s.files_seen:0;
+    var hasBoot=Array.isArray(s.boot_scan_events);
+    // Progress denominator: discovery's up-front total. files_seen only counts
+    // files visited so far, which would pin a determinate bar at ~100%.
+    var total=hasBoot&&typeof s.boot_files_total==='number'&&s.boot_files_total>0?s.boot_files_total:seen;
+    $('c-files').textContent=fmt(files);
+    $('c-sess').textContent=fmt(typeof s.boot_sessions_found==='number'?s.boot_sessions_found:(s.sessions||0));
+    $('c-tok').textContent=hasBoot?fmtTok(s.boot_tokens_counted):'—';
+    var pct=total>0?Math.min(100,Math.round(100*files/total)):0;
+    $('fill').style.width=pct+'%';
+    // Client-side ETA from the parse-rate delta between polls (EMA-smoothed).
+    var now=Date.now();
+    if(prevFiles!==null&&now>prevT){
+      var r=(files-prevFiles)/((now-prevT)/1000);
+      if(r>0)rateEma=rateEma===null?r:(rateEma*0.7+r*0.3);
+    }
+    prevFiles=files;prevT=now;
+    if(hasBoot){
+      $('log').hidden=false;
+      renderLog(s.boot_scan_events);
+      var rr=typeof s.boot_files_per_sec==='number'?s.boot_files_per_sec:0;
+      $('rate').textContent=(rr>0?rr:'—')+' files/s';
+      if(total===0){
+        $('status').textContent='Scanning transcript roots…';
+      }else if(pct<100){
+        var eta=rateEma&&rateEma>0?Math.max(1,Math.round((total-files)/rateEma)):null;
+        $('status').textContent='Parsing sessions'+(eta!==null?' — '+eta+'s remaining':'…');
+      }else{
+        $('status').textContent='Opening your dashboard…';
+      }
+    }else if(seen>0){
+      // Fallback for an older daemon without BOOT-1 fields: keep the plain
+      // first-run counter line ("N of M files"), never a blank page.
+      $('status').textContent='Scanning transcripts — '+files+' of '+seen+' files';
+    }
+  }
+  (function poll(){
+    fetch('/api/ready')
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if(d.ready){finish();return;}
+        fetch('/api/status')
+          .then(function(r){return r.json();})
+          .then(render)
+          .catch(function(){})
+          .then(function(){setTimeout(poll,1000);});
+      })
+      .catch(function(){setTimeout(poll,1000);});
+  })();
 })();
 </script>
 </body>
@@ -141,6 +266,10 @@ function requiresSessionToken(pathname: string): boolean {
   if (pathname === "/api/recommendations/adopt" || pathname === "/api/recommendations/dismiss") {
     return true;
   }
+  if (pathname === "/api/recommendations/feedback") return true;
+  if (pathname === "/api/recommendations/feedback/undo") return true;
+  if (pathname === "/api/recommendations/goal") return true;
+  if (pathname === "/api/recommendations/goal/reset") return true;
   if (/^\/api\/recommendations\/[^/]+\/apply$/.test(pathname)) return true;
   if (/^\/api\/recommendations\/[^/]+\/open-terminal$/.test(pathname)) return true;
   if (/^\/api\/recommendations\/jobs\/[^/]+\/(confirm|rollback)$/.test(pathname)) return true;

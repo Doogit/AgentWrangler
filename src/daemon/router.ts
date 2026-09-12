@@ -11,6 +11,7 @@ import { getReportedWork } from "../query/api/reported-work.js";
 import type * as http from "node:http";
 import type { Db } from "../db/open.js";
 import { getPractices } from "../detector/practice-registry.js";
+import { getBootProgress } from "../ingest/boot-progress.js";
 import { getOAuthStatus } from "../oauth/credentials.js";
 import { getGithubTokenStatus } from "../outcomes/github/credential.js";
 import { manualLink, manualUnlink } from "../outcomes/linker.js";
@@ -27,6 +28,16 @@ import {
 import { getClosureProxy } from "../query/api/effectiveness.js";
 import { getEfficiencyHeadroom } from "../query/api/efficiency-headroom.js";
 import { getEsfObservations, getSessionEsfObservations } from "../query/api/esf-observations.js";
+import {
+  FeedbackError,
+  deleteFeedbackRoute,
+  getGoalRoute,
+  listFeedbackRoute,
+  resetGoalRoute,
+  setFeedbackRoute,
+  setGoalRoute,
+  undoFeedbackRoute,
+} from "../query/api/feedback-store.js";
 import { getHeadroomTrend } from "../query/api/headroom-trend.js";
 import { getHotSessions } from "../query/api/hot-sessions.js";
 import {
@@ -104,6 +115,43 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
     "Content-Length": Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+function sendFeedbackError(res: http.ServerResponse, error: unknown): void {
+  if (error instanceof FeedbackError) {
+    sendJson(res, error.status, { error: error.message, code: error.code });
+    return;
+  }
+  // Oversized body (readBody) rejects with EffectRequestError(400, …).
+  if (error instanceof EffectRequestError) {
+    sendJson(res, error.status, { error: error.message, code: "INVALID_REQUEST" });
+    return;
+  }
+  sendJson(res, 500, { error: "Internal error" });
+}
+
+/** Read + JSON-parse a write body, then run `run` and send its enveloped result. */
+function withJsonBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  run: (body: unknown) => unknown,
+): void {
+  readBody(req, 4096)
+    .then((raw) => {
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { error: "Invalid JSON body", code: "INVALID_REQUEST" });
+        return;
+      }
+      try {
+        sendJson(res, 200, run(body));
+      } catch (error) {
+        sendFeedbackError(res, error);
+      }
+    })
+    .catch((error) => sendFeedbackError(res, error));
 }
 
 function readBody(req: http.IncomingMessage, maxBytes?: number): Promise<string> {
@@ -1058,6 +1106,47 @@ export function handleApiRequest(
       return;
     }
 
+    // ── RIQ3 relevance feedback + goal preference (migration 021) ──────────
+    // Local, enum-only, SEC-101. Writes are CSRF + session-token gated in http.ts.
+    if (method === "GET" && pathname === "/api/recommendations/feedback") {
+      const scopeKey = new URLSearchParams(url.split("?")[1] ?? "").get("scope_key");
+      if (!scopeKey) {
+        sendJson(res, 400, { error: "scope_key is required", code: "INVALID_REQUEST" });
+        return;
+      }
+      sendJson(res, 200, listFeedbackRoute(_db, scopeKey));
+      return;
+    }
+    if (method === "POST" && pathname === "/api/recommendations/feedback") {
+      withJsonBody(req, res, (body) => setFeedbackRoute(_db, body));
+      return;
+    }
+    if (method === "POST" && pathname === "/api/recommendations/feedback/undo") {
+      withJsonBody(req, res, (body) => undoFeedbackRoute(_db, body));
+      return;
+    }
+    if (method === "DELETE" && pathname === "/api/recommendations/feedback") {
+      withJsonBody(req, res, (body) => deleteFeedbackRoute(_db, body));
+      return;
+    }
+    if (method === "GET" && pathname === "/api/recommendations/goal") {
+      const scopeKey = new URLSearchParams(url.split("?")[1] ?? "").get("scope_key");
+      if (!scopeKey) {
+        sendJson(res, 400, { error: "scope_key is required", code: "INVALID_REQUEST" });
+        return;
+      }
+      sendJson(res, 200, getGoalRoute(_db, scopeKey));
+      return;
+    }
+    if (method === "POST" && pathname === "/api/recommendations/goal") {
+      withJsonBody(req, res, (body) => setGoalRoute(_db, body));
+      return;
+    }
+    if (method === "POST" && pathname === "/api/recommendations/goal/reset") {
+      withJsonBody(req, res, (body) => resetGoalRoute(_db, body));
+      return;
+    }
+
     // GET /api/settings
     if (method === "GET" && pathname === "/api/settings") {
       sendJson(res, 200, getSettings());
@@ -1295,6 +1384,9 @@ export function handleApiRequest(
         files_parsed: parser_health.files_parsed,
         lines_quarantined: parser_health.lines_quarantined,
         ...getScanStatus(),
+        // BOOT-1: boot-progress fields exist ONLY pre-ready; the steady-state
+        // /api/status shape is unchanged (UI fixtures must not require them).
+        ...(isReady() ? {} : getBootProgress()),
       });
       return;
     }

@@ -25,6 +25,7 @@ import { configGet as bptConfigGet, calibrateBytesPerToken } from "../detector/c
 import { runContextProbe } from "../detector/context-probe.js";
 import { runDetectors } from "../detector/index.js";
 import { installHook, uninstallHook } from "../hook/install.js";
+import { getBootProgress, pushBootEvent } from "../ingest/boot-progress.js";
 import { collectSessionChurn } from "../ingest/churn-collector.js";
 import { runPostProbeHook, setPostIngestHook, setPostProbeHook } from "../ingest/detector-hook.js";
 import { Ingestor } from "../ingest/index.js";
@@ -260,6 +261,10 @@ async function runBootScan(): Promise<TailHandle | null> {
     setHealthInstance(ingestor.health);
     handle = await ingestor.startTailBatched();
     setScanState("complete");
+    pushBootEvent(
+      "stage",
+      `parse complete — ${getBootProgress().boot_sessions_found} sessions found`,
+    );
     setRuntimeResetHook(() => ingestor.clearRuntimeState());
     console.log(
       `Ingestion: initial scan complete — health ${JSON.stringify(ingestor.healthSnapshot())}`,
@@ -276,6 +281,7 @@ async function runBootScan(): Promise<TailHandle | null> {
   // boot probe ran before any workspace existed and could only size the global sources.
   // Then re-evaluate detectors so D1 surfaces its per-source context recs on the first run
   // instead of waiting for the next 10-minute poll.
+  pushBootEvent("stage", "building aggregates…");
   runProbePass("post-scan");
   try {
     runDetectors(db, { now: new Date() });
@@ -287,6 +293,7 @@ async function runBootScan(): Promise<TailHandle | null> {
 
   // Signal readiness BEFORE the outcomes pass — outcomes is a slow ~97s I/O
   // pass that yields on `gh` subprocess I/O; the loading page must not wait on it.
+  pushBootEvent("stage", "ready — opening dashboard");
   setReady();
 
   // Outcomes bootstrap — deferred until after the back-scan so the event loop

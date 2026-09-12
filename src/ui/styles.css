@@ -142,7 +142,7 @@ a {
 }
 
 :focus-visible {
-  outline: 2px solid var(--cyan);
+  outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
 
@@ -3788,5 +3788,39 @@ tr.total-row td {
   }
   .briefs-action {
     padding: 12px;
+  }
+}
+
+/* Design-system foundations — additive tokens for new UI surfaces. */
+:root {
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+  --space-8: 48px;
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-base: 14px;
+  --font-md: 16px;
+  --font-lg: 18px;
+  --font-xl: 22px;
+  /* --panel-2 aliases --panel2 and resolves at use-site, so the :root
+     declaration follows the active theme's --panel2 automatically. */
+  --panel-2: var(--panel2);
+  /* --focus dark is the base; only the light themes override it. */
+  --focus: #22d3ee;
+}
+
+:root[data-theme="light"] {
+  --focus: #0e657d;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --focus: #0e657d;
   }
 }

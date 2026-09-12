@@ -1,7 +1,7 @@
 /** Safe, versioned aggregate contract for RIQ1 evidence packets. */
 
-export const EVIDENCE_PACKET_VERSION = "riq1-1" as const;
-export const EVIDENCE_QUERY_DEFINITION_VERSION = "riq1-query-1" as const;
+export const EVIDENCE_PACKET_VERSION = "riq1-2" as const;
+export const EVIDENCE_QUERY_DEFINITION_VERSION = "riq1-query-2" as const;
 
 export type ToolClass =
   | "FILE_READ"
@@ -78,7 +78,14 @@ export interface EvidencePacket {
     task_mix: EvidenceFact<never>;
     modeled_cap_headroom: EvidenceFact<never>;
     tool_observations: EvidenceFact<
-      Array<{ tool_id: string; tool_class: ToolClass; event_count: number }>
+      Array<{
+        tool_id: string;
+        tool_class: ToolClass;
+        event_count: number;
+        result_bytes_total: number;
+        failure_event_count: number;
+        recovered_after_failure_count: number;
+      }>
     >;
     target_observations: EvidenceFact<never>;
     guardrail_observations: EvidenceFact<never>;

@@ -96,7 +96,7 @@ describe("020 local command retention", () => {
       ).n;
 
       const applied = runMigrations(db);
-      expect(applied).toEqual(["020_local_command_retention"]);
+      expect(applied).toEqual(["020_local_command_retention", "021_recommendation_feedback"]);
 
       const sanitized = new Set([mId("b1"), mId("b2"), mId("b3"), mId("b4"), mId("b5"), mId("b6")]);
       const expected = before.map((row) =>
@@ -265,7 +265,10 @@ describe("020 local command retention", () => {
       expect(getHash(db, mId("cc1"))).toBe("/synthetic-raw-value");
 
       db.exec("DROP TRIGGER trg_sec4_command_marker_guard_insert");
-      expect(runMigrations(db)).toEqual(["020_local_command_retention"]);
+      expect(runMigrations(db)).toEqual([
+        "020_local_command_retention",
+        "021_recommendation_feedback",
+      ]);
       expect(getHash(db, mId("cc1"))).toBeNull();
       expect(invalidMRowCount(db)).toBe(0);
     });

@@ -65,6 +65,7 @@ async function fixture(
     "018_effect_cycles",
     "019_work_records",
     "020_local_command_retention",
+    "021_recommendation_feedback",
   ]) {
     db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(version);
   }
