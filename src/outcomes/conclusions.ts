@@ -49,6 +49,20 @@ export function aggregateCheckConclusion(body: CheckRunsBody): GhResult<string> 
 }
 
 /**
+ * Map a GraphQL statusCheckRollup state to the conclusion the REST aggregate
+ * would store, only where they are known to agree (S3 spike: 157/157 PRs):
+ * rollup state SUCCESS → "SUCCESS", rollup null (no checks) → "NONE". Every
+ * other value (FAILURE, PENDING, ERROR, EXPECTED — the rollup also folds in
+ * commit statuses and cancelled/timed-out runs — or a missing field) returns
+ * null: the caller reads REST check-runs.
+ */
+export function conclusionFromRollup(rollup: unknown): "SUCCESS" | "NONE" | null {
+  if (rollup === null) return "NONE";
+  if (typeof rollup !== "object" || Array.isArray(rollup)) return null;
+  return (rollup as { state?: unknown }).state === "SUCCESS" ? "SUCCESS" : null;
+}
+
+/**
  * Normalize a fetched PR JSON object to the PR-body string: null/missing body
  * → "" (both transports previously duplicated the `?? ""`).
  */

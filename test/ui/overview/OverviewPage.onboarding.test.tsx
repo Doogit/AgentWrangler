@@ -10,6 +10,8 @@ import {
   mockHeadroomTrend,
   mockHookConfigResponse,
   mockHotSessions,
+  mockLimits,
+  mockLinkageRate,
   mockLiveSessions,
   mockRecommendations,
   mockStatus,
@@ -19,7 +21,16 @@ import {
 } from "../../../src/ui/api/fixtures";
 import OverviewPage from "../../../src/ui/overview/OverviewPage";
 
+import {
+  fetchCacheWriteTrend,
+  fetchFlavorDecomposition,
+  fetchGlobalOverview,
+  fetchLiveSessions,
+  serveOverviewViewFromLegacyMocks,
+} from "./overview-view-from-legacy";
+
 vi.mock("../../../src/ui/api/client");
+beforeEach(serveOverviewViewFromLegacyMocks);
 
 afterEach(() => {
   cleanup();
@@ -28,39 +39,40 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(client.fetchGlobalOverview).mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
   vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
   vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
   vi.mocked(client.fetchSuccessRate).mockResolvedValue(mockSuccessRate());
   vi.mocked(client.fetchBurnStatus).mockResolvedValue(mockBurnStatus());
+  vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
   vi.mocked(client.fetchHookConfig).mockResolvedValue(mockHookConfigResponse(false));
   vi.mocked(client.fetchHotSessions).mockResolvedValue(mockHotSessions());
+  vi.mocked(client.fetchLinkageRate).mockResolvedValue(mockLinkageRate());
   vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
-  vi.mocked(client.fetchFlavorDecomposition).mockResolvedValue(
-    mockFlavorDecomposition({ preset: "7d" }),
-  );
-  vi.mocked(client.fetchCacheWriteTrend).mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
+  fetchFlavorDecomposition.mockResolvedValue(mockFlavorDecomposition({ preset: "7d" }));
+  fetchCacheWriteTrend.mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
   vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
-  vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
+  fetchLiveSessions.mockResolvedValue(mockLiveSessions());
 });
 
 describe("OverviewPage first-run onboarding", () => {
-  it("selects a workspace for observations while keeping the global overview scope", async () => {
+  it.each(["24h", "30d"] as const)("labels spend with the selected %s window", async (preset) => {
+    // In overview-v2 the KPI section header is "This period ({preset})".
     vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 5 }));
-    const observations = vi
-      .spyOn(esfClient, "fetchEsfObservations")
-      .mockImplementation(() => new Promise(() => {}));
+    const response = mockGlobalOverview({ preset });
+    if (response.data === null) throw new Error("expected overview fixture");
+    response.data.cost_equiv_u = 12_340_000;
+    fetchGlobalOverview.mockResolvedValue(response);
     render(<OverviewPage />);
-    const selector = await screen.findByRole("combobox", { name: "Observation workspace" });
-    const workspaceId = mockWorkspaces({ preset: "7d" }).data?.items[0]?.workspace_id;
-    const { from, to } = mockGlobalOverview({ preset: "7d" }).meta.window;
-    expect(workspaceId).toBeTruthy();
-    await waitFor(() => expect(selector.querySelectorAll("option").length).toBeGreaterThan(1));
-    fireEvent.change(selector, { target: { value: workspaceId } });
-    await waitFor(() => expect(observations).toHaveBeenLastCalledWith(workspaceId, { from, to }));
-    fireEvent.change(selector, { target: { value: "" } });
-    await waitFor(() => expect(observations).toHaveBeenLastCalledWith(null, { from, to }));
+    await screen.findByText("This period (7d)");
+    fireEvent.click(screen.getByRole("button", { name: preset }));
+    const heading = await screen.findByText(`This period (${preset})`);
+    expect(heading.closest("section")?.textContent).toContain("$12.34");
+    expect(screen.queryByText("This period (7d)")).toBeNull();
   });
+
+  // "selects a workspace for observations while keeping the global overview scope" — DELETED:
+  // the ESF observation workspace selector was removed from OverviewPage in overview-v2.
   it("shows API-derived ingest progress and hides normal KPI cards before any sessions exist", async () => {
     vi.mocked(client.fetchStatus).mockResolvedValue(
       mockStatus({ sessions: 0, files_seen: 10, files_parsed: 4, scan_state: "scanning" }),
@@ -82,9 +94,8 @@ describe("OverviewPage first-run onboarding", () => {
 
     render(<OverviewPage />);
 
-    await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /spend vs your limit/i })).toBeTruthy(),
-    );
+    // overview-v2: KPI section heading is "This period ({preset})" not "Weekly burn forecast".
+    await waitFor(() => expect(screen.getByRole("heading", { name: /This period/i })).toBeTruthy());
     expect(screen.queryByRole("heading", { name: /welcome to agentwrangler/i })).toBeNull();
   });
 });
@@ -109,32 +120,16 @@ describe("scan recovery and healthy empty findings", () => {
     expect(await screen.findByText(/Scan completion status is unavailable/)).toBeTruthy();
   });
 
-  it("completes setup with history and no recommendations or integrations", async () => {
-    const recs = mockRecommendations();
-    if (!recs.data) throw new Error("missing fixture");
-    recs.data = {
-      ...recs.data,
-      active: [],
-      active_groups: [],
-      limit_warnings: [],
-      adopted: [],
-      dismissed: [],
-    };
-    vi.mocked(client.fetchRecommendations).mockResolvedValue(recs);
-    vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 1 }));
-    render(<OverviewPage />);
-    expect(await screen.findByText(/Setup complete.*no recommendations were found/)).toBeTruthy();
-    expect(
-      screen.getByRole("link", { name: /Read an ingested session/ }).getAttribute("href"),
-    ).toBe("#/sessions");
-    expect(screen.queryByRole("heading", { name: /welcome to agentwrangler/i })).toBeNull();
-  });
+  // "completes setup with history and no recommendations or integrations" — DELETED:
+  // the "Setup complete…no recommendations were found" message was removed in overview-v2;
+  // an empty recommendations state now shows the KPI section without a decision card.
 
   it("does not describe a failed recommendations request as no findings", async () => {
     vi.mocked(client.fetchRecommendations).mockRejectedValue(new Error("unavailable"));
     vi.mocked(client.fetchStatus).mockResolvedValue(mockStatus({ sessions: 1 }));
     render(<OverviewPage />);
-    await screen.findByRole("heading", { name: /spend vs your limit/i });
+    // overview-v2: wait for the KPI section heading instead of the removed burn-forecast card.
+    await screen.findByRole("heading", { name: /This period/i });
     expect(screen.queryByText(/no recommendations were found/)).toBeNull();
   });
 });

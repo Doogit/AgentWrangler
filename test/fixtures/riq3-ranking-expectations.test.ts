@@ -2,7 +2,7 @@
  * Contract-only freeze test for the RIQ3 ranking fixtures: no ranker, no
  * comparator run, no DB, no operator data. Validates that the frozen cases and
  * hand-derived expected orderings are internally consistent with
- * docs/plans/spec-ranking-policy-1.md before any ranker code exists.
+ * docs/plans/Archive/spec-ranking-policy-1.md before any ranker code exists.
  */
 import { describe, expect, it } from "vitest";
 import { COMPOSER_VERSION } from "../../src/query/api/opportunity-composer-types.js";

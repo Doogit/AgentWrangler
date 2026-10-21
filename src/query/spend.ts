@@ -15,6 +15,8 @@
  */
 
 import type { Db } from "../db/open.js";
+import { prep } from "../db/stmt-cache.js";
+import { LONG_GAP_THRESHOLD_S } from "../ingest/types.js";
 
 // ---------------------------------------------------------------------------
 // spend-by-workspace
@@ -93,16 +95,44 @@ export function globalSpend(db: Db, tFrom: string, tTo: string): GlobalSpendRow 
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(CASE WHEN provisional = 0 THEN cost_equiv_u END), 0) AS cost_equiv_u,
-              SUM(CASE WHEN provisional = 0 THEN 1 ELSE 0 END)                  AS turns,
+              COALESCE(SUM(CASE WHEN provisional = 0 THEN 1 ELSE 0 END), 0)     AS turns,
               COUNT(*)                                                         AS turns_total,
-              SUM(CASE WHEN provisional = 0 AND cost_equiv_u IS NULL
-                       THEN 1 ELSE 0 END)                                      AS unpriced_turns,
+              COALESCE(SUM(CASE WHEN provisional = 0 AND cost_equiv_u IS NULL
+                       THEN 1 ELSE 0 END), 0)                                  AS unpriced_turns,
               COUNT(DISTINCT CASE WHEN provisional = 0 THEN cost_claim END)    AS claim_kinds
          FROM turns
         WHERE ts >= ? AND ts < ?`,
     )
     .get(tFrom, tTo) as GlobalSpendRow;
   return row;
+}
+
+/**
+ * Reconciled spend (µ$, `cost_equiv_u`) over [fromMs, toMs) for one workspace, or all
+ * workspaces when `workspace` is null. The one "scope spend" denominator for % of spend.
+ */
+export function workspaceSpendU(
+  db: Db,
+  workspace: string | null,
+  fromMs: number,
+  toMs: number,
+): number {
+  const from = new Date(fromMs).toISOString();
+  const to = new Date(toMs).toISOString();
+  if (workspace === null) return globalSpend(db, from, to).cost_equiv_u;
+  return (
+    spendByWorkspace(db, from, to).find((s) => s.workspace_id === workspace)?.cost_equiv_u ?? 0
+  );
+}
+
+/** `u` as a percentage (0-100) of `spendU`; null when either is unusable or spend is 0. */
+export function pctOfSpend(
+  u: number | null | undefined,
+  spendU: number | null | undefined,
+): number | null {
+  if (u === null || u === undefined || spendU === null || spendU === undefined) return null;
+  if (!Number.isFinite(u) || !Number.isFinite(spendU) || spendU <= 0) return null;
+  return (u / spendU) * 100;
 }
 
 /**
@@ -121,9 +151,10 @@ export function hasStaleClaim(db: Db, tFrom: string, tTo: string, workspaceId?: 
 
 /** Count LIVE sessions whose last_turn_at is at or after the activity cutoff. */
 export function liveSessionCount(db: Db, activityCutoff: string): number {
-  const row = db
-    .prepare("SELECT COUNT(*) AS n FROM sessions WHERE state = 'LIVE' AND last_turn_at >= ?")
-    .get(activityCutoff) as { n: number };
+  const row = prep(
+    db,
+    "SELECT COUNT(*) AS n FROM sessions WHERE state = 'LIVE' AND last_turn_at >= ?",
+  ).get(activityCutoff) as { n: number };
   return row.n;
 }
 
@@ -224,13 +255,24 @@ export function liveSessions(db: Db, activityCutoff: string): LiveSessionRow[] {
 export interface HotSessionRow {
   session_id: string;
   workspace_id: string;
+  title?: string | null;
+  repo_owner?: string | null;
+  repo_name?: string | null;
   turns: number;
   cost_equiv_u: number;
   total_output_tokens: number;
   avg_output_tokens: number;
   total_context_tokens: number;
   avg_context_tokens: number;
+  max_context_tokens: number;
+  sum_cache_read_tokens: number;
+  sidechain_cost_u: number;
+  active_time_s: number;
+  wall_time_s: number;
   model: string;
+  /** Every model observed in the session, distinct and sorted by model id. */
+  models: string[];
+  first_turn_at?: string;
   last_turn_at: string;
   /** Operational and interaction/context observations. Legacy counters remain compatible. */
   api_error_count: number;
@@ -264,6 +306,120 @@ export interface HotSessionRow {
   gap_n: number;
 }
 
+export type HotSessionSort = "cost" | "output" | "context" | "turns" | "last_active" | "workspace";
+export type HotSessionSortDirection = "asc" | "desc";
+
+export interface HotSessionQueryOptions {
+  /** Exact turn-model match, applied before aggregation and limiting. */
+  model?: string;
+  sort?: HotSessionSort;
+  direction?: HotSessionSortDirection;
+  workspace?: string;
+  /** Session-id prefix; `_` is escaped so it matches literally. */
+  sessionPrefix?: string;
+  offset?: number;
+  /** Keep sessions whose activity overlaps [from, to); aggregates stay whole-session. */
+  activeWindow?: { from: string; to: string };
+  /** Keep sessions with at least one turn on this model; aggregates stay whole-session. */
+  sessionModel?: string;
+  /** Restrict to these session ids (bound as one JSON array). */
+  sessionIds?: readonly string[];
+}
+
+/** Every non-empty model observed in turns, sorted for stable filter controls. */
+export function listObservedModels(db: Db): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT model
+         FROM turns
+        WHERE model <> ''
+        ORDER BY model ASC`,
+    )
+    .all() as Array<{ model: string }>;
+  return rows.map((row) => row.model);
+}
+
+const HOT_SESSION_SORT_SQL: Record<HotSessionSort, string> = {
+  cost: "cost_equiv_u",
+  output: "avg_output_tokens",
+  context: "avg_context_tokens",
+  turns: "turns",
+  last_active: "last_turn_at",
+  workspace: "workspace_id",
+};
+
+/** Shared WHERE/HAVING + bound params for the hot-session candidate aggregation. */
+function hotSessionFilters(
+  window: { from: string; to: string } | undefined,
+  options: HotSessionQueryOptions,
+): { where: string; having: string; turnFilter: string; params: Record<string, unknown> } {
+  // Optional window bounds the JOINed turns to [from, to); absent = all-time
+  // (preserves the /api/hot-sessions default). Matches the `t.ts >= ? AND t.ts < ?`
+  // string-bound convention used by globalSpend and the other spend queries.
+  const turnWindow = window === undefined ? "" : "AND t.ts >= @from AND t.ts < @to";
+  const modelFilter = options.model === undefined ? "" : "AND t.model = @model";
+  const where = [
+    turnWindow,
+    modelFilter,
+    options.workspace === undefined ? "" : "AND s.workspace_id = @workspace",
+    options.sessionPrefix === undefined
+      ? ""
+      : "AND t.session_id LIKE @sessionPrefix || '%' ESCAPE '\\'",
+    options.sessionModel === undefined
+      ? ""
+      : "AND t.session_id IN (SELECT tm.session_id FROM turns tm WHERE tm.model = @sessionModel)",
+    options.sessionIds === undefined
+      ? ""
+      : "AND t.session_id IN (SELECT value FROM json_each(@sessionIds))",
+  ].join(" ");
+  return {
+    where,
+    having:
+      options.activeWindow === undefined
+        ? ""
+        : "HAVING MAX(t.ts) >= @activeFrom AND MIN(t.ts) < @activeTo",
+    turnFilter: `${turnWindow} ${modelFilter}`,
+    params: {
+      ...(window === undefined ? {} : { from: window.from, to: window.to }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+      ...(options.sessionPrefix === undefined
+        ? {}
+        : { sessionPrefix: options.sessionPrefix.replace(/[\\%_]/g, "\\$&") }),
+      ...(options.sessionModel === undefined ? {} : { sessionModel: options.sessionModel }),
+      ...(options.sessionIds === undefined
+        ? {}
+        : { sessionIds: JSON.stringify(options.sessionIds) }),
+      ...(options.activeWindow === undefined
+        ? {}
+        : { activeFrom: options.activeWindow.from, activeTo: options.activeWindow.to }),
+    },
+  };
+}
+
+/** Every filtered session id with its workspace and cost — cheap input for non-SQL rankings. */
+export function hotSessionCandidates(
+  db: Db,
+  window?: { from: string; to: string },
+  options: HotSessionQueryOptions = {},
+): Array<{ session_id: string; workspace_id: string; cost_equiv_u: number }> {
+  const filters = hotSessionFilters(window, options);
+  return db
+    .prepare(
+      `SELECT t.session_id AS session_id, s.workspace_id AS workspace_id,
+              COALESCE(SUM(t.cost_equiv_u), 0) AS cost_equiv_u
+         FROM turns t JOIN sessions s ON s.session_id = t.session_id
+        WHERE 1 = 1 ${filters.where}
+        GROUP BY t.session_id
+        ${filters.having}`,
+    )
+    .all(filters.params) as Array<{
+    session_id: string;
+    workspace_id: string;
+    cost_equiv_u: number;
+  }>;
+}
+
 /**
  * Sessions ranked by total list-equivalent cost across all turns.
  *
@@ -275,11 +431,11 @@ export function hotSessionsByCost(
   db: Db,
   limit = 20,
   window?: { from: string; to: string },
+  options: HotSessionQueryOptions = {},
 ): HotSessionRow[] {
-  // Optional window bounds the JOINed turns to [from, to); absent = all-time
-  // (preserves the /api/hot-sessions default). Matches the `t.ts >= ? AND t.ts < ?`
-  // string-bound convention used by globalSpend and the other spend queries.
-  const turnWindow = window === undefined ? "" : "AND t.ts >= @from AND t.ts < @to";
+  const filters = hotSessionFilters(window, options);
+  const sortSql = HOT_SESSION_SORT_SQL[options.sort ?? "cost"] ?? HOT_SESSION_SORT_SQL.cost;
+  const directionSql = options.direction === "asc" ? "ASC" : "DESC";
   // Rank a bounded candidate set from the turns aggregation alone, then run the
   // per-session enrichment subqueries against only the selected rows (PERF1).
   // The CTE's ORDER BY/LIMIT must stay identical to the outer ordering so the
@@ -288,30 +444,57 @@ export function hotSessionsByCost(
     .prepare(
       `WITH candidate AS (
          SELECT t.session_id                                                  AS session_id,
+                s.workspace_id                                                 AS workspace_id,
                 COUNT(*)                                                       AS turns,
                 COALESCE(SUM(t.cost_equiv_u), 0)                               AS cost_equiv_u,
                 COALESCE(SUM(t.output_tokens), 0)                              AS total_output_tokens,
                 COALESCE(SUM(t.context_tokens), 0)                             AS total_context_tokens,
-                MAX(t.ts)                                                      AS max_ts
-           FROM turns t
-          WHERE 1 = 1 ${turnWindow}
+                COALESCE(MAX(t.context_tokens), 0)                             AS max_context_tokens,
+                COALESCE(SUM(t.cache_read_tokens), 0)                          AS sum_cache_read_tokens,
+                COALESCE(SUM(CASE WHEN t.is_sidechain = 1 THEN t.cost_equiv_u ELSE 0 END), 0) AS sidechain_cost_u,
+                MIN(t.ts)                                                      AS first_turn_at,
+                MAX(t.ts)                                                      AS final_turn_at,
+                ROUND(COALESCE(SUM(t.output_tokens), 0) * 1.0 / COUNT(*))       AS avg_output_tokens,
+                ROUND(COALESCE(SUM(t.context_tokens), 0) * 1.0 / COUNT(*))      AS avg_context_tokens,
+                COALESCE(s.last_turn_at, MAX(t.ts))                            AS last_turn_at
+           FROM turns t JOIN sessions s ON s.session_id = t.session_id
+          WHERE 1 = 1 ${filters.where}
           GROUP BY t.session_id
-          ORDER BY cost_equiv_u DESC, t.session_id ASC
-          LIMIT @limit
+          ${filters.having}
+          ORDER BY ${sortSql} ${directionSql}, t.session_id ASC
+          LIMIT @limit OFFSET @offset
        )
        SELECT s.session_id                                                   AS session_id,
-              s.workspace_id                                                 AS workspace_id,
+              c.workspace_id                                                 AS workspace_id,
+              s.title                                                        AS title,
+              w.repo_owner                                                   AS repo_owner,
+              w.repo_name                                                    AS repo_name,
               c.turns                                                         AS turns,
               c.cost_equiv_u                                                  AS cost_equiv_u,
               c.total_output_tokens                                           AS total_output_tokens,
-              ROUND(c.total_output_tokens * 1.0 / c.turns)                    AS avg_output_tokens,
+              c.avg_output_tokens                                             AS avg_output_tokens,
               c.total_context_tokens                                          AS total_context_tokens,
-              ROUND(c.total_context_tokens * 1.0 / c.turns)                   AS avg_context_tokens,
+              c.avg_context_tokens                                            AS avg_context_tokens,
+              c.max_context_tokens                                            AS max_context_tokens,
+              c.sum_cache_read_tokens                                         AS sum_cache_read_tokens,
+              c.sidechain_cost_u                                              AS sidechain_cost_u,
+              MAX(0, ROUND((julianday(c.final_turn_at) - julianday(c.first_turn_at)) * 86400)) AS wall_time_s,
+              COALESCE((SELECT SUM(MAX((julianday(ts) - julianday(previous_ts)) * 86400, 0))
+                FROM (SELECT t.ts, LAG(t.ts) OVER (ORDER BY t.ts, t.message_id) AS previous_ts
+                  FROM turns t WHERE t.session_id = s.session_id ${filters.turnFilter}) gaps
+                WHERE previous_ts IS NOT NULL
+                  AND (julianday(ts) - julianday(previous_ts)) * 86400 <= @longGapS), 0) AS active_time_s,
               COALESCE((SELECT tm.model FROM turns tm
                          WHERE tm.session_id = s.session_id
                          GROUP BY tm.model
                          ORDER BY COUNT(*) DESC, tm.model ASC LIMIT 1), '')   AS model,
-              COALESCE(s.last_turn_at, c.max_ts)                              AS last_turn_at,
+              (SELECT json_group_array(observed.model)
+                 FROM (SELECT DISTINCT tm.model AS model
+                         FROM turns tm
+                        WHERE tm.session_id = s.session_id
+                        ORDER BY tm.model ASC) observed)                       AS models_json,
+              c.last_turn_at                                                  AS last_turn_at,
+              c.first_turn_at                                                 AS first_turn_at,
               s.api_error_count                                                AS api_error_count,
               s.compaction_count                                               AS compaction_count,
               s.interrupt_count                                                AS interrupt_count,
@@ -326,82 +509,80 @@ export function hotSessionsByCost(
               (SELECT COUNT(*) FROM tool_events te
                 WHERE te.session_id = s.session_id
                   AND te.result_bytes IS NOT NULL)                             AS tool_completed_count,
-              (SELECT COUNT(*) FROM tool_events te
-                WHERE te.session_id = s.session_id
-                  AND te.exit_class = 'TEST_FAIL'
-                  AND EXISTS (
-                    SELECT 1 FROM tool_event_metadata metadata
-                     WHERE metadata.event_id = te.event_id AND metadata.is_test_command = 1
-                  ))                                                          AS test_fail_count,
-              (SELECT COUNT(*) FROM tool_events te
+              (SELECT json_array(
+                 COALESCE(SUM(te.exit_class = 'TEST_FAIL'), 0),
+                 COALESCE(SUM(te.result_bytes IS NOT NULL), 0),
+                 COALESCE(SUM(te.exit_class = 'OK' AND te.result_bytes IS NOT NULL), 0),
+                 MIN(CASE WHEN te.exit_class = 'TEST_FAIL' AND te.result_bytes IS NOT NULL THEN te.ts END),
+                 MAX(CASE WHEN te.exit_class = 'OK' AND te.result_bytes IS NOT NULL THEN te.ts END)
+               ) FROM tool_events te
                  JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
-                WHERE te.session_id = s.session_id
-                  AND metadata.is_test_command = 1
-                  AND te.result_bytes IS NOT NULL)                             AS test_completed_count,
-              (SELECT COUNT(*) FROM tool_events te
-                 JOIN tool_event_metadata metadata ON metadata.event_id = te.event_id
-                WHERE te.session_id = s.session_id
-                  AND metadata.is_test_command = 1
-                  AND te.exit_class = 'OK'
-                  AND te.result_bytes IS NOT NULL)                             AS test_pass_count,
-              CASE WHEN NOT EXISTS (
-                     SELECT 1 FROM tool_events observed
-                      JOIN tool_event_metadata observed_metadata ON observed_metadata.event_id = observed.event_id
-                     WHERE observed.session_id = s.session_id
-                       AND observed_metadata.is_test_command = 1
-                       AND observed.result_bytes IS NOT NULL
-                   ) THEN 'NO_TEST_OUTCOMES'
-                   WHEN NOT EXISTS (
-                     SELECT 1 FROM tool_events failed
-                      JOIN tool_event_metadata failed_metadata ON failed_metadata.event_id = failed.event_id
-                     WHERE failed.session_id = s.session_id
-                       AND failed_metadata.is_test_command = 1
-                       AND failed.exit_class = 'TEST_FAIL'
-                       AND failed.result_bytes IS NOT NULL
-                   ) THEN 'NO_FAILURES_OBSERVED'
-                   WHEN EXISTS (
-                     SELECT 1 FROM tool_events passed
-                      JOIN tool_event_metadata passed_metadata ON passed_metadata.event_id = passed.event_id
-                     WHERE passed.session_id = s.session_id
-                       AND passed_metadata.is_test_command = 1
-                       AND passed.exit_class = 'OK'
-                       AND passed.result_bytes IS NOT NULL
-                       AND EXISTS (
-                         SELECT 1 FROM tool_events failed_before
-                          JOIN tool_event_metadata failed_before_metadata ON failed_before_metadata.event_id = failed_before.event_id
-                         WHERE failed_before.session_id = s.session_id
-                           AND failed_before_metadata.is_test_command = 1
-                           AND failed_before.exit_class = 'TEST_FAIL'
-                           AND failed_before.result_bytes IS NOT NULL
-                           AND failed_before.ts < passed.ts
-                       )
-                   ) THEN 'FAILED_THEN_PASSED' ELSE 'FAILURES_OBSERVED' END  AS test_outcome,
+              WHERE te.session_id = s.session_id AND metadata.is_test_command = 1) AS test_stats_json,
               s.gap_median_s                                                   AS gap_median_s,
               s.gap_p90_s                                                      AS gap_p90_s,
               s.long_gap_count                                                 AS long_gap_count,
               s.gap_n                                                          AS gap_n
          FROM candidate c JOIN sessions s ON s.session_id = c.session_id
-        ORDER BY c.cost_equiv_u DESC, s.session_id ASC`,
+         LEFT JOIN workspaces w ON w.workspace_id = c.workspace_id
+        ORDER BY c.${sortSql} ${directionSql}, s.session_id ASC`,
     )
-    .all(window === undefined ? { limit } : { limit, from: window.from, to: window.to });
+    .all({
+      limit,
+      offset: options.offset ?? 0,
+      longGapS: LONG_GAP_THRESHOLD_S,
+      ...filters.params,
+    });
   return (
     rows as Array<
       Omit<
         HotSessionRow,
+        | "models"
         | "api_error_eligible_request_count"
         | "api_error_rate"
         | "interrupts_supported"
         | "tool_error_rate"
-      > & { tool_completed_count: number; tool_completed_error_count: number }
+        | "test_fail_count"
+        | "test_completed_count"
+        | "test_pass_count"
+        | "test_outcome"
+      > & {
+        models_json: string;
+        test_stats_json: string;
+        tool_completed_count: number;
+        tool_completed_error_count: number;
+      }
     >
-  ).map((row) => ({
-    ...row,
-    api_error_eligible_request_count: null,
-    api_error_rate: null,
-    interrupts_supported: false,
-    tool_error_rate:
-      row.tool_completed_count > 0
-        ? row.tool_completed_error_count / row.tool_completed_count
-        : null,
-  }));
+  ).map(({ models_json, test_stats_json, ...row }) => {
+    const models = JSON.parse(models_json) as string[];
+    const [
+      testFailCount,
+      testCompletedCount,
+      testPassCount,
+      firstCompletedFail,
+      lastCompletedPass,
+    ] = JSON.parse(test_stats_json) as [number, number, number, string | null, string | null];
+    const testOutcome =
+      testCompletedCount === 0
+        ? "NO_TEST_OUTCOMES"
+        : firstCompletedFail === null
+          ? "NO_FAILURES_OBSERVED"
+          : lastCompletedPass !== null && firstCompletedFail < lastCompletedPass
+            ? "FAILED_THEN_PASSED"
+            : "FAILURES_OBSERVED";
+    return {
+      ...row,
+      models,
+      test_fail_count: testFailCount,
+      test_completed_count: testCompletedCount,
+      test_pass_count: testPassCount,
+      test_outcome: testOutcome,
+      api_error_eligible_request_count: null,
+      api_error_rate: null,
+      interrupts_supported: false,
+      tool_error_rate:
+        row.tool_completed_count > 0
+          ? row.tool_completed_error_count / row.tool_completed_count
+          : null,
+    };
+  });
 }

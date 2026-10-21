@@ -9,6 +9,7 @@ import { createServer } from "../../src/daemon/http.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { generateWeeklyReport, getReport, listReports } from "../../src/query/api/reports.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const NOW = new Date("2026-01-04T12:00:00.000Z");
@@ -23,17 +24,14 @@ function createEmptyDb(): Database.Database {
 }
 
 function seedRecommendations(): void {
-  const insert = db.prepare(
-    `INSERT INTO recommendations
-       (rec_id, provenance, detector_id, analysis_run_id, category, scope_workspace_id,
-        lever, modeled_savings_u_per_wk, modeled_formula_json, evidence_json, target_metric,
-        state, created_at, adopted_at, dismissed_until)
-     VALUES (?, 'RULE', ?, NULL, 'CONTEXT', NULL, ?, ?, '{}', '{}', 'context_tokens',
-             'PROPOSED', ?, NULL, NULL)`,
-  );
-
   for (let i = 1; i <= 6; i += 1) {
-    insert.run(`rec-report-${i}`, "D1", `Lever ${i}`, i * 100, `2026-01-0${i}T00:00:00.000Z`);
+    seedValidatedRecommendation(db, {
+      recId: `rec-report-${i}`,
+      scope: null,
+      savings: i * 100,
+      createdAt: `2026-01-0${i}T00:00:00.000Z`,
+      facts: { scope: "global" },
+    });
   }
 }
 

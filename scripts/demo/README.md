@@ -16,10 +16,14 @@ npx --package @playwright/cli playwright-cli -s=demo-usage run-code --filename s
 python scripts/demo/compose.py
 ```
 
-The capture uses the actual UI and fixes the clock to August 24, 2026, just after the
-historical fixture week. It makes no backend writes. The compositor adds an external
-synthetic-data footer to nine public screenshots in `docs/assets/` and prepares seven
-captioned frames plus `output/playwright/demo-usage/storyboard.json`.
+The capture uses the actual UI in the light theme and fixes the clock to August 24, 2026,
+just after the historical fixture week. It makes no backend writes. Edit the `ONLY` list at
+the top of `capture.js` to choose which shots to retake (the rest keep their current PNG).
+Test mode has no mock for the judge-verdict route, so `capture.js` answers it with a small
+synthetic payload inside the browser (diagnostics and workspace delivery have test-mode mocks). The compositor adds an external
+synthetic-data footer to every captured screenshot in `docs/assets/` (up to eleven) and,
+when all reel shots exist, prepares seven captioned frames plus
+`output/playwright/demo-usage/storyboard.json`.
 
 Use the Codex `demo-reel` skill's `scripts/build_reel.py` with that manifest and a new
 output directory to build the optional GIF, contact sheet and paused HTML review player.
@@ -35,3 +39,9 @@ npx --package @playwright/cli playwright-cli -s=demo-usage close
 ```
 
 Stop Vite with Ctrl+C in its terminal. No media is uploaded by these helpers.
+
+Dark set (Reddit post only, not exported): copy `capture.js` into `output/`, set `THEME = 'dark'`
+in the copy, create `output/playwright/demo-usage/raw-dark`, run the copy, then
+`python scripts/demo/compose.py --theme dark`. It captures every shot and writes the labelled PNGs to
+`docs/launch/reddit/dark/` and the reel scenes to `output/playwright/demo-usage/dark/`. Build the GIF
+from `dark/storyboard.json` as above and copy it to `docs/launch/reddit/dark/dashboard.gif`.

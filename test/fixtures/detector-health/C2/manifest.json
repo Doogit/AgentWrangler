@@ -1,0 +1,5 @@
+{
+  "id": "C2",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": { "fixture": "near-miss", "target_constant": "tool_name", "expect": "silent" }
+}

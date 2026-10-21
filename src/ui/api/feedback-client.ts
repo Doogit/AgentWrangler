@@ -2,10 +2,11 @@ import type { CooldownInput, MaterialityBand } from "../../query/api/decision-ra
 import type { FeedbackKind, FeedbackRow, GoalPreference } from "../../query/api/feedback-store";
 /**
  * Browser client for the RIQ3 relevance-feedback + goal-preference store.
- * Enveloped, token-gated writes (mirrors work-records-client). Exposed for
+ * Enveloped, token-gated writes. Exposed for
  * RIQ4 to wire a feedback control; no page uses it yet.
  */
 import type { ApiResponse } from "../../query/envelope";
+import { SessionTokenUnavailableError, withSessionToken } from "./session-token";
 
 export type { FeedbackKind, FeedbackRow, GoalPreference, MaterialityBand };
 
@@ -26,21 +27,26 @@ async function request<T>(
   method = "GET",
   body?: string,
 ): Promise<FeedbackResponse<T>> {
-  const headers: Record<string, string> = {};
-  if (method !== "GET") {
-    const response = await fetch("/api/token", { signal: AbortSignal.timeout(8000) });
-    const payload = response.ok ? ((await response.json()) as { token?: unknown }) : {};
-    if (typeof payload.token !== "string" || !payload.token)
-      throw new FeedbackClientError(401, "AUTHORIZATION_UNAVAILABLE");
-    headers["X-AgentWrangler-Token"] = payload.token;
-    headers["Content-Type"] = "application/json";
+  const send = (headers: Record<string, string>) =>
+    fetch(path, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body }),
+      signal: AbortSignal.timeout(8000),
+    });
+  let response: Response;
+  if (method === "GET") response = await send({});
+  else {
+    try {
+      response = await withSessionToken((token) =>
+        send({ "X-AgentWrangler-Token": token, "Content-Type": "application/json" }),
+      );
+    } catch (error) {
+      if (error instanceof SessionTokenUnavailableError)
+        throw new FeedbackClientError(401, "AUTHORIZATION_UNAVAILABLE");
+      throw error;
+    }
   }
-  const response = await fetch(path, {
-    method,
-    headers,
-    ...(body === undefined ? {} : { body }),
-    signal: AbortSignal.timeout(8000),
-  });
   const payload = await response.json().catch(() => null);
   if (!response.ok)
     throw new FeedbackClientError(

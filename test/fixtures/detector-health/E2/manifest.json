@@ -1,0 +1,12 @@
+{
+  "id": "E2",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    { "fixture": "near-miss-min-run", "target_constant": "E2_MIN_RUN_TURNS", "expect": "silent" },
+    {
+      "fixture": "near-miss-max-output",
+      "target_constant": "E2_MAX_OUTPUT_TOKENS",
+      "expect": "silent"
+    }
+  ]
+}

@@ -94,6 +94,8 @@ export interface Settings {
    * null when limit_tokens has never been auto-calibrated.
    */
   limit_resets_at: string | null;
+  /** Runtime cache-read weight used by cap-weighted projections. */
+  cap_read_coeff?: number;
   /** Workspace slug → repo path/canonical mappings. */
   workspace_mappings: WorkspaceMapping[];
   /** Parser health counters from WP1. */
@@ -123,6 +125,8 @@ export interface Settings {
    * null when never calibrated.
    */
   bytes_per_token_measured_at: string | null;
+  /** "Read usage via Claude Code /usage" toggle (USAGE-CLI). Absent on older daemons = on. */
+  usage_cli_enabled?: boolean;
 }
 
 /** Partial settings update payload. Only provided fields are changed. */
@@ -130,6 +134,7 @@ export interface SettingsUpdate {
   scan_roots?: string[];
   activity_window_secs?: number;
   limit_tokens?: number | null;
+  cap_read_coeff?: number;
   workspace_mappings?: Array<{
     workspace_id: string;
     repo_path?: string | null;
@@ -137,6 +142,8 @@ export interface SettingsUpdate {
   }>;
   /** Toggle the opt-in bytes→token calibration (R12). */
   bytes_per_token_calibration_enabled?: boolean;
+  /** Toggle the background Claude Code /usage reader (USAGE-CLI). */
+  usage_cli_enabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -211,9 +218,11 @@ type CalibrateBytesPerTokenResult = _CalibrateBytesPerTokenResult;
  * Returns ok:false when disabled or when <30 successful samples could be collected.
  * This is a write path; it requires the CSRF same-origin gate (enforced in http.ts).
  */
-export async function calibrateBytesPerToken(): Promise<ApiResponse<CalibrateBytesPerTokenResult>> {
+export async function calibrateBytesPerToken(
+  calibrate: typeof _calibrateBytesPerToken = _calibrateBytesPerToken,
+): Promise<ApiResponse<CalibrateBytesPerTokenResult>> {
   const db = getQueryDb();
-  const result = await _calibrateBytesPerToken(db);
+  const result = await calibrate(db);
   return buildResponse<CalibrateBytesPerTokenResult>(result, {
     claim_kind: "N_A",
     n: 1,

@@ -36,7 +36,10 @@ function comparisonPath(value: string): string {
 
 function isWithin(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+  );
 }
 
 /** Resolve symlinks/junctions through the nearest existing ancestor of a future path. */

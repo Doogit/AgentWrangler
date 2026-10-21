@@ -48,6 +48,7 @@ export {
   listSessions,
   getSession,
   getTurnTimeline,
+  getTurnTimelineThrough,
   listLiveSessions,
 } from "./overview.js";
 
@@ -81,9 +82,36 @@ export {
   getRecommendationCard,
   dismissRecommendation,
   adoptRecommendation,
+  undoAdoptRecommendation,
+  reopenRecommendation,
   deriveActiveGroups,
   buildSeededPrompt,
 } from "./recommendations.js";
+
+// HRE recommendation queue (RQU-1a). This is additive; legacy readers remain unchanged.
+export type { RecommendationQueueReadRequest } from "./recommendation-queue-reader.js";
+export { listRecommendationQueue } from "./recommendation-queue-reader.js";
+export type {
+  LegacyQueueProjection,
+  QueueArtifactKind,
+  QueueCompatibility,
+  QueueConfidenceTier,
+  QueueCursor,
+  QueueFilters,
+  QueueItem,
+  QueueMeasurementVerdict,
+  QueueQueryResult,
+  QueueRankedItem,
+  QueueSafetyClass,
+  QueueSort,
+  QueueValueBand,
+  RecommendationQueueSnapshot,
+} from "./recommendation-queue.js";
+export {
+  createRecommendationQueueSnapshot,
+  projectQueuePageToLegacy,
+  queryRecommendationQueue,
+} from "./recommendation-queue.js";
 
 // Assisted apply (W3-A)
 export type { ApplyJobPublic, ApplyJobStatus } from "../../apply/jobs.js";
@@ -166,6 +194,32 @@ export {
 } from "./effectiveness.js";
 export type { SessionDriver, SessionDrivers } from "./session-drivers.js";
 export { getSessionDrivers } from "./session-drivers.js";
+export type {
+  SessionStory,
+  StoryErrorGroup,
+  StoryHeadline,
+  StoryLane,
+  StorySpend,
+  StoryTurn,
+} from "./session-story.js";
+export { getSessionStory } from "./session-story.js";
+export type {
+  DiagnosticAnchor,
+  DiagnosticCategory,
+  DiagnosticCategoryGroup,
+  DiagnosticsView,
+} from "./diagnostics.js";
+export type {
+  AvoidableRow,
+  DiagnosticsBuilding,
+  DiagnosticsBuildProgress,
+  DiagnosticsPayload,
+  DiagnosticsReady,
+  DiagnosticsTriageView,
+  ReliabilityRow,
+  RiskRow,
+} from "./diagnostics-triage.js";
+export { buildDiagnosticsTriage } from "./diagnostics-triage.js";
 export type { LoopGuard } from "./loop-guard.js";
 export { getLoopGuard } from "./loop-guard.js";
 export type { HookConfig, HookConfigUpdate } from "./hook-config.js";

@@ -1,74 +1,144 @@
 /**
- * test/detector/d6-tool-result-bloat.test.ts — D6 TOOL_RESULT_BLOAT.
+ * test/detector/d6-tool-result-bloat.test.ts — D6 TOOL_RESULT_BLOAT (U7: A1's complement).
  *
- * A session qualifies when summed tool_result_bytes ≥ 30% of the session's
- * cap-weighted total AND ≥ 200 KB. Recs surface only when ≥ 3 sessions qualify.
+ * D6 prices the tool results at or under A1's 25,600 B floor (minus TaskOutput results over
+ * 10 KiB, which are A2's), each carried along its owner chain: one cache write plus a read on
+ * every later turn. Recs surface when ≥ 3 sessions carry such results and a workspace's carry
+ * cost reaches 1% of its spend in the window.
+ *
+ * U7 replaced the old turn-level share gate (bytes-as-tokens vs cap-weighted tokens, never
+ * reachable on real data) and the null-when-uncalibrated $; these fixtures are event-based.
  */
 
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { configSet } from "../../src/detector/calibration.js";
 import { runDetectors } from "../../src/detector/index.js";
-import { D6_ABS_FLOOR_BYTES, D6_MIN_SESSIONS } from "../../src/detector/savings.js";
+import { D6_MIN_SESSIONS } from "../../src/detector/savings.js";
+import { D6_READ_RULE } from "../../src/query/api/rec-actions/families/context.js";
+import { buildCardActions } from "../../src/query/api/rec-actions/index.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const NOW = new Date("2027-01-08T00:00:00.000Z");
-const TS = "2027-01-02T00:00:00.000Z";
+const START = Date.parse("2027-01-02T00:00:00.000Z");
+
+// claude-sonnet-4-6 list prices ($/MTok): cache read 0.30, 5-minute cache write 3.75.
+const READ = 0.3;
+const WRITE = 3.75;
+// Uncalibrated point: the mean of 2.7 and 4 bytes/token (RR U13). Results are priced above 10 KiB,
+// so SIZE carries 3,722 excess bytes = the 1,111 tokens the old 3,000 B at 2.7 B/token carried.
+const BPT = 3.35;
+const SIZE = 13_962;
+const EXCESS = SIZE - 10_240;
 
 let db: Database.Database;
+let seq = 0;
 
 beforeEach(() => {
   db = createInMemoryFixtureDb();
-  db.prepare(
-    `INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at)
-     VALUES ('ws-bloat','ws-bloat','2027-01-01T00:00:00.000Z')`,
-  ).run();
+  seq = 0;
 });
 
 afterEach(() => db.close());
 
-let seq = 0;
-function insBloatSession(sessionId: string, bytes: number, inputTokens: number, ts = TS): string {
-  const messageId = `msg-bloat-${seq++}`;
+/** One session of `turns` main turns, a minute apart, each re-reading ~100k cached tokens. */
+function insSession(
+  sessionId: string,
+  turns: number,
+  opts: { workspaceId?: string; startMs?: number; costU?: number } = {},
+): string[] {
+  const workspaceId = opts.workspaceId ?? "ws-bloat";
+  const startMs = opts.startMs ?? START;
   db.prepare(
-    `INSERT OR IGNORE INTO sessions
+    `INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at)
+     VALUES (?, ?, '2027-01-01T00:00:00.000Z')`,
+  ).run(workspaceId, workspaceId);
+  db.prepare(
+    `INSERT INTO sessions
        (session_id, workspace_id, file_path, first_turn_at, last_turn_at,
         state, turn_count, cost_equiv_u, hygiene_flags)
-     VALUES (?, 'ws-bloat', ?, ?, ?, 'RECONCILED', 0, 0, '[]')`,
-  ).run(sessionId, `/fake/${sessionId}.jsonl`, ts, ts);
-  db.prepare(
+     VALUES (?, ?, ?, ?, ?, 'RECONCILED', ?, 0, '[]')`,
+  ).run(
+    sessionId,
+    workspaceId,
+    `/fake/${sessionId}.jsonl`,
+    new Date(startMs).toISOString(),
+    new Date(startMs + turns * 60_000).toISOString(),
+    turns,
+  );
+  const insert = db.prepare(
     `INSERT INTO turns
        (message_id, session_id, workspace_id, ts, model,
         is_sidechain, input_tokens, output_tokens,
         cache_read_tokens, cache_write_5m, cache_write_1h, cache_write_other,
-        tool_result_bytes, pricing_snapshot_id, cost_equiv_u, cost_claim,
-        provisional, parser_version)
-     VALUES (?, ?, 'ws-bloat', ?, 'claude-sonnet',
-             0, ?, 0, 0, 0, 0, 0, ?, 'snap-sonnet', 0, 'LIST_EQUIV', 0, 'test-v1')`,
-  ).run(messageId, sessionId, ts, inputTokens, bytes);
-  return messageId;
+        tool_result_bytes, cost_equiv_u, cost_claim, provisional, parser_version)
+     VALUES (?, ?, ?, ?, 'claude-sonnet-4-6', 0, 10, 200, 100000, 2000, 0, 0, 0, ?,
+             'LIST_EQUIV', 0, 'test-v1')`,
+  );
+  const ids: string[] = [];
+  for (let i = 0; i < turns; i++) {
+    const messageId = `msg-d6-${seq++}`;
+    insert.run(
+      messageId,
+      sessionId,
+      workspaceId,
+      new Date(startMs + i * 60_000).toISOString(),
+      opts.costU ?? 37_500,
+    );
+    ids.push(messageId);
+  }
+  return ids;
 }
 
-let eventSeq = 0;
-function insToolEvent(
+/** A tool result owned by `ownerMessageId` (same ts as its owner turn). */
+function insResult(
   sessionId: string,
   ownerMessageId: string,
-  ts: string,
   toolName: string,
-  resultBytes: number,
-): string {
-  const eventId = `event-bloat-${eventSeq++}`;
+  bytes: number,
+  withMetadata = true,
+): void {
+  const eventId = `event-d6-${seq++}`;
+  const ts = (
+    db.prepare("SELECT ts FROM turns WHERE message_id = ?").get(ownerMessageId) as { ts: string }
+  ).ts;
   db.prepare(
-    `INSERT INTO tool_events
-       (event_id, session_id, ts, tool_name, result_bytes)
+    `INSERT INTO tool_events (event_id, session_id, ts, tool_name, result_bytes)
      VALUES (?, ?, ?, ?, ?)`,
-  ).run(eventId, sessionId, ts, toolName, resultBytes);
-  db.prepare(
-    `INSERT INTO tool_event_metadata
-       (event_id, owner_message_id, block_index, is_test_command)
-     VALUES (?, ?, ?, 0)`,
-  ).run(eventId, ownerMessageId, eventSeq);
-  return eventId;
+  ).run(eventId, sessionId, ts, toolName, bytes);
+  db.prepare("UPDATE turns SET tool_result_bytes = tool_result_bytes + ? WHERE message_id = ?").run(
+    bytes,
+    ownerMessageId,
+  );
+  if (withMetadata) {
+    db.prepare(
+      `INSERT INTO tool_event_metadata (event_id, owner_message_id, block_index, is_test_command)
+       VALUES (?, ?, 0, 0)`,
+    ).run(eventId, ownerMessageId);
+  }
+}
+
+/**
+ * Audit-shaped session: 60 turns, a 3,000 B result (Read/Bash/Grep in turn) on each of the
+ * first 30 turns. Each result is re-sent on every later turn of the session.
+ */
+function insAuditSession(sessionId: string, workspaceId = "ws-bloat", startMs = START): string[] {
+  const ids = insSession(sessionId, 60, { workspaceId, startMs });
+  const tools = ["Read", "Bash", "Grep"];
+  for (let i = 0; i < 30; i++) {
+    insResult(sessionId, ids[i] as string, tools[i % 3] as string, SIZE);
+  }
+  return ids;
+}
+
+/** Independent oracle: one audit session's carry cost, µ$ (result i is sent by 59 − i turns). */
+function auditSessionCarryU(bpt = BPT): number {
+  let total = 0;
+  for (let i = 0; i < 30; i++) {
+    const carry = 59 - i;
+    total += (EXCESS / bpt) * (WRITE + READ * (carry - 1));
+  }
+  return total;
 }
 
 function d6Recs(): Array<Record<string, unknown>> {
@@ -77,138 +147,159 @@ function d6Recs(): Array<Record<string, unknown>> {
     .all() as Array<Record<string, unknown>>;
 }
 
-// A bloated session: 300 KB of tool result over 200k input tokens.
-// After the bytes→tokens correction (÷4): 76800 tokens / 200000 = 0.384 ≥ 30% threshold.
-const BIG_BYTES = 300 * 1024; // 307200 bytes
-const CAP_INPUT = 200_000; // input tokens → cap_weighted_tokens = 200000 (no cache)
+function facts(rec: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(rec.evidence_json as string).facts as Record<string, unknown>;
+}
 
-describe("D6 — fires when the bloat pattern recurs", () => {
-  it("fires one rec per qualifying session when ≥ 3 qualify", () => {
-    insBloatSession("sess-b1", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-b2", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-b3", BIG_BYTES, CAP_INPUT);
+describe("D6 — fires on many mid-size results carried over long sessions (audit shape)", () => {
+  it("fires one rolled-up rec per workspace, priced on the results' carry", () => {
+    insAuditSession("sess-d6-1");
+    insAuditSession("sess-d6-2", "ws-bloat", START + 86_400_000);
+    insAuditSession("sess-d6-3", "ws-bloat", START + 2 * 86_400_000);
 
     const statuses = runDetectors(db, { now: NOW });
     expect(statuses.find((s) => s.detector_id === "D6")?.status).toBe("ACTIVE");
 
     const recs = d6Recs();
-    expect(recs.length).toBe(3);
+    expect(recs.length).toBe(1);
     const r = recs[0];
     if (!r) throw new Error("expected D6 rec");
     expect(r.category).toBe("TOOLING");
     expect(r.scope_workspace_id).toBe("ws-bloat");
 
-    // ── Formula-equality check (not tautological — computed independently from fixture values) ──
-    //
-    // Fixture: BIG_BYTES=307200 bytes, CAP_INPUT=200000 input tokens (all input, no cache).
-    // cap_weighted_tokens = 0.1*0 + 200000 + 0 = 200000 (coeff 0.1, no cache reads or writes).
-    // Sonnet cache-read price (snap-sonnet, index 2) = $0.30/MTok = 0.3 µUSD/token.
-    //
-    // Directional formula: bytes are converted to an approximate token exposure
-    // for the structural share only. It must not claim avoidable tokens or USD.
-    const EXPECTED_BLOAT_SHARE = 0.384;
-
-    expect(r.modeled_savings_u_per_wk).toBeNull();
+    // $ = 0.5 × carry, emitted even uncalibrated (2.7 bytes/token, labelled an estimate).
+    const carryU = 3 * auditSessionCarryU();
+    expect(r.modeled_savings_u_per_wk).toBe(Math.round(carryU * 0.5));
 
     const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-    expect(formula.model).toBe("D6_TOOL_RESULT_BLOAT_V1");
-    expect(formula.result_usd_per_wk).toBeUndefined();
-    expect(formula.kind).toBe("DIRECTIONAL");
-    const inputs = formula.inputs as Record<string, unknown>;
-    expect(inputs.tool_result_bytes).toBe(BIG_BYTES);
-    expect(inputs.bytes_per_token).toBe(4);
-    expect(inputs.bloat_share).toBe(EXPECTED_BLOAT_SHARE);
-    expect(inputs.session_cap_weighted_tokens).toBe(CAP_INPUT);
-    expect(inputs.saved_cap_tokens_per_wk).toBeUndefined();
-    expect(inputs.cache_read_price_usd_per_mtok).toBeUndefined();
+    expect(formula.formula_id).toBe("D6_TOOL_RESULT_BLOAT_V1");
+    expect(formula.estimate).toMatchObject({
+      basis: "E",
+      rank_value_u_per_wk: r.modeled_savings_u_per_wk,
+      summable: true,
+    });
+    expect((formula.estimate as { label: string }).label).toMatch(/estimate/);
 
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.tool_result_bytes).toBe(BIG_BYTES);
-    expect(typeof ev.bloat_share).toBe("number");
-    expect(ev.thresholds_unvalidated).toBe(true);
-    expect(ev.attributed_tool).toBeNull();
-    expect(ev.attributed_result_bytes).toBeNull();
-    expect(ev.carry_turns).toBeNull();
-    expect(ev.carry_exposure_tokens_directional).toBeNull();
-    expect(ev.attribution_note).toBeUndefined();
+    const ev = facts(r);
+    expect(ev.tool_result_bytes).toBe(3 * 30 * SIZE);
+    expect(ev.session_count).toBe(3);
+    expect((ev.session_ids as string[]).sort()).toEqual(["sess-d6-1", "sess-d6-2", "sess-d6-3"]);
+    expect(ev.bytes_per_token).toBe(BPT);
+    expect(ev.turn_count).toBe(180);
+    // Carry share of those sessions' spend: within the audit's observed 15–30% band.
+    const share = carryU / (180 * 37_500);
+    expect(ev.bloat_share).toBeCloseTo(share, 4);
+    expect(share).toBeGreaterThan(0.15);
+    expect(share).toBeLessThan(0.3);
   });
-});
 
-describe("D6 — event attribution and carry exposure", () => {
-  it("names the largest recurring tool class and computes directional carry", () => {
-    const firstTs = "2027-01-02T00:00:00.000Z";
-    const secondTs = "2027-01-03T00:00:00.000Z";
-    const thirdTs = "2027-01-04T00:00:00.000Z";
-    const fourthTs = "2027-01-05T00:00:00.000Z";
-    const firstMessage = insBloatSession("sess-attributed", 150 * 1024, 50_000, firstTs);
-    const secondMessage = insBloatSession("sess-attributed", 153_600, 50_000, secondTs);
-    const thirdMessage = insBloatSession("sess-attributed", 400 * 1024, 100_000, thirdTs);
-    insBloatSession("sess-attributed", 0, 50_000, fourthTs);
-    insBloatSession("sess-attributed-2", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-attributed-3", BIG_BYTES, CAP_INPUT);
+  it("U9: ranks sessions by result bytes and records the Read share", () => {
+    insAuditSession("sess-d6-a");
+    insAuditSession("sess-d6-b", "ws-bloat", START + 86_400_000);
+    const big = insAuditSession("sess-d6-c", "ws-bloat", START + 2 * 86_400_000);
+    // The last session by id carries extra Read results, so it is the largest.
+    for (let i = 30; i < 40; i++) insResult("sess-d6-c", big[i] as string, "Read", 20_000);
+    runDetectors(db, { now: NOW });
+    const r = d6Recs()[0];
+    if (!r) throw new Error("expected D6 rec");
+    const ev = facts(r);
+    expect(ev.session_ids).toEqual(["sess-d6-c", "sess-d6-a", "sess-d6-b"]);
+    expect(ev.read_result_bytes).toBe(3 * 10 * SIZE + 10 * 20_000);
+    expect(ev.read_call_count).toBe(40);
+    expect(ev.top_sessions).toEqual([
+      "sess-d6-c|618860|60",
+      "sess-d6-a|418860|60",
+      "sess-d6-b|418860|60",
+    ]);
+    const actions = buildCardActions({ detector_id: "D6", lever: "x", facts: ev });
+    const prompt = actions.primary.copy_text;
+    // D6 sizes are 1,024-based and labelled so (U9 r4): 290,000 B = 283 KiB, 470,000 B = 459 KiB.
+    expect(prompt).toContain("Read returned 604 KiB of the 1.4 MiB (42%) in 40 calls");
+    expect(prompt.indexOf("sess-d6-c")).toBeLessThan(prompt.indexOf("sess-d6-a"));
+    expect(prompt).toContain(D6_READ_RULE);
+  });
 
-    insToolEvent("sess-attributed", firstMessage, firstTs, "Bash", 150 * 1024);
-    insToolEvent("sess-attributed", secondMessage, secondTs, "Bash", 153_600);
-    // A larger one-off result must not displace the recurring Bash class.
-    insToolEvent("sess-attributed", thirdMessage, thirdTs, "Read", 400 * 1024);
+  it("U9 r5: a session's turn count includes its provisional turns, not 0", () => {
+    insAuditSession("sess-p-a");
+    insAuditSession("sess-p-b", "ws-bloat", START + 86_400_000);
+    insAuditSession("sess-p-c", "ws-bloat", START + 2 * 86_400_000);
+    // The last 20 turns of one session are still provisional (the file is being read).
+    db.prepare(
+      `UPDATE turns SET provisional = 1 WHERE session_id = 'sess-p-c'
+         AND ts >= ?`,
+    ).run(new Date(START + 2 * 86_400_000 + 40 * 60_000).toISOString());
+    runDetectors(db, { now: NOW });
+    const r = d6Recs()[0];
+    if (!r) throw new Error("expected D6 rec");
+    const labels = facts(r).top_sessions as string[];
+    expect(labels.find((label) => label.startsWith("sess-p-c|"))?.split("|")[2]).toBe("60");
+  });
 
-    // The fixture schema has no content column, and D6's evidence must remain
-    // structural even if a future schema adds one.
+  it("U9 r3: records the tools behind the bytes, Bash included", () => {
+    insAuditSession("sess-t-a");
+    insAuditSession("sess-t-b", "ws-bloat", START + 86_400_000);
+    const big = insAuditSession("sess-t-c", "ws-bloat", START + 2 * 86_400_000);
+    for (let i = 30; i < 40; i++) insResult("sess-t-c", big[i] as string, "Bash", 20_000);
+    runDetectors(db, { now: NOW });
+    const r = d6Recs()[0];
+    if (!r) throw new Error("expected D6 rec");
+    // Bash: 3 sessions x 10 audit results x SIZE + 10 x 20,000 B; Read and Grep: 3 x 10 x SIZE each.
+    expect(facts(r).top_tools).toEqual(["Bash|618860|40", "Grep|418860|30", "Read|418860|30"]);
+    const prompt = buildCardActions({ detector_id: "D6", lever: "x", facts: facts(r) }).primary
+      .copy_text;
+    expect(prompt).toContain("By tool: Bash 604 KiB in 40 calls");
+  });
+
+  it("keeps evidence structural (no content, input, output or path keys)", () => {
+    insAuditSession("sess-s1");
+    insAuditSession("sess-s2");
+    insAuditSession("sess-s3");
+    // The fixture schema has no content column; D6's evidence must stay structural even if one
+    // is added.
     db.exec("ALTER TABLE tool_events ADD COLUMN content TEXT");
 
     runDetectors(db, { now: NOW });
-    const r = d6Recs().find((rec) => {
-      const evidence = JSON.parse(rec.evidence_json as string) as Record<string, unknown>;
-      return evidence.session_id === "sess-attributed";
-    });
-    if (!r) throw new Error("expected attributed D6 rec");
-
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.attributed_tool).toBe("Bash");
-    expect(ev.attributed_result_bytes).toBe(BIG_BYTES);
-    expect(ev.carry_turns).toBe(3);
-    expect(ev.carry_exposure_tokens_directional).toBe((BIG_BYTES * 3) / 4);
+    const r = d6Recs()[0];
+    if (!r) throw new Error("expected D6 rec");
+    const ev = facts(r);
     expect(JSON.stringify(ev)).not.toContain("content");
     expect(Object.keys(ev).some((key) => /input|output|path/i.test(key))).toBe(false);
-    expect(r.modeled_savings_u_per_wk).toBeNull();
-
-    const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-    expect(formula.kind).toBe("DIRECTIONAL");
   });
+});
 
-  it("degrades to session-level evidence when event metadata is absent", () => {
-    const targetTs = "2027-01-02T00:00:00.000Z";
-    insBloatSession("sess-no-meta", BIG_BYTES, CAP_INPUT, targetTs);
-    insBloatSession("sess-no-meta-2", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-no-meta-3", BIG_BYTES, CAP_INPUT);
-    db.prepare(
-      `INSERT INTO tool_events
-         (event_id, session_id, ts, tool_name, result_bytes)
-       VALUES ('event-no-meta', 'sess-no-meta', ?, 'Bash', ?)`,
-    ).run(targetTs, BIG_BYTES);
+describe("D6 — one owner per result (no double count with A1 or A2)", () => {
+  it("leaves results over 25,600 B to A1 and TaskOutput results over 10 KiB to A2", () => {
+    for (const sessionId of ["sess-o1", "sess-o2", "sess-o3"]) {
+      const ids = insAuditSession(sessionId);
+      insResult(sessionId, ids[0] as string, "Read", 25_601); // A1's
+      insResult(sessionId, ids[1] as string, "TaskOutput", 10_241); // A2's
+      insResult(sessionId, ids[2] as string, "TaskOutput", 10_240); // D6's (at A2's floor)
+      insResult(sessionId, ids[3] as string, "Read", 25_600); // D6's (at A1's floor)
+    }
 
     runDetectors(db, { now: NOW });
-    const r = d6Recs().find((rec) => {
-      const evidence = JSON.parse(rec.evidence_json as string) as Record<string, unknown>;
-      return evidence.session_id === "sess-no-meta";
-    });
-    if (!r) throw new Error("expected session-level D6 rec");
+    const r = d6Recs()[0];
+    if (!r) throw new Error("expected D6 rec");
+    expect(facts(r).tool_result_bytes).toBe(3 * (30 * SIZE + 10_240 + 25_600));
+  });
+});
 
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.tool_result_bytes).toBe(BIG_BYTES);
-    expect(ev.attributed_tool).toBeNull();
-    expect(ev.attributed_result_bytes).toBeNull();
-    expect(ev.carry_turns).toBeNull();
-    expect(ev.carry_exposure_tokens_directional).toBeNull();
-    expect(r.modeled_savings_u_per_wk).toBeNull();
+describe("D6 — needs owner metadata to price carry", () => {
+  it("stays quiet when results have no owner turn (carry cannot be priced)", () => {
+    for (const sessionId of ["sess-nm1", "sess-nm2", "sess-nm3"]) {
+      const ids = insSession(sessionId, 60);
+      for (let i = 0; i < 30; i++) insResult(sessionId, ids[i] as string, "Read", SIZE, false);
+    }
+    runDetectors(db, { now: NOW });
+    expect(d6Recs().length).toBe(0);
   });
 });
 
 describe("D6 — determinism", () => {
   it("two passes over the same frozen DB yield identical rows", () => {
-    insBloatSession("sess-det1", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-det2", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-det3", BIG_BYTES, CAP_INPUT);
+    insAuditSession("sess-det1");
+    insAuditSession("sess-det2");
+    insAuditSession("sess-det3");
 
     runDetectors(db, { now: NOW });
     const first = d6Recs();
@@ -218,30 +309,54 @@ describe("D6 — determinism", () => {
   });
 });
 
+describe("D6 — multi-workspace rollup", () => {
+  it("emits one rec per qualifying workspace when sessions span multiple workspaces", () => {
+    // 2 sessions in ws-a + 1 in ws-b → 3 carrying sessions (recurrence gate passes).
+    insAuditSession("sess-mw-a1", "ws-a");
+    insAuditSession("sess-mw-a2", "ws-a");
+    insAuditSession("sess-mw-b1", "ws-b");
+
+    runDetectors(db, { now: NOW });
+    const recs = d6Recs();
+    expect(recs.length).toBe(2);
+
+    const recA = recs.find((r) => r.scope_workspace_id === "ws-a");
+    const recB = recs.find((r) => r.scope_workspace_id === "ws-b");
+    if (!recA) throw new Error("expected rec for ws-a");
+    if (!recB) throw new Error("expected rec for ws-b");
+
+    const evA = facts(recA);
+    expect(evA.session_count).toBe(2);
+    expect(evA.tool_result_bytes).toBe(2 * 30 * SIZE);
+    expect((evA.session_ids as string[]).sort()).toEqual(["sess-mw-a1", "sess-mw-a2"]);
+
+    const evB = facts(recB);
+    expect(evB.session_count).toBe(1);
+    expect(evB.tool_result_bytes).toBe(30 * SIZE);
+    expect(evB.session_ids).toContain("sess-mw-b1");
+  });
+});
+
 describe("D6 — stays quiet", () => {
-  it("does not fire when only 2 sessions qualify (recurrence gate)", () => {
-    insBloatSession("sess-q1", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-q2", BIG_BYTES, CAP_INPUT);
+  it("does not fire when only 2 sessions carry results (recurrence gate)", () => {
+    insAuditSession("sess-q1");
+    insAuditSession("sess-q2");
     const statuses = runDetectors(db, { now: NOW });
     expect(statuses.find((s) => s.detector_id === "D6")?.status).toBe("INACTIVE");
     expect(d6Recs().length).toBe(0);
   });
 
-  it("does not fire on sessions below the 200 KB absolute floor", () => {
-    const small = D6_ABS_FLOOR_BYTES - 1; // huge share but under the floor
-    insBloatSession("sess-s1", small, 1000);
-    insBloatSession("sess-s2", small, 1000);
-    insBloatSession("sess-s3", small, 1000);
-    runDetectors(db, { now: NOW });
-    expect(d6Recs().length).toBe(0);
-  });
+  it("does not fire when the carry cost is under 1% of the workspace's spend", () => {
+    insAuditSession("sess-l1");
+    insAuditSession("sess-l2");
+    insAuditSession("sess-l3");
+    // ~$1,000 of other spend in the workspace: the ~$1.7 carry is ~0.17% of it.
+    insSession("sess-l-big", 10, { costU: 100_000_000 });
 
-  it("does not fire when the bloat share is below 30%", () => {
-    // 300 KB bytes over a very large cap total → share ≪ 30%.
-    insBloatSession("sess-l1", BIG_BYTES, 50_000_000);
-    insBloatSession("sess-l2", BIG_BYTES, 50_000_000);
-    insBloatSession("sess-l3", BIG_BYTES, 50_000_000);
-    runDetectors(db, { now: NOW });
+    const statuses = runDetectors(db, { now: NOW });
+    const d6 = statuses.find((s) => s.detector_id === "D6");
+    expect(d6?.status).toBe("INACTIVE");
+    expect(d6?.note).toMatch(/under 1% of workspace spend/);
     expect(d6Recs().length).toBe(0);
   });
 });
@@ -253,15 +368,14 @@ describe("D6 — INACTIVE below MIN_SESSIONS carries an honest note", () => {
     const statuses = runDetectors(db, { now: NOW });
     const d6 = statuses.find((s) => s.detector_id === "D6");
     expect(d6?.status).toBe("INACTIVE");
-    // The note names the actual count and the threshold — honest, not just empty fired[].
     expect(d6?.note).toMatch(/0 bloated session/);
     expect(d6?.note).toContain(String(D6_MIN_SESSIONS));
     expect(d6Recs().length).toBe(0);
   });
 
   it("reports INACTIVE with count=2 when two sessions qualify (< MIN_SESSIONS)", () => {
-    insBloatSession("sess-n1", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-n2", BIG_BYTES, CAP_INPUT);
+    insAuditSession("sess-n1");
+    insAuditSession("sess-n2");
 
     const statuses = runDetectors(db, { now: NOW });
     const d6 = statuses.find((s) => s.detector_id === "D6");
@@ -271,90 +385,31 @@ describe("D6 — INACTIVE below MIN_SESSIONS carries an honest note", () => {
   });
 });
 
-// ── R12 calibration gate: modeled_savings null vs non-null ────────────────────
+// ── Calibration: modeled (basis P) when calibrated, estimate (basis E) otherwise ──
 
-describe("D6 — calibration gate (R12)", () => {
-  it("keeps modeled_savings_u_per_wk null when no calibration is present", () => {
-    // Seed 3 qualifying sessions — no calibration in user_config.
-    insBloatSession("sess-cal-nocal-1", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-cal-nocal-2", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-cal-nocal-3", BIG_BYTES, CAP_INPUT);
-
-    runDetectors(db, { now: NOW });
-    const recs = d6Recs();
-    expect(recs.length).toBe(3);
-    for (const r of recs) {
-      // Without calibration, savings must be null — honest default.
-      expect(r.modeled_savings_u_per_wk).toBeNull();
-      const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-      // Directional formula (no result_usd_per_wk headline).
-      expect(formula.kind).toBe("DIRECTIONAL");
-      expect(formula.result_usd_per_wk).toBeUndefined();
-    }
-  });
-
-  it("emits non-null modeled_savings and a calibration caveat when calibrated", () => {
-    // Seed a calibrated bytes_per_token in user_config.
-    const measuredAt = new Date().toISOString();
+describe("D6 — calibration", () => {
+  it("prices at the calibrated ratio and stamps a modeled (basis P) figure when calibrated", () => {
     configSet(db, "bytes_per_token", "3.65");
-    configSet(db, "bytes_per_token_measured_at", measuredAt);
+    configSet(db, "bytes_per_token_measured_at", new Date().toISOString());
     configSet(
       db,
       "bytes_per_token_provenance",
       "calibrated 2026-09-02 via count_tokens · model claude-sonnet-4-6 · N=150 · median 3.6500",
     );
-
-    // Seed sessions with event attribution so carry_exposure is non-null.
-    // Session has BIG_BYTES of tool_result and recurring tool events.
-    const firstTs = "2027-01-02T00:00:00.000Z";
-    const secondTs = "2027-01-03T00:00:00.000Z";
-    const thirdTs = "2027-01-04T00:00:00.000Z";
-    const msg1 = insBloatSession("sess-cal-1", BIG_BYTES, CAP_INPUT, firstTs);
-    const msg2 = insBloatSession("sess-cal-1", BIG_BYTES, CAP_INPUT, secondTs);
-    insBloatSession("sess-cal-1", 0, 10_000, thirdTs);
-    insBloatSession("sess-cal-2", BIG_BYTES, CAP_INPUT);
-    insBloatSession("sess-cal-3", BIG_BYTES, CAP_INPUT);
-
-    // Insert recurring tool events so d6Attribution can compute carry_exposure.
-    insToolEvent("sess-cal-1", msg1, firstTs, "Bash", BIG_BYTES);
-    insToolEvent("sess-cal-1", msg2, secondTs, "Bash", BIG_BYTES);
+    insAuditSession("sess-cal-1");
+    insAuditSession("sess-cal-2");
+    insAuditSession("sess-cal-3");
 
     runDetectors(db, { now: NOW });
-    const recs = d6Recs();
-    expect(recs.length).toBeGreaterThanOrEqual(3);
-
-    // Find the rec for sess-cal-1 which has attribution.
-    const r = recs.find((rec) => {
-      const ev = JSON.parse(rec.evidence_json as string) as Record<string, unknown>;
-      return ev.session_id === "sess-cal-1";
+    const r = d6Recs()[0];
+    if (!r) throw new Error("expected D6 rec");
+    expect(r.modeled_savings_u_per_wk).toBe(Math.round(3 * auditSessionCarryU(3.65) * 0.5));
+    const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
+    expect(formula.estimate).toMatchObject({
+      basis: "P",
+      rank_value_u_per_wk: r.modeled_savings_u_per_wk,
+      summable: true,
     });
-    if (!r) throw new Error("expected D6 rec for sess-cal-1");
-
-    // With calibration + carry_exposure, savings should be non-null.
-    // (carry_turns must be > 0 for savings to fire; we have 3 turns in the session)
-    if (r.modeled_savings_u_per_wk !== null) {
-      expect(typeof r.modeled_savings_u_per_wk).toBe("number");
-      expect(r.modeled_savings_u_per_wk).toBeGreaterThan(0);
-
-      const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-      expect(formula.model).toBe("D6_TOOL_RESULT_BLOAT_V1");
-      expect(typeof formula.result_usd_per_wk).toBe("number");
-
-      const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-      const cal = ev.calibration as Record<string, unknown>;
-      expect(cal).toBeDefined();
-      expect(cal.tokenizer).toBe("anthropic count_tokens");
-      expect(cal.model).toBe("claude-sonnet-4-6");
-      expect(cal.measured_at).toBe(measuredAt);
-      expect(typeof cal.note).toBe("string");
-    }
-    // Recs without attribution (sess-cal-2, sess-cal-3) still exist.
-    const othersNull = recs
-      .filter((rec) => {
-        const ev = JSON.parse(rec.evidence_json as string) as Record<string, unknown>;
-        return ev.session_id !== "sess-cal-1";
-      })
-      .every((rec) => rec.modeled_savings_u_per_wk === null);
-    expect(othersNull).toBe(true);
+    expect(facts(r).bytes_per_token).toBe(3.65);
   });
 });

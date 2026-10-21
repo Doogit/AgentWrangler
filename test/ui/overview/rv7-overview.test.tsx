@@ -9,7 +9,7 @@
  *   - WorkspaceTable shows teaser ("Top Workspaces") + "All workspaces" link
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../../src/ui/api/client";
 import {
@@ -21,6 +21,8 @@ import {
   mockHeadroomTrend,
   mockHookConfigResponse,
   mockHotSessions,
+  mockLimits,
+  mockLinkageRate,
   mockLiveSessions,
   mockRecommendations,
   mockSuccessRate,
@@ -31,22 +33,43 @@ import HookTile from "../../../src/ui/overview/HookTile";
 import OverviewPage from "../../../src/ui/overview/OverviewPage";
 import RateLimitGauges from "../../../src/ui/overview/RateLimitGauges";
 
+import {
+  fetchCacheWriteTrend,
+  fetchFlavorDecomposition,
+  fetchGlobalOverview,
+  fetchLiveSessions,
+  serveOverviewViewFromLegacyMocks,
+} from "./overview-view-from-legacy";
+
 vi.mock("../../../src/ui/api/client");
+beforeEach(serveOverviewViewFromLegacyMocks);
 
 afterEach(() => cleanup());
 
 function setupCommonMocks() {
-  vi.mocked(client.fetchGlobalOverview).mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
   vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
-  vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
+  fetchLiveSessions.mockResolvedValue(mockLiveSessions());
   vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
   vi.mocked(client.fetchSuccessRate).mockResolvedValue(mockSuccessRate());
   vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
-  vi.mocked(client.fetchFlavorDecomposition).mockResolvedValue(
-    mockFlavorDecomposition({ preset: "7d" }),
-  );
-  vi.mocked(client.fetchCacheWriteTrend).mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
+  fetchFlavorDecomposition.mockResolvedValue(mockFlavorDecomposition({ preset: "7d" }));
+  fetchCacheWriteTrend.mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
   vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
+  vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
+  vi.mocked(client.fetchLinkageRate).mockResolvedValue(mockLinkageRate());
+  vi.mocked(client.fetchStatus).mockResolvedValue({
+    sessions: 574,
+    files_seen: 600,
+    files_parsed: 600,
+    scan_state: "complete",
+    lines_quarantined: 0,
+    invalid_scan_root_count: 0,
+  });
+  vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({
+    configured: false,
+    source: "none",
+  } as never);
 }
 
 beforeEach(() => {
@@ -159,96 +182,35 @@ describe("HookTile — not installed", () => {
 // OverviewPage — integrated tile row
 // ---------------------------------------------------------------------------
 
-describe("OverviewPage RV7 tile row", () => {
-  it("renders the rv7-tile-row with rate-limit + hook + hot-sessions tiles", async () => {
+describe("OverviewPage v2 layout", () => {
+  it("mounts the Usage limits hero as the first section and drops the old operational grid", async () => {
     const { container } = render(<OverviewPage />);
     await waitFor(() => {
-      expect(container.querySelector("[data-testid='rv7-tile-row']")).not.toBeNull();
-      expect(container.querySelector("[data-testid='rate-limit-gauges']")).not.toBeNull();
-      expect(container.querySelector("[data-testid='hook-tile']")).not.toBeNull();
-      expect(container.querySelector("[data-testid='hot-sessions-tile']")).not.toBeNull();
+      expect(container.querySelector("[data-testid='usage-limits-card']")).not.toBeNull();
     });
+    // RV7 operational grid (rate-limit gauges + hook tile) is retired from Overview.
+    expect(container.querySelector("[data-testid='rv7-tile-row']")).toBeNull();
+    expect(container.querySelector("[data-testid='rate-limit-gauges']")).toBeNull();
+    expect(container.querySelector("[data-testid='hook-tile']")).toBeNull();
+    // Hot Sessions tile stays gone; LiveStrip is the session surface.
+    expect(container.querySelector("[data-testid='hot-sessions-tile']")).toBeNull();
+    expect(container.querySelector(".live-strip")).not.toBeNull();
   });
 
-  it("hot-sessions tile renders top-3 rows from fixture", async () => {
-    const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      // Fixture has 3 sessions
-      expect(container.querySelectorAll("[data-testid^='hot-session-row-']").length).toBe(3);
-    });
-  });
-
-  it("hot-sessions rows call onSelectSession on click", async () => {
-    const onSelectSession = vi.fn();
-    const firstSession = mockHotSessions()[0];
-    if (!firstSession) throw new Error("missing hot session fixture");
-    const { container } = render(<OverviewPage onSelectSession={onSelectSession} />);
-    await waitFor(() => {
-      expect(
-        container.querySelector(`[data-testid='hot-session-row-${firstSession.session_id}']`),
-      ).not.toBeNull();
-    });
-    fireEvent.click(screen.getByTestId(`hot-session-row-${firstSession.session_id}`));
-    expect(onSelectSession).toHaveBeenCalledTimes(1);
-    expect(onSelectSession).toHaveBeenCalledWith(firstSession.session_id);
-  });
-
-  it("SuccessRateCard (SUCCESS RATE label) is NOT present on Overview", async () => {
-    const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      // Wait for overview data to render
-      expect(container.querySelector("[data-testid='rv7-tile-row']")).not.toBeNull();
-    });
-    // "SUCCESS RATE" label must not appear — it lives on Workspaces now
-    const kpiLabels = Array.from(container.querySelectorAll(".kpi-label"));
-    const hasSuccessRate = kpiLabels.some((el) => el.textContent?.trim() === "SUCCESS RATE");
-    expect(hasSuccessRate).toBe(false);
-  });
-
-  it("WorkspaceTable renders as teaser with 'Top Workspaces' heading", async () => {
-    const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      const headings = Array.from(container.querySelectorAll("h2"));
-      const found = headings.some((h) => h.textContent?.includes("Top Workspaces"));
-      expect(found).toBe(true);
-    });
-  });
-
-  it("WorkspaceTable teaser shows 'All workspaces' link to #/workspaces", async () => {
-    const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      const link = container.querySelector(
-        "[data-testid='all-workspaces-link']",
-      ) as HTMLAnchorElement;
-      expect(link).not.toBeNull();
-      expect(link.href).toContain("#/workspaces");
-    });
+  it("links the Workspaces section title to #/workspaces and shows the teaser table", async () => {
+    render(<OverviewPage />);
+    const heading = await screen.findByRole("link", { name: "Workspaces" });
+    expect(heading.getAttribute("href")).toBe("#/workspaces");
+    const link = (await screen.findByTestId("all-workspaces-link")) as HTMLAnchorElement;
+    expect(link.href).toContain("#/workspaces");
   });
 
   it("WorkspaceTable teaser shows at most 3 workspace rows", async () => {
     const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      // Wait for workspaces to render
-      expect(container.querySelector("[data-testid='all-workspaces-link']")).not.toBeNull();
-    });
-    // Fixture has 5 workspaces; teaser should show at most 3
-    const rows = container.querySelectorAll("tbody tr");
+    await screen.findByTestId("all-workspaces-link");
+    // Fixture has 5 workspaces; teaser shows at most 3.
+    const rows = container.querySelectorAll("[aria-labelledby='workspaces-title'] tbody tr");
+    expect(rows.length).toBeGreaterThan(0);
     expect(rows.length).toBeLessThanOrEqual(3);
-  });
-
-  it("rate-limit gauges show both utilization bars when signed in", async () => {
-    const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      expect(container.querySelectorAll("[role='progressbar']").length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
-  it("rate-limit gauges show Settings link when signed out", async () => {
-    vi.mocked(client.fetchBurnStatus).mockResolvedValue(mockBurnStatusSignedOut());
-    const { container } = render(<OverviewPage />);
-    await waitFor(() => {
-      const settingsLink = container.querySelector("a[href='#/settings']");
-      expect(settingsLink).not.toBeNull();
-    });
   });
 });

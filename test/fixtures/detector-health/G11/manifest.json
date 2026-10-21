@@ -1,0 +1,34 @@
+{
+  "id": "G11",
+  "positive": {
+    "fixture": "positive",
+    "rows": "rows-positive.json",
+    "expect": "fires"
+  },
+  "near_misses": [
+    {
+      "fixture": "near-miss-count",
+      "rows": "rows-near-miss-count.json",
+      "target_constant": "G11_MIN_COMPARISON_WORK_ITEMS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-window",
+      "rows": "rows-near-miss-window.json",
+      "target_constant": "G11_TRAILING_COMPARISON_DAYS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-p90",
+      "rows": "rows-near-miss-p90.json",
+      "target_constant": "p90 of baseline tokens",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-share",
+      "rows": "rows-near-miss-share.json",
+      "target_constant": "G11_MIN_PCT_OF_90D_SPEND",
+      "expect": "silent"
+    }
+  ]
+}

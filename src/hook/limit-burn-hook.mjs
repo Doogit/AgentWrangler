@@ -23,26 +23,28 @@ export function stageFromStatus(status) {
   return null;
 }
 
-/** Convert an endpoint stage to the only hook output it may emit. */
+/**
+ * Convert an endpoint stage to the only hook output it may emit.
+ * additionalContext must sit inside hookSpecificOutput (Claude Code ignores it at the top level);
+ * no permissionDecision, since "allow" would skip the user's permission prompt.
+ */
 export function stageToStdout(stage) {
   if (stage === "checkpoint") {
     return JSON.stringify({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: "allow",
+        additionalContext:
+          "AgentWrangler: 5h or 7d rate-limit cap >=50% consumed. Checkpoint your work now.",
       },
-      additionalContext:
-        "AgentWrangler: 5h or 7d rate-limit cap >=50% consumed. Checkpoint your work now.",
     });
   }
   if (stage === "soft") {
     return JSON.stringify({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: "allow",
+        additionalContext:
+          "AgentWrangler: 5h or 7d rate-limit cap >=15% consumed. Consider checkpointing.",
       },
-      additionalContext:
-        "AgentWrangler: 5h or 7d rate-limit cap >=15% consumed. Consider checkpointing.",
     });
   }
   return "";
@@ -91,7 +93,7 @@ function readStdin() {
 }
 
 async function fetchBurnStatus() {
-  const port = process.env.AW_PORT ?? 47821;
+  const port = process.env.AW_PORT ?? 2929;
   const response = await fetch(`http://127.0.0.1:${port}/api/burn-status`, {
     signal: AbortSignal.timeout(500),
   });

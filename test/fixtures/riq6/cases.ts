@@ -414,9 +414,31 @@ export const RIQ6_CASES: readonly Riq6Case[] = Object.freeze([
   ),
 ]);
 
+let migratedSchema: Buffer | undefined;
+
+/** Cache schema bytes only; each case still owns a fresh, independently seeded database. */
+function emptySchema(): Buffer {
+  if (migratedSchema === undefined) {
+    const db = new Database(":memory:");
+    try {
+      db.pragma("foreign_keys = ON");
+      runMigrations(db);
+      migratedSchema = db.serialize();
+    } finally {
+      db.close();
+    }
+  }
+  return migratedSchema;
+}
+
 export function createRiq6Db(caseDefinition: Riq6Case): Database.Database {
-  const db = new Database(":memory:");
+  const db = new Database(emptySchema());
   db.pragma("foreign_keys = ON");
-  caseDefinition.seed(db);
-  return db;
+  try {
+    caseDefinition.seed(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }

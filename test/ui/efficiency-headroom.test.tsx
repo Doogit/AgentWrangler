@@ -5,7 +5,7 @@
  *   - Individual modeled opportunities render without a misleading combined percentage.
  *   - Missing opportunity coverage renders the honest empty state (no NaN / ∞).
  *   - No "$X wasted" / "$X saved" headline (INT-5 guard).
- *   - Framed as "Possible improvement" / "early upper estimate".
+ *   - Framed as addressable spend with unclaimed recommendation coverage.
  */
 
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
@@ -84,27 +84,28 @@ describe("HeadroomSummary — individual opportunities", () => {
     expect(queryByRole("button", { name: "See breakdown →" })).toBeNull();
   });
 
-  it("frames output as 'Possible improvement' — never a dollar-headline (INT-5)", async () => {
+  it("frames output as addressable spend with unclaimed coverage", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("Possible improvement");
+    expect(text).toContain("Addressable spend");
+    expect(text).toContain("not yet on the claim ledger");
     // INT-5: never a bare $X wasted / $X saved headline
     expect(text.toLowerCase()).not.toMatch(/\$[\d.]+\s*wasted/);
     expect(text.toLowerCase()).not.toMatch(/\$[\d.]+\s*saved/);
   });
 
-  it("counts the open modeled opportunities in the summary line", async () => {
+  it("describes attributed spend in the summary line", async () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull();
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("1 open modeled opportunity");
+    expect(text).toContain("of spend is targeted by open recommendations");
   });
 });
 
@@ -133,7 +134,7 @@ describe("HeadroomSummary — unavailable opportunity coverage", () => {
     const summaryEl = container.querySelector("[data-testid='headroom-summary']");
     const summaryText = summaryEl?.textContent ?? "";
     // The headroom row must render without crashing
-    expect(summaryText).toContain("Possible improvement");
+    expect(summaryText).toContain("Addressable spend");
     // Missing legacy opportunity coverage never renders a numeric percentage.
     expect(summaryText).not.toMatch(/\d+%/);
     expect(summaryText).toContain("Individual modeled estimates were not provided");

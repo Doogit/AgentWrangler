@@ -123,6 +123,17 @@ describe("FB5 — In-session guards: threshold inputs auto-save", () => {
     expect(screen.getByLabelText("Idle cutoff (seconds)")).toBeTruthy();
   });
 
+  it("formats the context window with thousands separators and saves its numeric value on blur", async () => {
+    render(<SettingsPage />);
+    const input = await screen.findByLabelText("Context window (tokens)");
+    expect((input as HTMLInputElement).value).toBe("200,000");
+    fireEvent.change(input, { target: { value: "250,000" } });
+    fireEvent.blur(input);
+    await waitFor(() =>
+      expect(client.saveHookConfig).toHaveBeenCalledWith({ context_window: 250_000 }),
+    );
+  });
+
   it("soft-percent input auto-saves as a fraction on change", async () => {
     render(<SettingsPage />);
     const softInput = await screen.findByLabelText("Soft threshold percent");

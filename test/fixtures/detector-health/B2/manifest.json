@@ -1,0 +1,9 @@
+{
+  "id": "B2",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "D8_TTL_1H_GAP_MIN",
+    "expect": "silent"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "D5",
+  "positive": { "rows": "positive.rows.json", "expect": "fires" },
+  "near_misses": [
+    {
+      "rows": "near-miss-warn.rows.json",
+      "target_constant": "WARN_PROJECTED_PCT",
+      "expect": "silent"
+    },
+    {
+      "rows": "near-miss-age.rows.json",
+      "target_constant": "SNAPSHOT_MAX_AGE_MS",
+      "expect": "silent"
+    },
+    { "rows": "near-miss-gap.rows.json", "target_constant": "PACE_WINDOW_MS", "expect": "silent" }
+  ]
+}

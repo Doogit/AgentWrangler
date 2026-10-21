@@ -12,7 +12,13 @@
 
 import { loadConfig } from "../../daemon/config.js";
 import type { Db } from "../../db/open.js";
-import { PREMIUM_MODEL_SQL, modelInputListPrice } from "../../ingest/pricing.js";
+import { prep } from "../../db/stmt-cache.js";
+import {
+  KNOWN_MODELS,
+  PREMIUM_MODEL_SQL,
+  UNCONFIRMED_MODEL_PREFIX,
+  modelInputListPrice,
+} from "../../ingest/pricing.js";
 import { getQueryDb } from "../db-context.js";
 import type {
   ApiResponse,
@@ -97,6 +103,16 @@ export interface ModelMixRow {
   turns: number;
 }
 
+export interface SubagentSpend {
+  total_cost_u: number;
+  sidechain_cost_u: number;
+  share: number;
+  sessions_with_sidechain_spend: number;
+  sessions_in_window: number;
+  haiku_sidechain_turns: number;
+  by_model_family: Array<{ family: string; cost_u: number }>;
+}
+
 /**
  * Global overview: the composite Overview-surface payload for one window.
  * Feeds the spend cards, the context/turn card, the burn-forecast card, and
@@ -120,6 +136,18 @@ export interface GlobalOverview {
   context_per_turn: ContextPerTurnRow[];
   /** Model-mix rows (turns by model). */
   model_mix: ModelMixRow[];
+  /** Reconciled sidechain cost within this exact overview window. */
+  subagent_spend?: SubagentSpend;
+  /** Models seen at ingest that are not in KNOWN_MODELS (prices not confirmed). Optional: absent/empty = none. */
+  unconfirmed_models?: UnconfirmedModel[];
+}
+
+/** A model priced by the substring fallback whose price has not been checked against the price page. */
+export interface UnconfirmedModel {
+  model: string;
+  /** Tier it is priced as; null when the model is unpriceable. */
+  tier: string | null;
+  first_seen: string;
 }
 
 /**
@@ -204,6 +232,7 @@ export interface SessionSummary {
   hygiene_flags: string[];
   /** Legacy friction counters. Stored interrupt zeros do not establish observed interrupts. */
   compaction_count: number;
+  compaction_turn_indices: number[];
   api_error_count: number;
   interrupt_count: number;
   interrupts_supported?: false;
@@ -302,7 +331,7 @@ const MAX_PAGE_LIMIT = 500;
  *  - Mutation responses are never cached (cachedQuery wraps pure reads only);
  *    live/status/burn stay network-only.
  * Any preset/daemon reuse beyond this needs the spec's full mutation-epoch and
- * effective-window contract (docs/plans/spec-performance-review.md, PERF2).
+ * effective-window contract (docs/plans/Archive/spec-performance-review.md, PERF2).
  */
 export const QUERY_CACHE_TTL_MS = 45_000;
 const MAX_QUERY_CACHE_ENTRIES = 256;
@@ -460,6 +489,32 @@ function parseHygieneFlags(raw: string): string[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Unconfirmed-model notices: a user_config key-range lookup (no turns scan),
+ * filtered against the CURRENT KNOWN_MODELS so a code update clears the notice.
+ */
+function listUnconfirmedModels(db: Db): UnconfirmedModel[] {
+  const rows = db
+    .prepare("SELECT key, value FROM user_config WHERE key >= ? AND key < ? ORDER BY key")
+    .all(UNCONFIRMED_MODEL_PREFIX, "unconfirmed_model;") as Array<{ key: string; value: string }>;
+  const out: UnconfirmedModel[] = [];
+  for (const r of rows) {
+    const model = r.key.slice(UNCONFIRMED_MODEL_PREFIX.length);
+    if (Object.hasOwn(KNOWN_MODELS, model)) continue;
+    let tier: string | null = null;
+    let firstSeen = "";
+    try {
+      const v = JSON.parse(r.value) as { tier?: unknown; first_seen?: unknown };
+      tier = typeof v.tier === "string" ? v.tier : null;
+      firstSeen = typeof v.first_seen === "string" ? v.first_seen : "";
+    } catch {
+      // Corrupt value: still surface the model, unpriced-tier wording.
+    }
+    out.push({ model, tier, first_seen: firstSeen });
+  }
+  return out;
+}
+
+/**
  * Return the composite Overview payload for a window: global spend, forecast,
  * context-per-turn, and model-mix. Reconciled aggregates exclude provisional
  * turns; context-per-turn deliberately includes them (Data Model §2/§3).
@@ -505,6 +560,36 @@ export function getGlobalOverview(filters: WindowFilter): ApiResponse<GlobalOver
   }));
   const model_mix: ModelMixRow[] = ctxSorted.map((r) => ({ model: r.model, turns: r.n }));
 
+  const subagentSpend = cachedQuery(db, "subagentSpend", from, to, undefined, () => {
+    const totals = db
+      .prepare(`SELECT
+      COALESCE(SUM(cost_equiv_u), 0) AS total_cost_u,
+      COALESCE(SUM(CASE WHEN is_sidechain = 1 THEN cost_equiv_u ELSE 0 END), 0) AS sidechain_cost_u,
+      COUNT(DISTINCT CASE WHEN is_sidechain = 1 AND cost_equiv_u > 0 THEN session_id END) AS sessions_with_sidechain_spend,
+      COUNT(DISTINCT session_id) AS sessions_in_window,
+      COUNT(CASE WHEN is_sidechain = 1 AND lower(model) LIKE '%haiku%' THEN 1 END) AS haiku_sidechain_turns
+      FROM turns WHERE ts >= ? AND ts < ? AND provisional = 0`)
+      .get(from, to) as Omit<SubagentSpend, "share" | "by_model_family">;
+    const families = db
+      .prepare(`SELECT
+      CASE
+        WHEN lower(model) LIKE '%opus%' THEN 'Opus'
+        WHEN lower(model) LIKE '%sonnet%' THEN 'Sonnet'
+        WHEN lower(model) LIKE '%haiku%' THEN 'Haiku'
+        WHEN lower(model) LIKE '%fable%' THEN 'Fable'
+        WHEN lower(model) LIKE '%mythos%' THEN 'Mythos'
+        ELSE 'Other'
+      END AS family, COALESCE(SUM(cost_equiv_u), 0) AS cost_u
+      FROM turns WHERE ts >= ? AND ts < ? AND provisional = 0 AND is_sidechain = 1
+      GROUP BY family ORDER BY cost_u DESC, family ASC`)
+      .all(from, to) as SubagentSpend["by_model_family"];
+    return {
+      ...totals,
+      share: totals.total_cost_u > 0 ? totals.sidechain_cost_u / totals.total_cost_u : 0,
+      by_model_family: families,
+    };
+  });
+
   const data: GlobalOverview = {
     cost_equiv_u: g.cost_equiv_u,
     turns: g.turns,
@@ -514,7 +599,10 @@ export function getGlobalOverview(filters: WindowFilter): ApiResponse<GlobalOver
     forecast,
     context_per_turn,
     model_mix,
+    subagent_spend: subagentSpend,
   };
+  const unconfirmed = listUnconfirmedModels(db);
+  if (unconfirmed.length > 0) data.unconfirmed_models = unconfirmed;
 
   return makeResponse<GlobalOverview>(data, {
     n: g.turns,
@@ -533,7 +621,10 @@ export function getGlobalOverview(filters: WindowFilter): ApiResponse<GlobalOver
  * Per-workspace summaries for the window, ordered by cost desc. cost_share is
  * each workspace's fraction of the window's global reconciled cost.
  */
-export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<WorkspaceSummary>> {
+export function listWorkspaces(
+  filters: WindowFilter,
+  cursor?: Cursor,
+): ApiResponse<PagedList<WorkspaceSummary>> {
   const db = getQueryDb();
   const window = resolveWindow(filters);
   const { from, to } = window;
@@ -550,11 +641,10 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
   const cutoff = activityCutoffIso();
   const liveWs = new Set(
     (
-      db
-        .prepare(
-          "SELECT DISTINCT workspace_id AS id FROM sessions WHERE state = 'LIVE' AND last_turn_at >= ?",
-        )
-        .all(cutoff) as Array<{ id: string }>
+      prep(
+        db,
+        "SELECT DISTINCT workspace_id AS id FROM sessions WHERE state = 'LIVE' AND last_turn_at >= ?",
+      ).all(cutoff) as Array<{ id: string }>
     ).map((r) => r.id),
   );
 
@@ -595,7 +685,9 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
   );
   const aggByWorkspace = new Map(aggRows.map((r) => [r.workspace_id, r]));
 
-  const items: WorkspaceSummary[] = rows.map((r) => {
+  const bounds = cursor === undefined ? null : decodePage(cursor);
+  const pageRows = bounds === null ? rows : rows.slice(bounds.offset, bounds.offset + bounds.limit);
+  const items: WorkspaceSummary[] = pageRows.map((r) => {
     const agg = aggByWorkspace.get(r.workspace_id);
     return {
       workspace_id: r.workspace_id,
@@ -616,7 +708,10 @@ export function listWorkspaces(filters: WindowFilter): ApiResponse<PagedList<Wor
   });
 
   return makeResponse<PagedList<WorkspaceSummary>>(
-    { items, next_cursor: null },
+    {
+      items,
+      next_cursor: bounds === null ? null : nextCursor(bounds.offset, bounds.limit, rows.length),
+    },
     {
       n: items.length,
       window,
@@ -704,11 +799,10 @@ export function getWorkspace(id: string): ApiResponse<WorkspaceDetail> {
       .get(id, from, to) as { n: number }
   ).n;
   const hasLive =
-    db
-      .prepare(
-        "SELECT 1 FROM sessions WHERE workspace_id = ? AND state = 'LIVE' AND last_turn_at >= ? LIMIT 1",
-      )
-      .get(id, activityCutoffIso()) !== undefined;
+    prep(
+      db,
+      "SELECT 1 FROM sessions WHERE workspace_id = ? AND state = 'LIVE' AND last_turn_at >= ? LIMIT 1",
+    ).get(id, activityCutoffIso()) !== undefined;
 
   const abandonedSplit = getAbandonedSpendSplit(db, { workspaceId: id, from, to });
 
@@ -771,6 +865,13 @@ export function listSessions(
               s.file_path, s.state, s.turn_count, s.cost_equiv_u,
               s.first_turn_at, s.last_turn_at, s.hygiene_flags,
               s.compaction_count, s.api_error_count, s.interrupt_count, s.user_turn_count,
+              -- Indexed over all turns (ts, message_id) to match the session turns API.
+              CASE WHEN s.compaction_count = 0 THEN '[]' ELSE
+              (SELECT json_group_array(turn_index) FROM (
+                 SELECT ROW_NUMBER() OVER (ORDER BY ts ASC, message_id ASC) - 1 AS turn_index,
+                        is_compaction_boundary
+                   FROM turns WHERE session_id = s.session_id
+               ) WHERE is_compaction_boundary = 1) END AS compaction_turn_indices_json,
               (SELECT COUNT(*) FROM tool_events te
                 WHERE te.session_id = s.session_id AND te.exit_class = 'ERROR')     AS tool_error_count,
               (SELECT COUNT(*) FROM tool_events te
@@ -840,6 +941,7 @@ export function listSessions(
     last_turn_at: string | null;
     hygiene_flags: string;
     compaction_count: number;
+    compaction_turn_indices_json: string;
     api_error_count: number;
     interrupt_count: number;
     user_turn_count: number;
@@ -876,6 +978,7 @@ export function listSessions(
     last_turn_at: r.last_turn_at,
     hygiene_flags: parseHygieneFlags(r.hygiene_flags),
     compaction_count: r.compaction_count,
+    compaction_turn_indices: JSON.parse(r.compaction_turn_indices_json) as number[],
     api_error_count: r.api_error_count,
     interrupt_count: r.interrupt_count,
     interrupts_supported: false,
@@ -920,6 +1023,13 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
               s.file_path, s.state, s.turn_count, s.cost_equiv_u,
               s.first_turn_at, s.last_turn_at, s.hygiene_flags,
               s.compaction_count, s.api_error_count, s.interrupt_count, s.user_turn_count,
+              -- Indexed over all turns (ts, message_id) to match the session turns API.
+              CASE WHEN s.compaction_count = 0 THEN '[]' ELSE
+              (SELECT json_group_array(turn_index) FROM (
+                 SELECT ROW_NUMBER() OVER (ORDER BY ts ASC, message_id ASC) - 1 AS turn_index,
+                        is_compaction_boundary
+                   FROM turns WHERE session_id = s.session_id
+               ) WHERE is_compaction_boundary = 1) END AS compaction_turn_indices_json,
               (SELECT COUNT(*) FROM tool_events te
                 WHERE te.session_id = s.session_id AND te.exit_class = 'ERROR')     AS tool_error_count,
               (SELECT COUNT(*) FROM tool_events te
@@ -966,6 +1076,7 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
         last_turn_at: string | null;
         hygiene_flags: string;
         compaction_count: number;
+        compaction_turn_indices_json: string;
         api_error_count: number;
         interrupt_count: number;
         user_turn_count: number;
@@ -1014,6 +1125,7 @@ export function getSession(id: string): ApiResponse<SessionSummary> {
     last_turn_at: row.last_turn_at,
     hygiene_flags: parseHygieneFlags(row.hygiene_flags),
     compaction_count: row.compaction_count,
+    compaction_turn_indices: JSON.parse(row.compaction_turn_indices_json) as number[],
     api_error_count: row.api_error_count,
     interrupt_count: row.interrupt_count,
     interrupts_supported: false,
@@ -1061,7 +1173,61 @@ export function getTurnTimeline(
       n: number;
     }
   ).n;
+  return turnPage(session_id, window, offset, limit, total);
+}
 
+/** Cap on the rows one `anchor` / `turn_index` response holds. */
+const TURN_SEEK_MAX_ROWS = 2_000;
+
+/**
+ * P1-U6a: every turn from the start through the end of the page (of `cursor.limit`) that holds
+ * `seek.anchor` (a message_id) or `seek.turn_index`, capped at 2,000 rows. One request in
+ * place of the client's serial cursor walk; array index = turn index. Null when the anchor is
+ * not a turn of the session. A turn_index past the end returns the full capped range.
+ */
+export function getTurnTimelineThrough(
+  session_id: string,
+  seek: { anchor: string } | { turn_index: number },
+  cursor?: Cursor,
+): ApiResponse<PagedList<TurnRow>> | null {
+  const db = getQueryDb();
+  const window = resolveWindow({});
+  const { limit } = decodePage(cursor);
+  const total = (
+    db.prepare("SELECT COUNT(*) AS n FROM turns WHERE session_id = ?").get(session_id) as {
+      n: number;
+    }
+  ).n;
+  let index: number;
+  if ("anchor" in seek) {
+    const at = db
+      .prepare("SELECT ts FROM turns WHERE session_id = ? AND message_id = ?")
+      .get(session_id, seek.anchor) as { ts: string } | undefined;
+    if (at === undefined) return null;
+    // Keyset seek on (ts, message_id) over idx_turns_session.
+    index = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM turns
+            WHERE session_id = ? AND (ts < ? OR (ts = ? AND message_id < ?))`,
+        )
+        .get(session_id, at.ts, at.ts, seek.anchor) as { n: number }
+    ).n;
+  } else {
+    index = seek.turn_index;
+  }
+  const end = Math.min((Math.floor(index / limit) + 1) * limit, total, TURN_SEEK_MAX_ROWS);
+  return turnPage(session_id, window, 0, end, total);
+}
+
+function turnPage(
+  session_id: string,
+  window: ReturnType<typeof resolveWindow>,
+  offset: number,
+  limit: number,
+  total: number,
+): ApiResponse<PagedList<TurnRow>> {
+  const db = getQueryDb();
   const rows = db
     .prepare(
       `SELECT message_id, session_id, ts, model, is_sidechain,

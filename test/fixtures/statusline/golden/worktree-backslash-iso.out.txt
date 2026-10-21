@@ -1,0 +1,1 @@
+Fable 5 | [35mAgentWrangler[0m | [36mfeat/statusline-limits[0m | ctx [32m[----------] 9%[0m 500 | [33m5h:50%[0m 26m  [33m7d:79%[0m 1d1h | [32m~$0.07[0m 45s

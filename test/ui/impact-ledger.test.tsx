@@ -50,7 +50,7 @@ describe("ImpactLedger — states", () => {
     vi.mocked(client.fetchLedger).mockRejectedValue(new Error("ECONNREFUSED"));
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
-      expect(container.querySelector(".banner-error")).not.toBeNull();
+      expect(container.querySelector(".async-error-state")).not.toBeNull();
     });
   });
 
@@ -59,8 +59,8 @@ describe("ImpactLedger — states", () => {
       .mockRejectedValueOnce(new Error("ECONNREFUSED"))
       .mockResolvedValue(mockLedger());
     const { getByRole } = render(<ImpactLedger />);
-    await waitFor(() => expect(getByRole("button", { name: "Retry" })).toBeTruthy());
-    fireEvent.click(getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(getByRole("button", { name: "Retry impact ledger" })).toBeTruthy());
+    fireEvent.click(getByRole("button", { name: "Retry impact ledger" }));
     await waitFor(() => expect(vi.mocked(client.fetchLedger)).toHaveBeenCalledTimes(2));
   });
 
@@ -99,13 +99,13 @@ describe("ImpactLedger — honesty rails", () => {
     vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(headroom);
 
     const { container, getByRole } = render(<ImpactLedger />);
-    await waitFor(() => {
-      expect(container.querySelector("[data-testid='headroom-summary']")?.textContent).toContain(
-        "2 open modeled opportunities",
-      );
-    });
-    expect(container.textContent ?? "").toContain("$0.50/wk modeled total per week");
-    expect(container.textContent ?? "").toContain("not additive or measured");
+    await waitFor(() =>
+      expect(container.querySelector("[data-testid='headroom-summary']")).not.toBeNull(),
+    );
+    expect(container.textContent ?? "").toContain(
+      "$0.50/wk of spend is targeted by open recommendations",
+    );
+    expect(container.textContent ?? "").toContain("not yet on the claim ledger");
     expect(container.querySelector("table")).toBeNull();
 
     fireEvent.click(getByRole("button", { name: "See breakdown →" }));
@@ -115,14 +115,24 @@ describe("ImpactLedger — honesty rails", () => {
     expect(getByRole("table").textContent).toContain("Status");
   });
 
-  it("renders the projected-value chip next to the cap-weighted figure", async () => {
-    mockOk([entryWith({ state: "MEASURED_EFFECTIVE" })]);
+  it("shows the card's own modeled $ as the projected value, not the cap weight (review 6 R6-08)", async () => {
+    mockOk([
+      entryWith({
+        state: "MEASURED_EFFECTIVE",
+        modeled_savings_u_per_wk: 4_200_000,
+        modeled_cap_weighted_u_per_wk: 420_000,
+      }),
+    ]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
       expect(container.querySelector(".chip-modeled")).not.toBeNull();
     });
-    expect(container.textContent ?? "").toContain("PROJECTED · not yet verified");
-    expect(container.textContent ?? "").toContain("$0.42/wk");
+    const row = [...container.querySelectorAll(".ledger-row")].find((el) =>
+      el.textContent?.includes("Projected weekly value"),
+    );
+    expect(row?.textContent).toContain("PROJECTED · not yet verified");
+    expect(row?.textContent).toContain("$4.20/wk");
+    expect(container.textContent ?? "").not.toContain("$0.42/wk");
   });
 
   it("uses the plain-language detector label in the ledger header", async () => {
@@ -306,13 +316,14 @@ describe("ImpactLedger — honesty rails", () => {
     expect(container.textContent ?? "").toContain("adopted within one day");
   });
 
-  it("appends the COEFF caveat when cap_read_coeff < 1", async () => {
+  it("shows no cap-weighted $ and so no COEFF caveat (review 6 R6-08)", async () => {
     mockOk([entryWith({})]);
     const { container } = render(<ImpactLedger />);
     await waitFor(() => {
-      expect(container.textContent ?? "").toContain("COEFF=0.1");
+      expect(container.textContent ?? "").toContain("Projected weekly value");
     });
-    expect(container.textContent ?? "").toContain("unverified");
+    expect(container.textContent ?? "").not.toContain("Cap-weighted");
+    expect(container.textContent ?? "").not.toContain("cache reads at 0.1×");
   });
 
   it("shows 'Not enough data yet' instead of figures when before_n < 3", async () => {

@@ -52,6 +52,8 @@ interface WorkspaceTableProps {
    * The caller is responsible for slicing the workspaces array to 3.
    */
   teaser?: boolean;
+  /** Suppress the internal `.section-head` when the caller renders a linked section header. */
+  hideHeader?: boolean;
 }
 
 function fmtUsd(u: number): string {
@@ -85,17 +87,20 @@ export default function WorkspaceTable({
   isLoading,
   topRecByWorkspace,
   teaser = false,
+  hideHeader = false,
 }: WorkspaceTableProps) {
   const globalUsdPerTurn = globalTurns > 0 ? globalCostU / 1_000_000 / globalTurns : null;
 
   return (
     <div className="card" style={{ marginBottom: 13 }}>
-      <div className="section-head">
-        <h2>{teaser ? "Top Workspaces" : "Workspace Comparison"}</h2>
-        <span className="section-meta">
-          <Chip kind="LIST_EQUIV" />
-        </span>
-      </div>
+      {!hideHeader && (
+        <div className="section-head">
+          <h2>{teaser ? "Top Workspaces" : "Workspace Comparison"}</h2>
+          <span className="section-meta">
+            <Chip kind="LIST_EQUIV" />
+          </span>
+        </div>
+      )}
       <div className="table-wrap">
         <table>
           <thead>
@@ -120,7 +125,12 @@ export default function WorkspaceTable({
               workspaces.map((ws) => (
                 <tr key={ws.workspace_id}>
                   <td>
-                    {labelWorkspace(ws)}
+                    <a
+                      href={`#/workspaces/${ws.workspace_id}`}
+                      style={{ color: "inherit", textDecoration: "none" }}
+                    >
+                      {labelWorkspace(ws)}
+                    </a>
                     {ws.has_live && (
                       <span
                         className="nav-dot"
@@ -131,7 +141,7 @@ export default function WorkspaceTable({
                   </td>
                   <td>{fmtUsd(ws.cost_equiv_u)}</td>
                   <td>{fmtPct(ws.cost_share)}</td>
-                  <td>{ws.has_live ? "● live" : "0"}</td>
+                  <td>{ws.has_live ? <span className="chip live">● live</span> : "—"}</td>
                   <td>{fmtUsdPerTurn(ws.usd_per_turn)}</td>
                   <td>
                     {(() => {
@@ -175,9 +185,9 @@ export default function WorkspaceTable({
         </div>
       )}
       <div className="table-footnotes">
-        {"¹"} Spend = list-price equivalent (LIST_EQUIV) {"—"} not billing data. {"²"} Top waste
-        source = highest-modeled active DetectorEngine recommendation scoped to this workspace
-        (EXPERIMENTAL); {"“—”"} = none.
+        {"¹"} Spend = list-price equivalent {"—"} not billing data. {"²"} Best next improvement =
+        highest-modeled active recommendation scoped to this workspace (experimental); {"“—”"} =
+        none.
       </div>
     </div>
   );

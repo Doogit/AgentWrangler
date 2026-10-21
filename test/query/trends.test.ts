@@ -23,6 +23,7 @@ import {
   spendByBucketAndModel,
   spendByBucketAndWorkspace,
 } from "../../src/query/trends.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const T_FROM = "2025-01-01T00:00:00.000Z";
@@ -290,14 +291,15 @@ describe("adoption markers", () => {
     state: string,
     workspaceId: string | null,
   ): void {
-    db.prepare(
-      `INSERT INTO recommendations
-         (rec_id, provenance, detector_id, category, scope_workspace_id, lever,
-          modeled_savings_u_per_wk, modeled_formula_json, evidence_json, target_metric,
-          state, created_at, adopted_at)
-       VALUES (?, 'RULE', 'D4', 'MODEL', ?, ?, NULL, '{}', '{}',
-               'model_mix_opus_fraction', ?, ?, ?)`,
-    ).run(recId, workspaceId, `Lever ${recId}`, state, adoptedAt, adoptedAt);
+    seedValidatedRecommendation(db, {
+      recId,
+      templateId: "D4_MODEL_MISMATCH",
+      scope: workspaceId,
+      savings: null,
+      state,
+      createdAt: adoptedAt,
+    });
+    db.prepare("UPDATE recommendations SET adopted_at = ? WHERE rec_id = ?").run(adoptedAt, recId);
   }
 
   it.each([

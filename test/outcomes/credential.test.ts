@@ -13,6 +13,7 @@
 import * as os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createGithubCredentialSource,
   getGithubTokenStatus,
   readGithubToken,
   runPowerShell,
@@ -89,10 +90,18 @@ describe("readGithubToken clean degradation", () => {
     await expect(readGithubToken()).resolves.toEqual({ ok: true, data: "ghp_env" });
   });
 
-  it("delegates to an injected reader and never throws", async () => {
+  it("sanitizes injected reader failures and never throws", async () => {
     await expect(readGithubToken(async () => ({ ok: false, reason: "stub" }))).resolves.toEqual({
       ok: false,
-      reason: "stub",
+      reason: "credential-read-failed",
+    });
+    await expect(
+      readGithubToken(async () => {
+        throw new Error("secret raw failure");
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      reason: "credential-read-failed",
     });
   });
 });
@@ -102,14 +111,18 @@ describe("getGithubTokenStatus (non-secret Settings status)", () => {
     vi.stubEnv("AW_GITHUB_TOKEN", "ghp_secret");
 
     const status = await getGithubTokenStatus();
-    expect(status).toEqual({ configured: true, source: "env" });
+    expect(status).toMatchObject({ configured: true, source: "env", state: "configured" });
     // The token value must never leak into the status object.
     expect(JSON.stringify(status)).not.toContain("ghp_secret");
   });
 
   it("reports source 'credential-manager' when the platform reader yields a token", async () => {
     const status = await getGithubTokenStatus(async () => ({ ok: true, data: "ghp_fromcred" }));
-    expect(status).toEqual({ configured: true, source: "credential-manager" });
+    expect(status).toMatchObject({
+      configured: true,
+      source: "credential-manager",
+      state: "configured",
+    });
     expect(JSON.stringify(status)).not.toContain("ghp_fromcred");
   });
 
@@ -118,5 +131,50 @@ describe("getGithubTokenStatus (non-secret Settings status)", () => {
     expect(status.configured).toBe(false);
     expect(status.source).toBeNull();
     expect(status.reason).toMatch(/AW_GITHUB_TOKEN/);
+  });
+});
+
+describe("credential refresh epoch", () => {
+  it("replaces and removes a cached token without an older read winning", async () => {
+    let resolveOld!: (value: { ok: true; data: string }) => void;
+    let value = "replacement-secret";
+    let calls = 0;
+    const source = createGithubCredentialSource({
+      envToken: () => undefined,
+      platform: () => "win32",
+      readStore: () => {
+        calls++;
+        return calls === 1
+          ? new Promise((resolve) => {
+              resolveOld = resolve;
+            })
+          : Promise.resolve(
+              value
+                ? { ok: true as const, data: value }
+                : { ok: false as const, reason: "github-token-not-found" },
+            );
+      },
+    });
+    const old = source.readToken();
+    const fresh = await source.refresh();
+    expect(fresh).toMatchObject({ configured: true, epoch: 1 });
+    resolveOld({ ok: true, data: "stale-secret" });
+    expect(await old).toEqual({ ok: true, data: "replacement-secret" });
+    value = "";
+    expect(await source.refresh()).toMatchObject({ configured: false, state: "absent", epoch: 2 });
+    expect(await source.readToken()).toEqual({ ok: false, reason: "github-token-not-found" });
+  });
+
+  it("keeps store output and thrown details out of status", async () => {
+    const source = createGithubCredentialSource({
+      envToken: () => undefined,
+      readStore: async () => {
+        throw new Error("fake-secret raw PowerShell failure");
+      },
+    });
+    const status = await source.status();
+    expect(status).toMatchObject({ state: "store-error", code: "credential-read-failed" });
+    expect(JSON.stringify(status)).not.toContain("fake-secret");
+    expect(await source.readToken()).toEqual({ ok: false, reason: "credential-read-failed" });
   });
 });

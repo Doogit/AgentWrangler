@@ -11,7 +11,7 @@
  * SEC-101: token VALUES are NEVER logged; only key names when tracing.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -34,7 +34,8 @@ export type CredentialResult =
  * Always fail-closed: when in doubt, return ok:false.
  */
 export interface CredentialSource {
-  read(): CredentialResult;
+  /** The file source answers synchronously; the macOS Keychain source is async (D1). */
+  read(): CredentialResult | Promise<CredentialResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,8 +54,10 @@ export interface OAuthStatus {
  * Derive the public auth status from a credential source without exposing the token.
  * Safe to send to the browser.
  */
-export function getOAuthStatus(source: CredentialSource = fileCredentialSource): OAuthStatus {
-  const result = source.read();
+export async function getOAuthStatus(
+  source: CredentialSource = fileCredentialSource,
+): Promise<OAuthStatus> {
+  const result = await source.read();
   if (!result.ok) {
     return { authenticated: false, tier: null, reason: result.reason };
   }
@@ -153,42 +156,82 @@ export class FileCredentialSource implements CredentialSource {
 /** The Keychain service Claude Code stores its OAuth credential under (macOS). */
 export const KEYCHAIN_SERVICE = "Claude Code-credentials";
 
-/** Injectable exec type — returns the Keychain password blob, or null on any failure. */
-export type SecurityExec = () => string | null;
+/** Injectable exec type — resolves to the Keychain password blob, or null on any failure. */
+export type SecurityExec = () => Promise<string | null>;
 
 /**
- * Read the credential blob from the login Keychain via the `security` CLI.
- * `-w` prints only the password (the JSON blob) on stdout; a missing entry
- * exits non-zero. Never throws; never logs the secret (SEC-101).
+ * Hard bound on the `security` child. A locked keychain or an "allow access" dialog
+ * would otherwise keep it alive until someone answers.
  */
-function defaultSecurityExec(): string | null {
-  try {
-    const result = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (result.error !== undefined || result.status !== 0) return null;
-    const out = result.stdout.trim();
-    return out.length > 0 ? out : null;
-  } catch {
-    return null;
-  }
+export const KEYCHAIN_TIMEOUT_MS = 3_000;
+
+/**
+ * How long a Keychain lookup (success or failure) is reused. The spawn costs tens of
+ * ms and can raise a dialog, so GET /api/oauth/status must not run it per request.
+ */
+export const KEYCHAIN_CACHE_TTL_MS = 60_000;
+
+/**
+ * Read the credential blob from the login Keychain via the `security` CLI, without
+ * blocking the event loop. `-w` prints only the password (the JSON blob) on stdout;
+ * a missing entry exits non-zero, and a timeout is killed (SIGKILL: a dialog-blocked
+ * child must not outlive the bound) and reported as a failure. Never rejects; never
+ * logs the secret (SEC-101).
+ */
+export function defaultSecurityExec(): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "security",
+        ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: KEYCHAIN_TIMEOUT_MS,
+          killSignal: "SIGKILL",
+        },
+        (err, stdout) => {
+          if (err !== null) {
+            resolve(null);
+            return;
+          }
+          const out = String(stdout).trim();
+          resolve(out.length > 0 ? out : null);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 export class KeychainCredentialSource implements CredentialSource {
   private readonly exec: SecurityExec;
   private readonly platform: string;
+  private readonly now: () => number;
+  /** Cached blob lookup; expiry is re-checked on every read via parseOAuthBlob. */
+  private cached: { at: number; raw: Promise<string | null> } | null = null;
 
-  constructor(exec: SecurityExec = defaultSecurityExec, platform: string = os.platform()) {
+  constructor(
+    exec: SecurityExec = defaultSecurityExec,
+    platform: string = os.platform(),
+    now: () => number = Date.now,
+  ) {
     this.exec = exec;
     this.platform = platform;
+    this.now = now;
   }
 
-  read(): CredentialResult {
+  async read(): Promise<CredentialResult> {
     if (this.platform !== "darwin") {
       return { ok: false, reason: "macOS Keychain source only applies on darwin." };
     }
-    const raw = this.exec();
+    const t = this.now();
+    if (this.cached === null || t - this.cached.at >= KEYCHAIN_CACHE_TTL_MS) {
+      // Store the in-flight promise so concurrent requests share one spawn.
+      this.cached = { at: t, raw: this.exec().catch(() => null) };
+    }
+    const raw = await this.cached.raw;
     if (raw === null) {
       return { ok: false, reason: "Keychain lookup failed — re-login to Claude Code." };
     }
@@ -207,10 +250,10 @@ export class ChainedCredentialSource implements CredentialSource {
     this.sources = sources;
   }
 
-  read(): CredentialResult {
+  async read(): Promise<CredentialResult> {
     const reasons: string[] = [];
     for (const source of this.sources) {
-      const result = source.read();
+      const result = await source.read();
       if (result.ok) return result;
       reasons.push(result.reason);
     }

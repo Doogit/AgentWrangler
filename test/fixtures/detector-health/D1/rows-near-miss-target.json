@@ -1,0 +1,14 @@
+{
+  "context_inventory": [
+    {
+      "probe_id": "probe-near-miss-target-claude-md",
+      "workspace_id": "near-miss-target",
+      "probed_at": "2026-12-20T09:10:00.000Z",
+      "component": "CLAUDE_MD",
+      "file_ref": "CLAUDE.md",
+      "file_hash": "hash-near-miss-target",
+      "tokens": 2000,
+      "attribution_version": "measured-v1"
+    }
+  ]
+}

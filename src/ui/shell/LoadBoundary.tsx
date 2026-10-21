@@ -1,4 +1,11 @@
 import { Component, type ReactNode, Suspense } from "react";
+import AsyncErrorState from "./AsyncErrorState";
+
+function getLoadingLabel(label: string): string {
+  if (label === "page") return "page";
+  if (label === "trends") return "trends";
+  return "content";
+}
 
 /** Keep navigation available when a route or chart chunk fails to load. */
 export default class LoadBoundary extends Component<
@@ -13,16 +20,26 @@ export default class LoadBoundary extends Component<
 
   render() {
     const { children, label } = this.props;
+    const loadingLabel = getLoadingLabel(label);
     if (this.state.failed) {
       return (
-        <section role="alert">
-          <p>Unable to load {label}. Reload the dashboard to try again.</p>
-          <button type="button" onClick={() => window.location.reload()}>
-            Reload dashboard
-          </button>
-        </section>
+        <AsyncErrorState
+          resource="route-page"
+          onRetry={() => window.location.reload()}
+          action="reload-dashboard"
+        />
       );
     }
-    return <Suspense fallback={<output>Loading {label}…</output>}>{children}</Suspense>;
+    return (
+      <Suspense
+        fallback={
+          <output className="load-boundary-skeleton" aria-label={`Loading ${loadingLabel}`}>
+            Loading {loadingLabel}…
+          </output>
+        }
+      >
+        {children}
+      </Suspense>
+    );
   }
 }

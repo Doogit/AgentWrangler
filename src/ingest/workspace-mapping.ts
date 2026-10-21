@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import type { Db } from "../db/open.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
 
 /** Parse a GitHub SSH or HTTPS remote into its canonical owner/repo pair. */
 export function parseRemoteUrl(url: string): { owner: string; repo: string } | null {
@@ -16,18 +17,23 @@ export function parseRemoteUrl(url: string): { owner: string; repo: string } | n
   return { owner, repo };
 }
 
-/** Read the origin URL from a local checkout without exposing git output. */
-export function defaultReadRemote(repoPath: string): string | null {
-  try {
-    const result = spawnSync("git", ["-C", repoPath, "remote", "get-url", "origin"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (result.error !== undefined || result.status !== 0) return null;
-    return result.stdout.trim();
-  } catch {
-    return null;
-  }
+/**
+ * Read the origin URL from a local checkout without exposing git output. Async (RB7): a
+ * synchronous spawn per new workspace held the event loop for seconds during a bulk first sync.
+ */
+export function defaultReadRemote(repoPath: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "git",
+        ["-C", repoPath, "remote", "get-url", "origin"],
+        { encoding: "utf8", windowsHide: true, timeout: 10_000 },
+        (error, stdout) => resolve(error ? null : stdout.trim()),
+      );
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 /**
@@ -64,11 +70,15 @@ export function defaultReadCwd(filePath: string): string | null {
  * Backfill `discovered_cwd` for workspaces that have none yet — needed on existing installs where
  * the boot back-scan skips already-ingested files (so ingestor.ts never re-captures their cwd).
  * Reads at most one cwd-bearing transcript per unmapped workspace; self-limiting once all are filled.
+ * `noCwd` remembers files whose head had no cwd so later ticks skip them (a workspace with no cwd
+ * anywhere re-read every head each tick: 818 ms / 30 s). Safe because lines appended later are
+ * ingested, and ingest captures their cwd itself.
  */
 export function backfillDiscoveredCwd(
   db: Db,
   files: Array<{ filePath: string; projectSlug: string }>,
   readCwd: (filePath: string) => string | null,
+  noCwd?: Set<string>,
 ): void {
   const needed = new Set(
     (
@@ -87,17 +97,24 @@ export function backfillDiscoveredCwd(
   const done = new Set<string>();
   for (const f of files) {
     if (!needed.has(f.projectSlug) || done.has(f.projectSlug)) continue;
+    if (noCwd?.has(f.filePath)) continue;
     const cwd = readCwd(f.filePath);
-    if (cwd === null) continue;
+    if (cwd === null) {
+      noCwd?.add(f.filePath);
+      continue;
+    }
     setCwd.run(cwd, f.projectSlug);
     done.add(f.projectSlug);
   }
 }
 
-export function resolveWorkspaceMappings(
+export async function resolveWorkspaceMappings(
   db: Db,
-  opts: { readRemote: (path: string) => string | null; unresolved?: Set<string> },
-): number {
+  opts: {
+    readRemote: (path: string) => string | null | Promise<string | null>;
+    unresolved?: Set<string>;
+  },
+): Promise<number> {
   db.prepare(
     "UPDATE workspaces SET repo_path=discovered_cwd WHERE repo_path IS NULL AND discovered_cwd IS NOT NULL",
   ).run();
@@ -117,7 +134,7 @@ export function resolveWorkspaceMappings(
     // remote-less repo while it runs is not picked up until the next daemon restart; this is an
     // acceptable tradeoff for this non-blocking perf fix.
     if (opts.unresolved?.has(workspace.workspace_id)) continue;
-    const remote = opts.readRemote(workspace.repo_path);
+    const remote = await opts.readRemote(workspace.repo_path);
     if (remote === null) {
       opts.unresolved?.add(workspace.workspace_id);
       continue;
@@ -127,6 +144,7 @@ export function resolveWorkspaceMappings(
       opts.unresolved?.add(workspace.workspace_id);
       continue;
     }
+    await awaitDbWriteGate();
     const result = setCanonical.run(mapping.owner, mapping.repo, workspace.workspace_id);
     if (result.changes === 1) newlyMapped += 1;
   }

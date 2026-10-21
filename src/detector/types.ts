@@ -13,6 +13,12 @@
  */
 
 import type { Db } from "../db/open.js";
+import type {
+  FindingDescriptorV2,
+  FindingEnvelopeV2,
+  RecommendationPayloadV1,
+} from "./privacy-contract.js";
+import type { Estimate } from "./savings.js";
 
 /** Detector evaluation context — the trailing-7d window anchored at `now`. */
 export interface DetectorContext {
@@ -40,13 +46,15 @@ export type DetectorStatusKind = "ACTIVE" | "INACTIVE" | "BLOCKED" | "NOT_EVALUA
 export interface Fired {
   /** Stable identity string for the deterministic rec_id (§2.3). */
   scopeKey: string;
-  category: string; // 'CONTEXT' | 'LIMIT' | 'CACHE' | 'TOOLING' | 'SESSION_HYGIENE' | 'MODEL'
   scope_workspace_id: string | null; // null = global
-  lever: string;
-  target_metric: string;
   modeled_savings_u_per_wk: number | null; // null for warning-class (D5)
-  modeled_formula: ModeledFormula;
-  evidence: Record<string, unknown>;
+  /** Additive formula details persisted with the contract-derived formula metadata. */
+  modeled_formula_json?: Readonly<{ estimate: Estimate }>;
+  payload: RecommendationPayloadV1;
+}
+
+export interface FiredV2 extends Omit<Fired, "payload"> {
+  payload: FindingEnvelopeV2;
 }
 
 /** One detector's evaluation result: rows to persist + the live status. */
@@ -57,9 +65,69 @@ export interface DetectorOutcome {
   note: string;
 }
 
+/** P2-U8 (A-5): the grain a detector's findings aggregate over. Declarative. */
+export type DetectorScope = "turn" | "session" | "cross-session";
+
+/**
+ * Tables a detector (or a helper it calls) reads. The walk's dirty gate signs only
+ * these, so a declaration that misses a table under-invalidates: the contract test
+ * checks every SQL statement a detector runs on the shared seed against it.
+ */
+export type DetectorInputTable =
+  | "turns"
+  | "sessions"
+  | "tool_events"
+  | "tool_event_metadata"
+  | "tool_event_content"
+  | "tool_event_skills"
+  | "ingest_metric_events"
+  | "subagent_meta"
+  | "work_items"
+  | "observed_outcomes"
+  | "session_work_links"
+  | "context_inventory"
+  | "catalog_items"
+  | "workspaces"
+  | "pricing_snapshots"
+  | "user_config"
+  | "limit_snapshots";
+
+export interface DetectorInputs {
+  tables: readonly DetectorInputTable[];
+  /**
+   * The outcome depends on the wall clock or on state the window's rows do not
+   * carry (a forecast from `now`, a live snapshot table). W0 then always re-runs.
+   */
+  clock?: true;
+}
+
+/**
+ * P2-U8 contract metadata. `version` is bumped when evaluation logic changes; it
+ * re-stales only that detector's cached weeks and is not part of the rec_id.
+ * Optional on the type so test stubs stay small; every registered detector
+ * declares all three (contract test). A detector without `inputs` is never
+ * served from the W0 cache.
+ */
+export interface DetectorMeta {
+  version?: string;
+  scope?: DetectorScope;
+  inputs?: DetectorInputs;
+}
+
 /** A registered detector. `evaluate` is read-only w.r.t. ingest tables. */
-export interface Detector {
+export interface Detector extends DetectorMeta {
+  contractVersion: 1;
   id: string; // Stable runtime id, e.g. 'D1', 'D7', 'D10'.
   name: string; // e.g. 'SESSION_LONG_FULL_CONTEXT'
   evaluate(db: Db, ctx: DetectorContext): DetectorOutcome;
 }
+
+export interface DetectorV2 extends DetectorMeta {
+  contractVersion: 2;
+  descriptor: FindingDescriptorV2;
+  id: string;
+  name: string;
+  evaluate(db: Db, ctx: DetectorContext): Omit<DetectorOutcome, "fired"> & { fired: FiredV2[] };
+}
+
+export type AnyDetector = Detector | DetectorV2;

@@ -7,16 +7,9 @@ vi.mock("../../src/ui/api/esf-client", () => ({
   fetchSessionEsfObservations: vi.fn(),
 }));
 
-import { fetchEsfObservations, fetchSessionEsfObservations } from "../../src/ui/api/esf-client";
-import { mockSession } from "../../src/ui/api/fixtures";
-import { ObservationEvidence, SessionObservedEvidence } from "../../src/ui/esf/ObservationEvidence";
+import { fetchEsfObservations } from "../../src/ui/api/esf-client";
+import { ObservationEvidence } from "../../src/ui/esf/ObservationEvidence";
 import WorkspaceDetailPage from "../../src/ui/workspaces/WorkspaceDetailPage";
-
-function fixtureSession(id: string) {
-  const session = mockSession(id).data;
-  if (session === null) throw new Error("Expected fixture session");
-  return session;
-}
 
 function cohortFor(preset: string): EsfObservationCohort {
   const window =
@@ -78,7 +71,6 @@ function cohortFor(preset: string): EsfObservationCohort {
 describe("ESF observation evidence", () => {
   beforeEach(() => {
     vi.mocked(fetchEsfObservations).mockReset();
-    vi.mocked(fetchSessionEsfObservations).mockReset();
   });
   afterEach(cleanup);
 
@@ -145,23 +137,6 @@ describe("ESF observation evidence", () => {
     });
   });
 
-  it("shows the complete server aggregate when the loaded timeline page has no unpriced turns", async () => {
-    const evidence = cohortFor("session");
-    evidence.resource.unpriced_turn_count = 3;
-    evidence.observed_test_recovery.affected_session_ids = ["ses-a01"];
-    evidence.observed_test_recovery.recovered_session_ids = [];
-    vi.mocked(fetchSessionEsfObservations).mockResolvedValue({ data: evidence } as never);
-    const session = {
-      ...fixtureSession("ses-a01"),
-      session_id: "ses-a01",
-      state: "RECONCILED" as const,
-      test_fail_count: 0,
-    };
-    render(<SessionObservedEvidence session={session} />);
-    expect(await screen.findByText(/\$.* priced; 3 unpriced turns/)).toBeTruthy();
-    expect(screen.getByText("repeated test failures observed")).toBeTruthy();
-  });
-
   it("ignores an older cohort response after the window changes", async () => {
     let resolveOld!: (value: never) => void;
     vi.mocked(fetchEsfObservations)
@@ -195,29 +170,5 @@ describe("ESF observation evidence", () => {
       await screen.findByText("Prior window not comparable: test-recovery method differs."),
     ).toBeTruthy();
     expect(screen.queryByText(/prior 6\/18/)).toBeNull();
-  });
-
-  it("clears a previous session's counts and distinguishes loading, failure and retry", async () => {
-    vi.mocked(fetchSessionEsfObservations)
-      .mockResolvedValueOnce({ data: cohortFor("first") } as never)
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce({
-        data: {
-          ...cohortFor("next"),
-          resource: { ...cohortFor("next").resource, unpriced_turn_count: 5 },
-        },
-      } as never);
-    const first = { ...fixtureSession("first"), session_id: "first" };
-    const view = render(<SessionObservedEvidence session={first} />);
-    expect(screen.getByText("Loading session observations…")).toBeTruthy();
-    expect(await screen.findByText(/priced; 2 unpriced turns/)).toBeTruthy();
-    view.rerender(<SessionObservedEvidence session={{ ...first, session_id: "next" }} />);
-    expect(await screen.findByRole("alert")).toHaveProperty(
-      "textContent",
-      expect.stringContaining("request failed"),
-    );
-    expect(screen.queryByText(/priced; 2 unpriced turns/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText(/priced; 5 unpriced turns/)).toBeTruthy();
   });
 });

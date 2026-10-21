@@ -197,7 +197,12 @@ export function getEsfObservedTestRecoveryContext(
                  AND te.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
             )
        ),
-       completed_tests AS (
+       -- MATERIALIZED: the recovered correlated subquery below references
+       -- completed_tests, which chains back through eligible -> selected_sessions
+       -- -> a full turns scan. Without the hint SQLite re-derives that whole
+       -- pipeline once per failures row (O(failures x cohort) -> quadratic in
+       -- window size). Materializing computes it once; ~80x faster on a week.
+       completed_tests AS MATERIALIZED (
          SELECT te.session_id, te.ts, te.exit_class
            FROM tool_events te
            JOIN tool_event_metadata tem USING (event_id)

@@ -31,8 +31,27 @@ bootstrap/ui/dist/
 # Worktrees (nested inside repo per convention)
 .worktrees/
 
+# Local acceptance/browser capture output (screenshots, playwright)
+output/
+
+# Private U12 calibration corpus (local-only; never commit or export)
+artifacts/evidence/precision-corpus/
+
 # Session handoff briefs (disposable; not tracked)
 docs/handoffs/
+
+# verify:app scratch artefacts (seed DB, scan root, chrome profile)
+.verify/
+
+# dashboard:seed scratch artefacts (persistent seed DB, scan root, daemon log)
+.verify-seed/
+
+# Agent scratch / SEC-101 net — never track OS-temp or scratchpad dumps that leak
+# into the tree (colon-mangled C:\... names are caught by the pre-commit guard).
+.tmp/
+**/scratchpad/
+*stderr*.txt
+*stdout*.txt
 
 # OS
 .DS_Store

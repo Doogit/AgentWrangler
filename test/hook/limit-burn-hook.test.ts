@@ -57,19 +57,16 @@ describe("stageToStdout", () => {
     expect(stageToStdout(null)).toBe("");
   });
 
-  it("soft: allows with a top-level additionalContext string", () => {
-    const out = JSON.parse(stageToStdout("soft")) as Record<string, unknown>;
-    const hookOutput = out.hookSpecificOutput as Record<string, unknown>;
-    expect(hookOutput.permissionDecision).toBe("allow");
-    expect(typeof out.additionalContext).toBe("string");
-    expect((out.additionalContext as string).length).toBeGreaterThan(0);
-  });
-
-  it("checkpoint: allows (not deny) with a top-level additionalContext string", () => {
-    const out = JSON.parse(stageToStdout("checkpoint")) as Record<string, unknown>;
-    const hookOutput = out.hookSpecificOutput as Record<string, unknown>;
-    expect(hookOutput.permissionDecision).toBe("allow");
-    expect(typeof out.additionalContext).toBe("string");
-    expect((out.additionalContext as string).length).toBeGreaterThan(0);
-  });
+  // Claude Code reads additionalContext only inside hookSpecificOutput; "allow" would skip the prompt.
+  it.each(["soft", "checkpoint"])(
+    "%s: warns via hookSpecificOutput.additionalContext, no permission decision",
+    (stage) => {
+      const out = JSON.parse(stageToStdout(stage)) as Record<string, unknown>;
+      const hookOutput = out.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput).not.toHaveProperty("permissionDecision");
+      expect(typeof hookOutput.additionalContext).toBe("string");
+      expect((hookOutput.additionalContext as string).length).toBeGreaterThan(0);
+      expect(out).not.toHaveProperty("additionalContext");
+    },
+  );
 });

@@ -155,6 +155,112 @@ export function toJsonl(lines: Line[]): string {
   return `${lines.map((l) => ("raw" in l ? l.raw : JSON.stringify(l))).join("\n")}\n`;
 }
 
+/** Small deterministic PRNG (mulberry32) so a seed reproduces a corpus/split plan exactly. */
+export function seededRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Multibyte filler (2-, 3- and 4-byte UTF-8 sequences) for split-inside-a-character coverage. */
+export const SYNTH_MULTIBYTE = "héllo — 日本語 \u{1f642} ✓";
+
+export interface GeneratedCorpusOptions {
+  /** Project slugs (one directory each). */
+  slugs?: number;
+  /** Session files per slug. */
+  filesPerSlug?: number;
+  /** Assistant turns per file. */
+  turnsPerFile?: number;
+}
+
+/**
+ * R-3 generator: a deterministic (per seed) synthetic corpus in `writeCorpus`
+ * shape. Every file starts with multibyte content, carries tool_use/tool_result
+ * pairs, typed prompts, sidechain turns, one compaction command and one
+ * malformed (quarantined) line. Timestamps ascend inside July 2026. Synthetic
+ * only (SEC-101).
+ */
+export function generateCorpus(
+  seed: number,
+  opts: GeneratedCorpusOptions = {},
+): Record<string, Record<string, Line[]>> {
+  const rnd = seededRandom(seed);
+  const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1));
+  const slugs = opts.slugs ?? 2;
+  const filesPerSlug = opts.filesPerSlug ?? 2;
+  const turnsPerFile = opts.turnsPerFile ?? 20;
+  const base = Date.UTC(2026, 6, 10, 9, 0, 0);
+  const corpus: Record<string, Record<string, Line[]>> = {};
+  for (let s = 0; s < slugs; s++) {
+    const slug = `proj-gen-${s}`;
+    const files: Record<string, Line[]> = {};
+    for (let f = 0; f < filesPerSlug; f++) {
+      const session = `gen-${seed}-${s}-${f}`;
+      let t = base + (s * filesPerSlug + f) * 3 * 3_600_000;
+      const ts = () => {
+        t += int(20, 200) * 1000;
+        return new Date(t).toISOString();
+      };
+      const lines: Line[] = [];
+      for (let i = 0; i < turnsPerFile; i++) {
+        if (i % 3 === 0) lines.push(userPrompt({ session, ts: ts() }));
+        const toolId = `toolu_${session}_${i}`;
+        const withTool = i === 0 || rnd() < 0.6;
+        const name = ["Bash", "Read", "Edit"][int(0, 2)] ?? "Bash";
+        lines.push(
+          assistant({
+            id: `msg_${session}_${i}`,
+            session,
+            ts: ts(),
+            input: int(1, 900),
+            output: int(1, 700),
+            cacheRead: int(0, 40_000),
+            cw5m: int(0, 3_000),
+            cw1h: int(0, 500),
+            sidechain: rnd() < 0.15,
+            extra: { synthNote: `${SYNTH_MULTIBYTE} #${i}` },
+            ...(withTool
+              ? {
+                  toolUses: [
+                    {
+                      id: toolId,
+                      name,
+                      ...(name === "Bash" ? { command: `echo ${SYNTH_MULTIBYTE}` } : {}),
+                    },
+                  ],
+                }
+              : {}),
+          }),
+        );
+        if (withTool) {
+          lines.push(
+            userToolResult({
+              session,
+              ts: ts(),
+              results: [
+                { toolUseId: toolId, text: `${SYNTH_MULTIBYTE} ok`, isError: rnd() < 0.15 },
+              ],
+            }),
+          );
+        }
+        if (i === Math.floor(turnsPerFile / 2)) {
+          lines.push(systemCommand({ session, ts: ts(), command: "/compact" }));
+          lines.push({ raw: `{"type":"assistant","truncated ${SYNTH_MULTIBYTE}` });
+        }
+      }
+      files[`${session}.jsonl`] = lines;
+    }
+    corpus[slug] = files;
+  }
+  return corpus;
+}
+
 /** Write a corpus `{ slug: lines }` under `root`, creating the dir tree. */
 export function writeCorpus(root: string, corpus: Record<string, Record<string, Line[]>>): void {
   for (const [slug, files] of Object.entries(corpus)) {

@@ -1,13 +1,12 @@
 /**
  * RIQ3 feedback + goal-preference store (migration 021).
  * Covers set/get/list/undo/delete, goal set/get/reset, enum + privacy
- * validation, and the ranker cooldown feed round-tripping the frozen riq3
+ * validation, and the cooldown feed round-tripping the frozen riq3
  * fixtures unmodified.
  */
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../../src/db/migrate.js";
-import { rankDecisions } from "../../src/query/api/decision-ranker.js";
 import {
   DEFAULT_GOAL,
   FeedbackError,
@@ -264,14 +263,6 @@ describe("RIQ3 feedback store", () => {
       }
       const fromStore = listCooldowns(db, SCOPE);
       expect(fromStore).toEqual([...fixture.options.cooldowns]);
-      // Ranker output must be identical whether cooldowns come from the fixture
-      // or the store — proving the store feeds the ranker without drift.
-      const viaFixture = rankDecisions(fixture.composition, fixture.options);
-      const viaStore = rankDecisions(fixture.composition, {
-        ...fixture.options,
-        cooldowns: fromStore,
-      });
-      expect(viaStore).toEqual(viaFixture);
     });
   });
 

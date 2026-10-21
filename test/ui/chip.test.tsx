@@ -18,17 +18,17 @@ describe("Chip", () => {
     const { container } = render(<Chip kind="LIST_EQUIV" />);
     const el = container.querySelector(".chip-list-equiv");
     expect(el).not.toBeNull();
-    expect(el?.textContent).toBe("ESTIMATED VALUE");
+    expect(el?.textContent).toBe("Estimate");
     expect(el?.getAttribute("role")).toBe("status");
-    expect(el?.getAttribute("aria-label")).toBe("ESTIMATED VALUE");
+    expect(el?.getAttribute("aria-label")).toBe("Estimate");
   });
 
   it("renders OBS_PROXY with chip-obs-proxy class (distinct from LIST_EQUIV)", () => {
     const { container } = render(<Chip kind="OBS_PROXY" />);
     const el = container.querySelector(".chip-obs-proxy");
     expect(el).not.toBeNull();
-    // Label includes BPE note — not empty, satisfies WCAG color-not-only-signal
-    expect(el?.textContent).toContain("TOKEN-BASED ESTIMATE");
+    // Label is non-empty, satisfies WCAG color-not-only-signal
+    expect(el?.textContent).toContain("Estimate");
     // Confirm it does NOT have the LIST_EQUIV class
     expect(container.querySelector(".chip-list-equiv")).toBeNull();
   });
@@ -106,7 +106,7 @@ describe("Chip", () => {
     }
   });
 
-  it("ChipLegend has one entry per badge label and its toggle closes the expanded legend", () => {
+  it("ChipLegend has one entry per badge kind and its toggle closes the expanded legend", () => {
     const { container } = render(<ChipLegend />);
     const toggle = container.querySelector<HTMLButtonElement>(".chip-legend-toggle");
     if (toggle === null) throw new Error("ChipLegend toggle is missing");
@@ -117,10 +117,12 @@ describe("Chip", () => {
     fireEvent.click(toggle);
     const panel = container.querySelector(".chip-legend-panel");
     expect(panel).not.toBeNull();
-    const labels = Array.from(panel?.querySelectorAll(".chip") ?? [], (chip) =>
-      chip.textContent?.trim(),
-    );
-    expect(new Set(labels).size).toBe(labels.length);
+    const chips = panel?.querySelectorAll(".chip") ?? [];
+    // One chip entry per badge kind (excluding NO_DATA). Labels may share a value after the
+    // "Estimate" relabel (LIST_EQUIV and OBS_PROXY both render "Estimate"); distinctness is
+    // achieved via CSS class, not label text.
+    const expectedCount = Object.keys(KIND_TOOLTIP).filter((k) => k !== "NO_DATA").length;
+    expect(chips.length).toBe(expectedCount);
 
     fireEvent.click(toggle);
     expect(container.querySelector(".chip-legend-panel")).toBeNull();

@@ -15,6 +15,7 @@ export type ComparisonReason =
   | "WINDOW_OPEN"
   | "WINDOW_STOPPED_EARLY"
   | "INSUFFICIENT_SESSIONS"
+  | "INSUFFICIENT_CALLS"
   | "DENOMINATOR_ZERO"
   | "SESSION_COUNT_UNAVAILABLE"
   | "STRUCTURAL_ONLY"
@@ -32,6 +33,37 @@ export type ComparisonReason =
 
 export type CycleVersionStatus = "SUPPORTED" | "UNSUPPORTED_VERSION";
 
+export interface FrozenMeasurementDefinition {
+  targetDirection: "REDUCE" | "INCREASE" | "HOLD";
+  horizonDays: number;
+  baselineCohortCode: string;
+  afterCohortCode: string;
+  guardrailCodes: string[];
+  comparabilityCode: string;
+}
+
+export type EffectCycleBridge =
+  | { bridgeKind: "LEGACY_UNLINKED" }
+  | {
+      bridgeKind: "ARTIFACT_BOUND";
+      recommendationId: string;
+      recommendationRevisionId: string;
+      handlerFamily: string;
+      handlerVersion: string;
+      registryVersion: string;
+      artifactRevisionId: string;
+      artifactHash: string;
+      artifactApplicationId: string;
+      applicationBaseHash: string;
+      applicationPostHash: string;
+      measurementMethodId: string;
+      measurementMethodVersion: string;
+      targetMetricCode: string;
+      measurementVerdict: "AUTOMATIC" | "VALIDATED_PROXY" | "MANUAL" | "UNMEASURABLE";
+      frozenMeasurementDefinition: FrozenMeasurementDefinition;
+      interventionLockKey: string;
+    };
+
 export interface EffectScope {
   workspaceId: string | null;
   /** Opaque identity only. File paths and source text are forbidden. */
@@ -39,6 +71,14 @@ export interface EffectScope {
   tool?: string;
   modelClass?: string;
   taskIntent?: string;
+  /** C9 only: the card's denial kind (one C9 card per workspace and kind). */
+  denialClass?: "HOOK_BLOCK" | "DENY_RULE" | "USER_REJECTED";
+  /** C9 HOOK_BLOCK only: the closed guard-shape labels counted, frozen at tracking time. */
+  guardShapes?: string[];
+  /** C1 only: the card's outlier tool names counted, frozen at tracking time. */
+  tools?: string[];
+  /** A1 only: the card's lead file as opaque event-source identities, frozen at tracking time. */
+  files?: string[];
 }
 
 export interface AggregateEvidence {
@@ -105,6 +145,11 @@ export interface FrozenCycleInput {
   actionRevision?: string;
   /** Required for D1 and must be opaque. */
   baselineSnapshotRef?: string;
+  /**
+   * Immutable application-specific measurement horizon.  Legacy callers omit
+   * this and retain the ESF fourteen-day window.
+   */
+  horizonDays?: number;
   idempotencyKey: string;
   concurrentChange?: { kind: string; at?: string };
 }
@@ -117,6 +162,8 @@ export interface EffectCycle {
   queryDefinitionVersion: string;
   /** Read-only compatibility result. Unsupported rows must never be mutated or reinterpreted. */
   versionStatus: CycleVersionStatus;
+  /** Exact immutable HRE provenance, or an explicit marker for pre-HRE cycles. */
+  bridge: EffectCycleBridge;
   detectorId: string;
   metricId: string;
   methodVersion: string;
@@ -166,6 +213,10 @@ export interface TargetDefinition {
   denominatorDefinition: string;
   boundaryRule: string;
   minimumSessions: number | null;
+  /** Per-call methods only: fewer counted calls (`exposureN`) in either window is not enough data. */
+  minimumCalls?: number;
+  /** Fewer counted calls (`exposureN`) in the before window only is not enough data. */
+  minimumBaselineCalls?: number;
 }
 
 export interface GuardrailDefinition {
@@ -179,7 +230,7 @@ export interface GuardrailDefinition {
 }
 
 export interface RegisteredHandler {
-  detectorId: "D1" | "D2" | "D4" | "D7" | "D8";
+  detectorId: "D1" | "D2" | "D4" | "D7" | "D8" | "D11" | "A1" | "C1" | "C5" | "C9" | "B2";
   aliases: readonly string[];
   target: TargetDefinition;
   guardrails: GuardrailDefinition[];

@@ -1,0 +1,156 @@
+[extend]
+# Inherit the full default ruleset (AWS keys, GitHub tokens, private keys, etc.).
+useDefault = true
+
+# ── Custom generic rules ─────────────────────────────────────────────────────
+# Detect structural privacy leaks: home paths, emails, transcript locations.
+# NO owner/project identifiers here — those stay inline in scripts/launch/export.mjs
+# which never ships (scripts/launch/ is excluded from the export manifest).
+#
+# Allowlists are narrow and commented. If you find a real hit, DO NOT allowlist it:
+# fix the source and record the finding. Allowlist only structural false positives
+# (CI runner paths, explicit placeholder patterns, infrastructure addresses).
+
+[[rules]]
+id          = "aw-windows-home-path"
+description = "Windows user home path embedded in text or JSON (C:\\Users\\<name>\\ or escaped \\\\)"
+# Matches both raw (C:\Users\name\) and JSON-escaped (C:\\Users\\name\\) forms.
+regex       = '''(?i)[A-Za-z]:\\{1,2}[Uu]sers\\{1,2}[A-Za-z0-9._-]{1,64}[\\]'''
+tags        = ["privacy", "path"]
+
+  [rules.allowlist]
+  description = "Placeholder and well-known synthetic names that are safe to ship"
+  regexes = [
+    # Angle-bracket placeholders in documentation
+    '''(?i)[Uu]sers\\{1,2}<[^>]{1,64}>''',
+    # Common synthetic placeholder names used in test fixtures
+    '''(?i)[Uu]sers\\{1,2}(?:your[-_]?name|dev|foo|test|operator|private(?:-user)?|secret|user)[\\]''',
+    # GitHub Actions Windows runner user
+    '''(?i)[Uu]sers\\{1,2}[Rr]unner[\\]''',
+    # "you" and "example" docs placeholders
+    '''(?i)[Uu]sers\\{1,2}(?:you|example|anyone)[\\]''',
+  ]
+
+[[rules]]
+id          = "aw-macos-home-path"
+description = "macOS user home path (/Users/<name>/)"
+regex       = '''/Users/[A-Za-z0-9._-]{2,64}/'''
+tags        = ["privacy", "path"]
+
+  [rules.allowlist]
+  regexes = [
+    # Angle-bracket placeholder in documentation
+    '''/Users/<[^>]{1,64}>/''',
+    # Common synthetic placeholder names used in test fixtures
+    '''/Users/(?:dev|foo|test|operator|private|secret|user|anyone|someone)/''',
+    # GitHub Actions macOS runner user
+    '''/Users/runner/''',
+    '''/Users/github/''',
+    # Prose documentation placeholders
+    '''/Users/[Yy]our[Nn]ame/''',
+    '''/Users/[Yy]our-[Nn]ame/''',
+    '''/Users/example/''',
+  ]
+
+[[rules]]
+id          = "aw-linux-home-path"
+description = "Linux user home path (/home/<name>/)"
+regex       = '''/home/[A-Za-z0-9._-]{2,64}/'''
+tags        = ["privacy", "path"]
+
+  [rules.allowlist]
+  regexes = [
+    # Angle-bracket placeholder
+    '''/home/<[^>]{1,64}>/''',
+    # Common synthetic placeholder names
+    '''/home/(?:dev|foo|test|operator|private|secret|user|anyone|someone)/''',
+    # GitHub Actions Linux runner user
+    '''/home/runner/''',
+    '''/home/github/''',
+    # Documentation placeholders
+    '''/home/[Yy]our[Nn]ame/''',
+    '''/home/[Yy]our-[Nn]ame/''',
+    '''/home/example/''',
+    '''/home/user/''',
+  ]
+
+[[rules]]
+id          = "aw-email-address"
+description = "Personal email address (non-placeholder)"
+# Requires a realistic local part and domain; short or infrastructure domains are allowlisted.
+regex       = '''[A-Za-z0-9._%+\-]{3,64}@[A-Za-z0-9.\-]{3,63}\.[A-Za-z]{2,10}'''
+tags        = ["privacy", "pii"]
+
+  [rules.allowlist]
+  regexes = [
+    # noreply / bot addresses — always safe
+    '''(?i)noreply@''',
+    '''(?i)no-reply@''',
+    # GitHub / npm / Anthropic / tool infrastructure
+    '''(?i)@users\.noreply\.github\.com''',
+    '''(?i)@github\.com''',
+    '''(?i)@npmjs\.com''',
+    '''(?i)@anthropic\.com''',
+    '''(?i)@cursor\.com''',
+    # git SSH remote format (git@github.com:org/repo) — not an email
+    '''^git@''',
+    # Placeholder / example domains
+    '''(?i)@example\.(com|org|net|io)''',
+    # Placeholder / test local parts that appear in docs and fixtures
+    '''(?i)^(?:your[-_]?(?:email|name|address)|you|someone|placeholder|test|user|admin|info|support|contact|me)@''',
+    # npm scoped packages containing @ (e.g. @anthropic-ai/tokenizer) — not an email
+    '''@[A-Za-z0-9-]+/''',
+  ]
+
+[[rules]]
+id          = "aw-claude-transcript-path"
+description = "Claude Code transcript file location (.claude/projects/…/<uuid>.jsonl)"
+# Detects a real developer transcript path escaped into source or config.
+regex       = '''\.claude/projects/[A-Za-z0-9_.%+ -]{1,200}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl'''
+tags        = ["privacy", "transcript"]
+
+# ── Global allowlist ─────────────────────────────────────────────────────────
+# Apply to ALL rules: paths that are always-safe to have findings in this repo.
+[allowlist]
+# Private-only paths that never ship (excluded by export manifest). The real
+# identifiers these files contain (real dev paths, project names) are acceptable
+# in private-only files.
+paths = [
+  # Export tooling — never ships; may contain FORBIDDEN identifiers for gate testing
+  '''scripts/launch/''',
+  # Private process docs and history
+  '''docs/handoffs/''',
+  '''docs/plans/''',
+  '''docs/research/''',
+  # Developer notes, audit outputs, session logs — never ship
+  '''\.claude/''',
+  # Historical spike code — never ships
+  '''spikes/''',
+  # Worktrees are isolated from the repo tree
+  '''\.worktrees/''',
+  # The secrets-filter and content-retention test files explicitly contain fake
+  # credentials (e.g. sk-proj-abcdef...) to verify that the ingest pipeline
+  # correctly detects and redacts them. Not real secrets.
+  '''test/ingest/secrets-filter\.test\.ts''',
+  '''test/ingest/content-retention\.test\.ts''',
+  # The judge-payload test feeds fake tokens, synthetic home paths (jdoe) and example.com
+  # emails through the "Judge me" detect/scrub pass to prove each one blocks or is scrubbed.
+  '''test/query/judge-payload\.test\.ts''',
+]
+
+# Stopwords matched against the "secret" value: findings whose secret contains
+# any of these strings are suppressed across all rules. Used for handler IDs
+# and constants that gitleaks' generic-api-key rule falsely matches.
+stopwords = [
+  # AgentWrangler handler/correlation IDs that match the generic key pattern
+  "durable-correction",
+  "permission-friction",
+  "permission-correlation",
+  "judge_opt_in",
+  # Metric field names that match the generic key pattern
+  "xAvoidableBytes",
+  # Test constant names
+  "_BYTES_THRESHOLD",
+  # Database column names that trigger false positives
+  "probed_at",
+]

@@ -1,0 +1,1 @@
+Opus 5.5 | [35mAgentWrangler[0m | [36mfeat/statusline-limits[0m | ctx [32m[####------] 42%[0m 85k | [32m5h:23%[0m 1h48m  [31m7d:81%[0m 2d11h | [32m~$3.20[0m 1h23m

@@ -1,0 +1,470 @@
+{
+  "work_items": [
+    {
+      "work_item_id": "gh:synth/g11#100",
+      "workspace_id": "positive",
+      "number": 100,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-10-08T02:00:00.000Z",
+      "merged_at": "2026-10-10T02:00:00.000Z",
+      "synced_at": "2026-10-10T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#101",
+      "workspace_id": "positive",
+      "number": 101,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-10-12T02:00:00.000Z",
+      "merged_at": "2026-10-14T02:00:00.000Z",
+      "synced_at": "2026-10-14T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#102",
+      "workspace_id": "positive",
+      "number": 102,
+      "state": "CLOSED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-10-16T02:00:00.000Z",
+      "closed_at": "2026-10-18T02:00:00.000Z",
+      "synced_at": "2026-10-18T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#103",
+      "workspace_id": "positive",
+      "number": 103,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-10-20T02:00:00.000Z",
+      "merged_at": "2026-10-22T02:00:00.000Z",
+      "synced_at": "2026-10-22T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#104",
+      "workspace_id": "positive",
+      "number": 104,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-10-24T02:00:00.000Z",
+      "merged_at": "2026-10-26T02:00:00.000Z",
+      "synced_at": "2026-10-26T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#105",
+      "workspace_id": "positive",
+      "number": 105,
+      "state": "CLOSED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-10-28T02:00:00.000Z",
+      "closed_at": "2026-10-30T02:00:00.000Z",
+      "synced_at": "2026-10-30T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#106",
+      "workspace_id": "positive",
+      "number": 106,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-01T02:00:00.000Z",
+      "merged_at": "2026-11-03T02:00:00.000Z",
+      "synced_at": "2026-11-03T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#107",
+      "workspace_id": "positive",
+      "number": 107,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-05T02:00:00.000Z",
+      "merged_at": "2026-11-07T02:00:00.000Z",
+      "synced_at": "2026-11-07T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#108",
+      "workspace_id": "positive",
+      "number": 108,
+      "state": "CLOSED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-09T02:00:00.000Z",
+      "closed_at": "2026-11-11T02:00:00.000Z",
+      "synced_at": "2026-11-11T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#109",
+      "workspace_id": "positive",
+      "number": 109,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-13T02:00:00.000Z",
+      "merged_at": "2026-11-15T02:00:00.000Z",
+      "synced_at": "2026-11-15T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#110",
+      "workspace_id": "positive",
+      "number": 110,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-17T02:00:00.000Z",
+      "merged_at": "2026-11-19T02:00:00.000Z",
+      "synced_at": "2026-11-19T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#111",
+      "workspace_id": "positive",
+      "number": 111,
+      "state": "CLOSED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-21T02:00:00.000Z",
+      "closed_at": "2026-11-23T02:00:00.000Z",
+      "synced_at": "2026-11-23T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#112",
+      "workspace_id": "positive",
+      "number": 112,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-25T02:00:00.000Z",
+      "merged_at": "2026-11-27T02:00:00.000Z",
+      "synced_at": "2026-11-27T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#113",
+      "workspace_id": "positive",
+      "number": 113,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-11-29T02:00:00.000Z",
+      "merged_at": "2026-12-01T02:00:00.000Z",
+      "synced_at": "2026-12-01T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#114",
+      "workspace_id": "positive",
+      "number": 114,
+      "state": "CLOSED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-12-03T02:00:00.000Z",
+      "closed_at": "2026-12-05T02:00:00.000Z",
+      "synced_at": "2026-12-05T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#115",
+      "workspace_id": "positive",
+      "number": 115,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-12-07T02:00:00.000Z",
+      "merged_at": "2026-12-09T02:00:00.000Z",
+      "synced_at": "2026-12-09T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#116",
+      "workspace_id": "positive",
+      "number": 116,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-12-11T02:00:00.000Z",
+      "merged_at": "2026-12-13T02:00:00.000Z",
+      "synced_at": "2026-12-13T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#117",
+      "workspace_id": "positive",
+      "number": 117,
+      "state": "CLOSED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-12-15T02:00:00.000Z",
+      "closed_at": "2026-12-17T02:00:00.000Z",
+      "synced_at": "2026-12-17T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#118",
+      "workspace_id": "positive",
+      "number": 118,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-12-19T02:00:00.000Z",
+      "merged_at": "2026-12-21T02:00:00.000Z",
+      "synced_at": "2026-12-21T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#119",
+      "workspace_id": "positive",
+      "number": 119,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2026-12-23T02:00:00.000Z",
+      "merged_at": "2026-12-25T02:00:00.000Z",
+      "synced_at": "2026-12-25T03:00:00.000Z"
+    },
+    {
+      "work_item_id": "gh:synth/g11#900",
+      "workspace_id": "positive",
+      "number": 900,
+      "state": "MERGED",
+      "checks_conclusion": "NONE",
+      "opened_at": "2027-01-05T06:00:00.000Z",
+      "merged_at": "2027-01-07T06:00:00.000Z",
+      "synced_at": "2027-01-07T07:00:00.000Z"
+    }
+  ],
+  "observed_outcomes": [
+    {
+      "work_item_id": "gh:synth/g11#100",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-10-10T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#101",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-10-14T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#102",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2026-10-18T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#103",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-10-22T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#104",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-10-26T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#105",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2026-10-30T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#106",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-11-03T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#107",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-11-07T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#108",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2026-11-11T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#109",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-11-15T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#110",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-11-19T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#111",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2026-11-23T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#112",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-11-27T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#113",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-12-01T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#114",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2026-12-05T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#115",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-12-09T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#116",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-12-13T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#117",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2026-12-17T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#118",
+      "outcome": "OBSERVED_SUCCESS",
+      "derived_at": "2026-12-21T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#119",
+      "outcome": "OBSERVED_SUCCESS_WITH_DEFERRALS",
+      "derived_at": "2026-12-25T03:00:00.000Z",
+      "methodology_version": "synth-1"
+    },
+    {
+      "work_item_id": "gh:synth/g11#900",
+      "outcome": "OBSERVED_FAILURE",
+      "derived_at": "2027-01-07T07:00:00.000Z",
+      "methodology_version": "synth-1"
+    }
+  ],
+  "session_work_links": [
+    {
+      "session_id": "g11-b00",
+      "work_item_id": "gh:synth/g11#100",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b01",
+      "work_item_id": "gh:synth/g11#101",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b02",
+      "work_item_id": "gh:synth/g11#102",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b03",
+      "work_item_id": "gh:synth/g11#103",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b04",
+      "work_item_id": "gh:synth/g11#104",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b05",
+      "work_item_id": "gh:synth/g11#105",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b06",
+      "work_item_id": "gh:synth/g11#106",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b07",
+      "work_item_id": "gh:synth/g11#107",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b08",
+      "work_item_id": "gh:synth/g11#108",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b09",
+      "work_item_id": "gh:synth/g11#109",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b10",
+      "work_item_id": "gh:synth/g11#110",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b11",
+      "work_item_id": "gh:synth/g11#111",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b12",
+      "work_item_id": "gh:synth/g11#112",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b13",
+      "work_item_id": "gh:synth/g11#113",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b14",
+      "work_item_id": "gh:synth/g11#114",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b15",
+      "work_item_id": "gh:synth/g11#115",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b16",
+      "work_item_id": "gh:synth/g11#116",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b17",
+      "work_item_id": "gh:synth/g11#117",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b18",
+      "work_item_id": "gh:synth/g11#118",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-b19",
+      "work_item_id": "gh:synth/g11#119",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    },
+    {
+      "session_id": "g11-cand",
+      "work_item_id": "gh:synth/g11#900",
+      "confidence": 1,
+      "method": "SHA_OVERLAP"
+    }
+  ]
+}

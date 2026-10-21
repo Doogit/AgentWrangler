@@ -2,8 +2,8 @@
  * D7 ingestion-to-recommendation integration.
  *
  * Uses only fabricated transcript structure. The assertions intentionally
- * verify that raw tool path/result strings do not cross the persistence or
- * recommendation boundaries while a fresh corpus still produces D7 output.
+ * verify that raw tool path/result strings are not persisted while a fresh
+ * corpus still produces D7 output; the card reads them back from the transcript.
  */
 
 import * as fs from "node:fs";
@@ -25,11 +25,15 @@ import {
 
 const NOW = new Date("2027-01-08T00:00:00.000Z");
 const INGEST_OPTS = { now: () => NOW, activityWindowSecs: 300 };
-const RAW_PATH = "C:/fabricated/private/d7-integration.ts";
+// "C:/..." is a relative path on POSIX (resolved against cwd), so use a platform-native root.
+const FAB_ROOT = process.platform === "win32" ? "C:/fabricated" : "/fabricated";
+const RAW_PATH = `${FAB_ROOT}/private/d7-integration.ts`;
 const EQUIVALENT_PATHS = [
   RAW_PATH,
-  "C:\\fabricated\\private\\nested\\..\\d7-integration.ts",
-  "C:/fabricated/./private/d7-integration.ts",
+  process.platform === "win32"
+    ? "C:\\fabricated\\private\\nested\\..\\d7-integration.ts"
+    : `${FAB_ROOT}/private/nested/../d7-integration.ts`,
+  `${FAB_ROOT}/./private/d7-integration.ts`,
 ] as const;
 const RAW_RESULT = "fabricated D7 integration result";
 
@@ -89,6 +93,7 @@ describe("D7 fresh ingestion integration", () => {
 
     const view = listRecommendations().data;
     if (view === null) throw new Error("expected recommendations view");
+    // B5: a null-$/wk D7 rec lands in the Track-D friction lane, not the ranked list.
     const rec = view.active.find((candidate) => candidate.detector_id === "D7");
     expect(rec?.target_metric).toBe("loop_flagged_turn_share");
     expect(rec?.evidence.redundant_read_event_count).toBe(3);
@@ -111,11 +116,14 @@ describe("D7 fresh ingestion integration", () => {
       )
       .get(session) as { input_count: number; path_count: number };
     expect(identities).toEqual({ input_count: 1, path_count: 1 });
-    const surfaced = JSON.stringify({ detectorRows, rec });
+    const stored = JSON.stringify(detectorRows);
     for (const raw of [...EQUIVALENT_PATHS, RAW_RESULT]) {
       expect(persisted).not.toContain(raw);
-      expect(surfaced).not.toContain(raw);
+      expect(stored).not.toContain(raw);
     }
+    // P3.1-T5 R4.2 (ADR-112 amended: no in-app content restriction): the card reads the loop
+    // example back from the transcript, so it names the file only the transcript holds.
+    expect(rec?.trigger?.problem).toContain(`The most repeated was Read \`${FAB_ROOT}/`);
   });
 
   it("keeps SEC-4 command markers in D7 denominators and out of persisted content", () => {
@@ -178,6 +186,7 @@ describe("D7 fresh ingestion integration", () => {
     // Marker rows stay in the D7 coverage denominator as missing-metadata events.
     const view = listRecommendations().data;
     if (view === null) throw new Error("expected recommendations view");
+    // B5: a null-$/wk D7 rec lands in the Track-D friction lane, not the ranked list.
     const rec = view.active.find((candidate) => candidate.detector_id === "D7");
     expect(rec?.evidence.redundant_read_event_count).toBe(3);
     expect(rec?.evidence.owner_turn_metadata_covered_event_count).toBe(3);

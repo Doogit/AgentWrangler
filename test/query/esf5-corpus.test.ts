@@ -4,11 +4,6 @@ import {
   getSessionEsfObservations,
 } from "../../src/query/api/esf-observations.js";
 import { getSessionDrivers } from "../../src/query/api/session-drivers.js";
-import {
-  DaemonIdIssuer,
-  getWorkAllocation,
-  recomputeWorkAllocation,
-} from "../../src/work-records/index.js";
 import { ESF5_AS_OF, ESF5_FROM, ESF5_IDS, createEsf5Db } from "../fixtures/esf5-corpus.js";
 
 describe("ESF5 fixed resource/activity/allocation corpus", () => {
@@ -24,22 +19,6 @@ describe("ESF5 fixed resource/activity/allocation corpus", () => {
     expect(response.meta.window).toEqual({ from: ESF5_FROM, to: ESF5_AS_OF });
     if (!response.data) throw new Error("Missing fixture cohort");
     return response.data;
-  }
-  function allocation(workspaceId: string) {
-    const issuer = new DaemonIdIssuer();
-    return recomputeWorkAllocation(
-      db,
-      issuer,
-      {
-        mutation_id: issuer.issue("MUTATION").id,
-        allocation_revision_id: issuer.issue("ALLOCATION_REVISION").id,
-        workspace_id: workspaceId,
-        cohort_from: ESF5_FROM,
-        cohort_to: ESF5_AS_OF,
-        evidence_as_of: ESF5_AS_OF,
-      },
-      () => new Date(ESF5_AS_OF),
-    ).allocation;
   }
   it("includes the distinct scoped overlap fixture in the stable corpus inventory", () => {
     expect(ESF5_IDS).toContain("FX-OVERLAP-SCOPED-14D");
@@ -75,15 +54,20 @@ describe("ESF5 fixed resource/activity/allocation corpus", () => {
         const row = db
           .prepare("SELECT evidence_json FROM recommendations WHERE rec_id = ?")
           .get(drivers?.[0]?.rec_id) as { evidence_json: string };
-        expect(JSON.parse(row.evidence_json)).toMatchObject({
-          session_id: id,
-          test_fail_event_count: 3,
+        // PP2: D7 rolls up per-workspace — the six native ws-alpha matches now
+        // resolve to ONE rec whose session_ids link all six; test_fail_event_count
+        // is summed across them (6 × 3). getSessionDrivers still attributes it to
+        // each session via session_ids, so the toHaveLength(1) check above holds.
+        const payload = JSON.parse(row.evidence_json) as {
+          template_id: string;
+          facts: Record<string, unknown>;
+        };
+        expect(payload.template_id).toBe("D7_RETRY_LOOP");
+        expect(payload.facts).toMatchObject({
+          session_ids: ids("ses-a", 6),
+          session_count: 6,
+          test_fail_event_count: 18,
           owner_turn_metadata_coverage: 1,
-          workspace_context_from: ESF5_FROM,
-          workspace_context_to: ESF5_AS_OF,
-          workspace_affected_session_ids: c.observed_test_recovery.affected_session_ids,
-          workspace_recovered_session_ids: c.observed_test_recovery.recovered_session_ids,
-          workspace_qualifying_session_count: 18,
         });
       }
       expect(getSessionEsfObservations(db, id).data?.resource.selected_session_count).toBe(1);
@@ -97,26 +81,6 @@ describe("ESF5 fixed resource/activity/allocation corpus", () => {
       expect(c?.no_commit_activity.session_count).toBe(n < 5 ? 1 : 0);
     }
   });
-  it("FX-SHARED-COST allocates neither record and freezes once-only unallocated cost", () => {
-    const a = allocation("ws-shared");
-    expect(a).toMatchObject({
-      eligible_priced_cost_u: 110_000,
-      allocated_priced_cost_u: 0,
-      unallocated_priced_cost_u: 110_000,
-      unallocated_shared_count: 1,
-      records_total: 2,
-    });
-    expect(a.sessions).toEqual([
-      expect.objectContaining({
-        session_id: "ses-s01",
-        disposition: "UNALLOCATED_SHARED",
-        owner_snapshot_id: null,
-        priced_cost_u: 110_000,
-      }),
-    ]);
-    db.prepare("UPDATE turns SET cost_equiv_u = 999999 WHERE session_id = 'ses-s01'").run();
-    expect(getWorkAllocation(db, a.allocation_revision_id)).toEqual(a);
-  });
   it("FX-LIVE-SPARSE keeps LIVE money, unknown cost and skipped feedback distinct", () => {
     const c = cohort("ws-live");
     expect(c.resource).toMatchObject({
@@ -129,23 +93,5 @@ describe("ESF5 fixed resource/activity/allocation corpus", () => {
       session_count: 1,
       live_session_excluded_count: 3,
     });
-    expect(allocation("ws-live")).toMatchObject({
-      eligible_priced_cost_u: 0,
-      unpriced_turn_count: 1,
-      outcome_counts: { UNREPORTED: 1, UNKNOWN: 0 },
-      useful_work_rate: { numerator: 0, denominator: 0, value: null },
-    });
   });
-  it.each(["ws-alpha", "ws-research", "ws-shared", "ws-live"])(
-    "conserves integer microUSD for %s",
-    (ws) => {
-      const a = allocation(ws);
-      expect(a.allocated_priced_cost_u + a.unallocated_priced_cost_u).toBe(
-        a.eligible_priced_cost_u,
-      );
-      expect(a.eligible_priced_cost_u).toBe(
-        cohort(ws).allocation_sessions.reduce((n, row) => n + row.priced_cost_u, 0),
-      );
-    },
-  );
 });

@@ -14,7 +14,7 @@ export const ESF5_BEFORE_FROM = "2026-07-18T00:00:00.000Z";
 export const ESF5_AFTER_TO = ESF5_EVIDENCE_AS_OF;
 export const ESF5_SCOPED_APPLIED_AT = "2026-08-03T00:00:00.000Z";
 const ESF5_SCOPED_SOURCE_HASH = "esf5-scoped-source-hash-14d";
-const ESF5_SCOPED_TOOL = "Bash";
+const ESF5_SCOPED_TOOL = "Read";
 export const ESF5_SCOPED_SOURCE_IDENTITY = effectEventSourceIdentity(
   "ws-esf5-overlap-scoped",
   ESF5_SCOPED_SOURCE_HASH,
@@ -348,7 +348,7 @@ export function seedEsf5Effects(db: Database.Database): typeof esf5EffectManifes
     sourceHash: "esf5-decoy-source",
   });
   scopedEvent(db, "scoped-decoy-tool", "scoped-decoy", decoyOwner, "2026-08-08T12:01:00.000Z", {
-    tool: "Read",
+    tool: "Edit",
   });
 
   const ids = [

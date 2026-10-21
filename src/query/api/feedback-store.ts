@@ -5,7 +5,7 @@
  * timestamps — no free text, no raw content, no model/training call (SEC-101).
  * Feedback affects relevance/ranking only; it never records measured outcomes.
  *
- * Schema + semantics: docs/plans/spec-riq3-feedback-storage.md.
+ * Schema + semantics: docs/plans/Archive/spec-riq3-feedback-storage.md.
  * Ranker feed shape must stay compatible with decision-ranker-types.ts.
  */
 
@@ -263,6 +263,24 @@ export function listCooldowns(db: Db, scopeKey: string): CooldownInput[] {
     until_iso: r.cooldown_until,
     dismissed_materiality_band: r.dismissed_materiality_band,
   }));
+}
+
+/**
+ * RIQ5: decision identities with an active ALREADY_DONE completed-change
+ * attestation. Fed to the decision view to suppress re-suggesting a change the
+ * operator has confirmed applied (manual path — no effect cycle). Distinct from
+ * listCooldowns, which is dismissals only and excludes ALREADY_DONE.
+ */
+export function listCompletedIdentities(db: Db, scopeKey: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT rec_identity
+         FROM recommendation_feedback
+        WHERE scope_key = ? AND deleted_at IS NULL AND feedback = 'ALREADY_DONE'
+        ORDER BY rec_identity`,
+    )
+    .all(scopeKey) as Array<{ rec_identity: string }>;
+  return rows.map((r) => r.rec_identity);
 }
 
 // ---------------------------------------------------------------------------

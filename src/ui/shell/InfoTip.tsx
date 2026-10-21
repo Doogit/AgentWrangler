@@ -6,17 +6,33 @@
  */
 
 import { type ReactNode, useId, useLayoutEffect, useRef, useState } from "react";
+import { METRIC_COPY, type MetricId } from "../lib/metric-copy";
 
 export interface InfoTipProps {
   /** Tooltip body. Caller keeps it <=2 sentences (what/why/what-do-I-do). */
-  content: ReactNode;
+  content?: ReactNode;
   /** Optional dotted-underlined term to wrap; when absent, render a small circled-i (info glyph) button trigger. */
   children?: ReactNode;
   /** Accessible name for the trigger button (e.g. "What is Cache-write %?"). */
   label: string;
+  /**
+   * When set, renders the canonical what/read/act copy from metric-copy.ts as
+   * the tooltip body. Overrides `content` when both are provided.
+   */
+  metricId?: MetricId;
 }
 
-export default function InfoTip({ children, content, label }: InfoTipProps) {
+export default function InfoTip({ children, content, label, metricId }: InfoTipProps) {
+  const resolvedContent: ReactNode = metricId
+    ? (() => {
+        const copy = METRIC_COPY[metricId];
+        return (
+          <>
+            <span>{copy.what}</span> <span>{copy.read}</span> <span>{copy.act}</span>
+          </>
+        );
+      })()
+    : content;
   const [isOpen, setIsOpen] = useState(false);
   const tooltipId = `infotip-${useId().replace(/:/g, "")}`;
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -96,7 +112,11 @@ export default function InfoTip({ children, content, label }: InfoTipProps) {
               }
         }
       >
-        {children ?? "ⓘ"}
+        {children ?? (
+          // Drawn in CSS, not the U+24D8 glyph: Segoe UI lacks it, so every new font size/weight
+          // ran Chrome's last-resort font fallback (~30 ms each, M17 long tasks on detail pages).
+          <span className="infotip-icon" />
+        )}
       </button>
       {isOpen ? (
         <span
@@ -106,23 +126,27 @@ export default function InfoTip({ children, content, label }: InfoTipProps) {
           style={{
             background: "var(--panel2)",
             border: "1px solid var(--line)",
-            borderRadius: "var(--r)",
+            borderRadius: "var(--r-control)",
             boxShadow: "var(--shadow)",
             color: "var(--text)",
             fontSize: 13,
+            fontWeight: "normal",
             left: position.left,
+            letterSpacing: "normal",
             lineHeight: 1.4,
             maxWidth: "min(260px, calc(100vw - 16px))",
             maxHeight: "calc(100dvh - 16px)",
             overflowY: "auto",
             padding: "8px 10px",
             position: "fixed",
+            // A tip inside a caps label (e.g. `.label-caps`) must not inherit its casing.
+            textTransform: "none",
             top: position.top,
             width: "max-content",
             zIndex: 20,
           }}
         >
-          {content}
+          {resolvedContent}
         </span>
       ) : null}
     </span>

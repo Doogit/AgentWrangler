@@ -1,5 +1,7 @@
 import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { b2Detector } from "../../src/detector/detectors/b2_cache_ttl_gap.js";
+import { d8Detector } from "../../src/detector/detectors/d8_cache_write_churn.js";
 import {
   createEffectEngine,
   createSqlObservationProvider,
@@ -67,7 +69,7 @@ function scopedEvent(
   options: {
     path?: string;
     tool?: string;
-    inputHash?: string;
+    inputHash?: string | null;
     resultBytes?: number | null;
     exit?: string | null;
     test?: number;
@@ -80,9 +82,9 @@ function scopedEvent(
     eventId,
     sessionId,
     at,
-    options.tool ?? "Bash",
+    options.tool ?? "Read",
     options.resultBytes === undefined ? 1 : options.resultBytes,
-    options.inputHash ?? eventId,
+    options.inputHash === undefined ? eventId : options.inputHash,
     options.exit ?? "OK",
   );
   db.prepare(
@@ -132,7 +134,7 @@ describe("SQLite effect observations", () => {
         index === 5 ? "missing-owner" : "completed-reads-m-0",
         at,
         index,
-        { tool: read ? "Read" : "Bash", inputHash: read ? "same-read" : `bash-${index}` },
+        { tool: read ? "Read" : "Bash", inputHash: read ? "same-read" : null },
       );
     }
     rec(db, "completed-reads", "D7", "loop_flagged_turn_share");
@@ -247,6 +249,243 @@ describe("SQLite effect observations", () => {
     db.close();
   });
 
+  describe("D8 and B2 cache re-write metrics (P3.2-F3)", () => {
+    const COLD = { t1Read: 60_000, gapMin: 90, t3Read: 100_000 };
+
+    /**
+     * Four main turns per session: a first write, a warm turn, a resume `gapMin` later, and a
+     * warm turn after it. A resume past the 1h TTL is cold (D8 re-write, and a B2 pair when the
+     * warm turn read > 20k); inside it, the resume reads the cache.
+     */
+    function cacheSessions(
+      db: Database.Database,
+      prefix: string,
+      day: string,
+      shape: { t1Read: number; gapMin: number; t3Read: number },
+    ) {
+      const base = Date.parse(`${day}T10:00:00.000Z`);
+      const cold = shape.gapMin > 60;
+      const turns: [number, number, number][] = [
+        [0, 0, 60_000],
+        [2, shape.t1Read, 1_000],
+        [2 + shape.gapMin, cold ? 0 : 150_000, cold ? 100_000 : 10_000],
+        [4 + shape.gapMin, shape.t3Read, 1_000],
+      ];
+      for (let i = 0; i < 10; i++) {
+        const sid = `${prefix}-s-${i}`;
+        const at = (min: number) => new Date(base + min * 60_000).toISOString();
+        const last = at(turns[3]?.[0] ?? 0);
+        db.prepare(
+          `INSERT INTO sessions(session_id,workspace_id,file_path,first_turn_at,last_turn_at,state,turn_count,cost_equiv_u,hygiene_flags) VALUES(?,?,?,?,?,'RECONCILED',4,0,'[]')`,
+        ).run(sid, "ws-alpha", `/fixture/${sid}`, at(0), last);
+        turns.forEach(([min, read, w1h], n) => {
+          db.prepare(
+            `INSERT INTO turns(message_id,session_id,workspace_id,ts,model,is_sidechain,input_tokens,output_tokens,cache_read_tokens,cache_write_5m,cache_write_1h,cache_write_other,cost_claim,provisional,parser_version) VALUES(?,?,?,?,'claude-sonnet',0,100,0,?,0,?,0,'LIST_EQUIV',0,'parser-v1')`,
+          ).run(`${sid}-m-${n}`, sid, "ws-alpha", at(min), read, w1h);
+        });
+      }
+    }
+
+    /** One cycle per DB: cycles sharing a workspace confound each other. */
+    function measure(after: Partial<typeof COLD>, detector: string, metric: string) {
+      const db = createInMemoryFixtureDb();
+      cacheSessions(db, "before", "2026-01-25", COLD);
+      cacheSessions(db, "after", "2026-02-05", { ...COLD, ...after });
+      rec(db, "r", detector, metric);
+      const engine = track(db, "r", detector, metric);
+      engine.runPass(new Date("2026-02-15T00:00:00.000Z"));
+      const cycle = engine.getCycle("r-1");
+      db.close();
+      return cycle;
+    }
+
+    it("does not credit D8 or B2 when cache reads rise but idle re-writes stay", () => {
+      const after = { t3Read: 900_000 };
+      // The old ratio calls this a win; the priced re-writes did not change.
+      expect(measure(after, "D8", "d8-cache-ratio")?.targetDirection).toBe("IMPROVED");
+      expect(measure(after, "D8", "d8-idle-rewrite-tokens")).toMatchObject({
+        targetDirection: "UNCHANGED",
+        comparisonStatus: "COMPARABLE",
+        baselineEvidence: { value: 25_000, exposureN: 40, sessionN: 10 },
+        finalEvidence: { after: { value: 25_000, exposureN: 40, sessionN: 10 } },
+      });
+      expect(measure(after, "B2", "b2-cold-resume-tokens")).toMatchObject({
+        targetDirection: "UNCHANGED",
+        comparisonStatus: "COMPARABLE",
+        // 10 sessions x one 100k re-write per 40 turns (B2 now counts the resume's creation).
+        baselineEvidence: { value: 25_000, exposureN: 40, sessionN: 10 },
+        finalEvidence: { after: { value: 25_000 } },
+      });
+    });
+
+    it("credits D8 and B2 when resumes land inside the cache TTL", () => {
+      const after = { gapMin: 30 };
+      expect(measure(after, "D8", "d8-idle-rewrite-tokens")).toMatchObject({
+        targetDirection: "IMPROVED",
+        comparisonStatus: "COMPARABLE",
+        finalEvidence: { after: { value: 0, exposureN: 40 } },
+      });
+      expect(measure(after, "B2", "b2-cold-resume-tokens")).toMatchObject({
+        targetDirection: "IMPROVED",
+        comparisonStatus: "COMPARABLE",
+        finalEvidence: { after: { value: 0, exposureN: 40 } },
+      });
+    });
+
+    it("counts a cold resume after a small context in B2 as in D8 (the old reads-10x rule missed it)", () => {
+      const after = { t1Read: 15_000 };
+      expect(measure(after, "B2", "b2-cold-resume-tokens")).toMatchObject({
+        targetDirection: "UNCHANGED",
+        finalEvidence: { after: { value: 25_000 } },
+      });
+      expect(measure(after, "D8", "d8-idle-rewrite-tokens")?.targetDirection).toBe("UNCHANGED");
+    });
+
+    it("counts the same re-write turns and tokens as the D8 and B2 detectors", () => {
+      const db = createInMemoryFixtureDb();
+      const from = "2026-01-18T00:00:00.000Z";
+      const insert = db.prepare(
+        `INSERT INTO turns(message_id,session_id,workspace_id,ts,model,is_sidechain,agent_id,input_tokens,output_tokens,cache_read_tokens,cache_write_5m,cache_write_1h,cache_write_other,cost_claim,provisional,parser_version) VALUES(?,?,?,?,'claude-sonnet',?,?,100,0,?,?,?,0,'LIST_EQUIV',0,'parser-v1')`,
+      );
+      // [session, time, sidechain agent or null, read, w5m, w1h]. Distinct creation values make the
+      // token sums a fingerprint of which turns were counted.
+      const rows: [string, string, string | null, number, number, number][] = [
+        // Pre-window history: gives the first in-window turn of s1 its predecessor and 1h tier.
+        ["s1", "2026-01-17T23:00", null, 0, 0, 60_000],
+        ["s1", "2026-01-17T23:02", null, 70_000, 0, 1_000],
+        ["s1", "2026-01-18T01:00", null, 0, 0, 101_000], // D8 + B2 (gap 118 min)
+        ["s1", "2026-01-18T01:10", "agent-a", 0, 5_000, 0], // subagent: own thread
+        ["s1", "2026-01-18T01:30", "agent-a", 0, 0, 90_000], // subagent resume: never counted
+        ["s1", "2026-01-18T01:31", null, 120_000, 0, 1_000],
+        ["s1", "2026-01-18T02:31", null, 0, 0, 102_000], // gap = 60 min: not past TTL
+        ["s1", "2026-01-18T02:33", null, 110_000, 0, 1_000],
+        ["s1", "2026-01-18T04:00", null, 10_000, 0, 103_000], // D8 (read < 20%), B2 (< 10%)
+        ["s1", "2026-01-18T04:01", null, 40_000, 0, 1_000],
+        ["s1", "2026-01-18T06:00", null, 3_000, 0, 104_000], // D8 and B2
+        ["s2", "2026-01-20T09:00", null, 0, 0, 60_000],
+        ["s2", "2026-01-20T09:05", null, 15_000, 0, 1_000],
+        ["s2", "2026-01-20T11:00", null, 0, 0, 105_000], // D8 only (previous read ≤ 20k)
+        ["s2", "2026-01-20T11:02", null, 90_000, 0, 1_000],
+        ["s2", "2026-01-20T11:30", null, 80_000, 0, 40_000], // gap < 1h; D8 creation < 50k
+        ["s2", "2026-01-20T13:00", null, 15_000, 0, 106_000], // D8 (read < 20%); B2 no (≥ 10%)
+      ];
+      for (const sid of ["s1", "s2"]) {
+        const own = rows.filter((row) => row[0] === sid);
+        db.prepare(
+          `INSERT INTO sessions(session_id,workspace_id,file_path,first_turn_at,last_turn_at,state,turn_count,cost_equiv_u,hygiene_flags) VALUES(?,?,?,?,?,'RECONCILED',?,0,'[]')`,
+        ).run(
+          sid,
+          "ws-alpha",
+          `/fixture/${sid}`,
+          `${own[0]?.[1]}:00.000Z`,
+          `${own.at(-1)?.[1]}:00.000Z`,
+          own.length,
+        );
+      }
+      rows.forEach(([sid, at, agent, read, w5m, w1h], n) => {
+        insert.run(
+          `m-${n}`,
+          sid,
+          "ws-alpha",
+          `${at}:00.000Z`,
+          agent ? 1 : 0,
+          agent,
+          read,
+          w5m,
+          w1h,
+        );
+      });
+      const ctx = { now: new Date(APPLIED), fromIso: from, toIso: APPLIED };
+      const d8Facts = d8Detector.evaluate(db, ctx).fired[0]?.payload.facts as unknown as Record<
+        string,
+        number
+      >;
+      const b2Fired = b2Detector.evaluate(db, ctx).fired[0];
+      expect(d8Facts.total_churn_creation_tokens).toBe(
+        101_000 + 103_000 + 104_000 + 105_000 + 106_000,
+      );
+      const b2Metrics = (b2Fired?.payload as { metrics: Record<string, { value: number }> })
+        .metrics;
+      // B2 now uses the shared collapse test (creation >= half the previous context), so the two
+      // s2 resumes the old reads-10x rule missed are counted: previous reads 15k and 80k.
+      expect(b2Metrics.PREVIOUS_CACHE_READ_TOKENS?.value).toBe(
+        70_000 + 110_000 + 40_000 + 15_000 + 80_000,
+      );
+      expect(b2Metrics.CURRENT_CACHE_CREATION_TOKENS?.value).toBe(
+        101_000 + 103_000 + 104_000 + 105_000 + 106_000,
+      );
+
+      const mainInWindow = rows.filter((row) => row[2] === null && row[1] >= "2026-01-18").length;
+      rec(db, "d8", "D8", "d8-idle-rewrite-tokens");
+      const d8 = track(db, "d8", "D8", "d8-idle-rewrite-tokens").getCycle("d8-1")?.baselineEvidence;
+      expect(d8?.exposureN).toBe(mainInWindow);
+      expect((d8?.value ?? 0) * mainInWindow).toBeCloseTo(
+        d8Facts.total_churn_creation_tokens ?? -1,
+        6,
+      );
+      rec(db, "b2", "B2", "b2-cold-resume-tokens");
+      const b2 = track(db, "b2", "B2", "b2-cold-resume-tokens").getCycle("b2-1")?.baselineEvidence;
+      expect((b2?.value ?? 0) * mainInWindow).toBeCloseTo(
+        b2Metrics.CURRENT_CACHE_CREATION_TOKENS?.value ?? -1,
+        6,
+      );
+      db.close();
+    });
+  });
+
+  it("excludes pre-P0 inflated MEMORY history, including the merge boundary", () => {
+    const db = createInMemoryFixtureDb();
+    rec(db, "memory-cutoff", "D1", "d1-source-tokens");
+    const insert = db.prepare(`INSERT INTO context_inventory_history
+      (workspace_id,component,file_ref,file_hash,tokens,attribution_version,observed_at)
+      VALUES ('ws-alpha','MEMORY','/fixture/memory',?,?,'chars4-v1',?)`);
+    insert.run("old", 34000, "2026-09-23T22:00:00.000Z");
+    insert.run("boundary", 34000, "2026-09-23T23:06:17.000Z");
+    const applied = "2026-09-24T00:00:00.000Z";
+    const engine = createEffectEngine(db, {
+      observer: createSqlObservationProvider({
+        resolveSourceIdentity: () => ({
+          workspaceId: "ws-alpha",
+          component: "MEMORY",
+          fileRef: "/fixture/memory",
+        }),
+      }),
+      idFactory: () => "memory-cycle",
+      now: () => new Date(applied),
+    });
+    engine.track({
+      recId: "memory-cutoff",
+      detectorId: "D1",
+      targetMetric: "d1-source-tokens",
+      scope: { workspaceId: "ws-alpha", sourceIdentity: "opaque-memory" },
+      cohort: {},
+      trackingRequestedAt: applied,
+      appliedAt: applied,
+      applicationSource: "USER_ATTESTED",
+      baselineSnapshotRef: "opaque",
+      idempotencyKey: "track",
+    });
+    const cycle = engine.getCycle("memory-cycle");
+    expect(cycle?.baselineEvidence).toMatchObject({ value: null, excluded: { NO_BASELINE: 1 } });
+    if (!cycle) throw new Error("missing cycle");
+    insert.run("corrected", 1200, "2026-09-23T23:06:18.000Z");
+    const evidence = createSqlObservationProvider({
+      resolveSourceIdentity: () => ({
+        workspaceId: "ws-alpha",
+        component: "MEMORY",
+        fileRef: "/fixture/memory",
+      }),
+    }).observe(
+      db,
+      cycle,
+      { from: cycle.baselineFrom, to: applied },
+      { from: applied, to: cycle.scheduledObservationTo },
+    );
+    expect(evidence.before.value).toBe(1200);
+    expect(evidence.after.value).toBeNull();
+    db.close();
+  });
+
   it("never persists a resolved D1 path in cycle evidence", () => {
     const db = createInMemoryFixtureDb();
     const secret = "C:/secret/CLAUDE.md";
@@ -295,7 +534,7 @@ describe("SQLite effect observations", () => {
   it("observes D7 from its event-selected cohort, keeps quiet sessions, and separates guardrail sides", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const tool = effectToolIdentity("Bash");
+    const tool = effectToolIdentity("Read");
     for (const [prefix, at, repeats] of [
       ["d7-before", "2026-01-25T00:00:00.000Z", 3],
       ["d7-after", "2026-02-05T00:00:00.000Z", 1],
@@ -325,7 +564,7 @@ describe("SQLite effect observations", () => {
     const evidence = engine.getCycle("d7-1")?.finalEvidence;
     expect(evidence?.before).toMatchObject({ value: 1, sessionN: 10, exposureN: 10 });
     expect(evidence?.after).toMatchObject({ value: 0, sessionN: 10, exposureN: 10 });
-    expect(evidence?.toolMix.after).toEqual({ available: true, total: 10, counts: { Bash: 10 } });
+    expect(evidence?.toolMix.after).toEqual({ available: true, total: 10, counts: { Read: 10 } });
     expect(
       evidence?.guardrails.find((item) => item.guardrailId === "completed-tool-error-rate"),
     ).toMatchObject({
@@ -345,7 +584,7 @@ describe("SQLite effect observations", () => {
   it("treats out-of-scope events as D7 sequence boundaries and matching writes as tool-scope flushes", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const bash = effectToolIdentity("Bash");
+    const read = effectToolIdentity("Read");
     sample(db, "boundary", 1, "2026-02-05T00:00:00.000Z");
     for (const [eventId, path, blockIndex] of [
       ["boundary-a", "path-scoped", 0],
@@ -368,7 +607,7 @@ describe("SQLite effect observations", () => {
     rec(db, "boundary", "D7", "loop_flagged_turn_share");
     const boundary = trackScoped(db, "boundary", "D7", "loop_flagged_turn_share", {
       sourceIdentity: source,
-      tool: bash,
+      tool: read,
     });
     boundary.runPass(new Date("2026-02-15T00:00:00.000Z"));
     expect(boundary.getCycle("boundary-1")?.finalEvidence?.after).toMatchObject({
@@ -379,7 +618,7 @@ describe("SQLite effect observations", () => {
     });
     db.close();
 
-    const read = effectToolIdentity("Read");
+    const readIdentity = effectToolIdentity("Read");
     const flushDb = createInMemoryFixtureDb();
     sample(flushDb, "write-flush", 1, "2026-02-05T00:00:00.000Z");
     for (const [eventId, tool, blockIndex] of [
@@ -404,7 +643,7 @@ describe("SQLite effect observations", () => {
     rec(flushDb, "write-flush", "D7", "loop_flagged_turn_share");
     const flushed = trackScoped(flushDb, "write-flush", "D7", "loop_flagged_turn_share", {
       sourceIdentity: source,
-      tool: read,
+      tool: readIdentity,
     });
     flushed.runPass(new Date("2026-02-15T00:00:00.000Z"));
     expect(flushed.getCycle("write-flush-1")?.finalEvidence?.after).toMatchObject({
@@ -433,7 +672,7 @@ describe("SQLite effect observations", () => {
         "tool-boundary-m-0",
         "2026-02-05T00:00:00.000Z",
         blockIndex,
-        { tool, inputHash: "same-read" },
+        { tool, inputHash: tool === "Bash" ? null : "same-read" },
       );
     rec(db, "tool-boundary", "D7", "loop_flagged_turn_share");
     const engine = trackScoped(db, "tool-boundary", "D7", "loop_flagged_turn_share", {
@@ -487,7 +726,7 @@ describe("SQLite effect observations", () => {
   it("keeps D7's 14-day effect window separate from its seven-day detector horizon", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const tool = effectToolIdentity("Bash");
+    const tool = effectToolIdentity("Read");
     for (const [prefix, at, repeats] of [
       ["fourteen-day-before", "2026-01-20T00:00:00.000Z", 3],
       ["fourteen-day-after", "2026-02-05T00:00:00.000Z", 1],
@@ -516,7 +755,7 @@ describe("SQLite effect observations", () => {
   it("reports zero D7 exposure and invalid event ownership without expanding the cohort", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const tool = effectToolIdentity("Bash");
+    const tool = effectToolIdentity("Read");
     sample(db, "invalid-owner", 1, "2026-02-05T00:00:00.000Z");
     scopedEvent(
       db,
@@ -545,7 +784,7 @@ describe("SQLite effect observations", () => {
   it("excludes malformed scoped metadata and timestamps before D7 cohort selection", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const tool = effectToolIdentity("Bash");
+    const tool = effectToolIdentity("Read");
     sample(db, "bad-metadata", 1, "2026-02-05T00:00:00.000Z");
     sample(db, "bad-owner-time", 1, "2026-02-05T00:00:00.000Z");
     sample(db, "bad-session-time", 1, "2026-02-05T00:00:00.000Z");
@@ -601,7 +840,7 @@ describe("SQLite effect observations", () => {
   it("keeps incomplete scoped tool results out of guardrail denominators", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const tool = effectToolIdentity("Bash");
+    const tool = effectToolIdentity("Read");
     sample(db, "incomplete", 1, "2026-02-05T00:00:00.000Z");
     scopedEvent(
       db,
@@ -633,7 +872,7 @@ describe("SQLite effect observations", () => {
   it("uses only scoped-event sessions for the additive D2 metric and leaves legacy D2 unchanged", () => {
     const db = createInMemoryFixtureDb();
     const source = effectEventSourceIdentity("ws-alpha", "path-scoped");
-    const tool = effectToolIdentity("Bash");
+    const tool = effectToolIdentity("Read");
     for (const [prefix, at] of [
       ["d2-before", "2026-01-25T00:00:00.000Z"],
       ["d2-after", "2026-02-05T00:00:00.000Z"],

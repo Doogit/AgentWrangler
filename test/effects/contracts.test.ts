@@ -11,6 +11,15 @@ import {
   findHandler,
 } from "../../src/effects/index.js";
 import { hasOverlappingSupportedCycle } from "../../src/effects/store.js";
+import { listEffectEvidence } from "../../src/query/api/effect-service.js";
+import {
+  appendArtifactApplication,
+  appendArtifactRevision,
+  appendEffectCycleLink,
+  appendMeasurementMethod,
+  appendRecommendationRevision,
+} from "../../src/recommendations/storage.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const APPLIED = "2026-02-01T00:00:00.000Z";
@@ -81,6 +90,151 @@ function request(recId: string, key = "track") {
 }
 
 describe("ESF2 persisted contract boundaries", () => {
+  it("reads exact artifact-bound identities and frozen method data through the effect store", () => {
+    const db = createInMemoryFixtureDb();
+    seedValidatedRecommendation(db, {
+      recId: "bridge-rec",
+      templateId: "D2_LONG_FULL_CONTEXT",
+      scope: "ws-alpha",
+      createdAt: APPLIED,
+    });
+    const engine = createEffectEngine(db, {
+      observer: { observe: (_db, cycle) => bundle(cycle, 1) },
+      idFactory: () => "bridge-cycle",
+      now: () => new Date(APPLIED),
+    });
+    const tracked = engine.track(request("bridge-rec"));
+    if (!tracked.supported) throw new Error("expected supported fixture");
+    db.prepare(
+      `INSERT INTO hre_findings
+       (finding_id,source_kind,legacy_rec_id,detector_id,detector_contract_version,
+        lifecycle,observed_at,reason_code,created_at)
+       VALUES('bridge-finding','LEGACY','bridge-rec','D2',1,'OPEN',?,'LEGACY_ADAPTER',?)`,
+    ).run(APPLIED, APPLIED);
+    db.prepare(
+      `INSERT INTO hre_composition_snapshots
+       (snapshot_id,composition_version,registry_version,ranking_policy_version,price_version,
+        window_from,window_to,created_at)
+       VALUES('bridge-snapshot',1,'bridge-registry','rank-1','price-1',?,?,?)`,
+    ).run("2026-01-01T00:00:00.000Z", APPLIED, APPLIED);
+    db.prepare(
+      `INSERT INTO hre_ceu_pools(composition_snapshot_id,ceu_pool_id,total_ceu_per_week)
+       VALUES('bridge-snapshot','bridge-pool',1)`,
+    ).run();
+    appendRecommendationRevision(db, {
+      recommendationId: "bridge-recommendation",
+      recommendationRevisionId: "bridge-revision",
+      expectedActiveRevisionId: null,
+      snapshotId: "bridge-snapshot",
+      findingId: "bridge-finding",
+      ceuPoolId: "bridge-pool",
+      ownsValue: true,
+      contributionCeuPerWeek: 1,
+      handlerFamily: "H2_OUTPUT_CONTEXT",
+      handlerVersion: "h2-handler-1",
+      registryVersion: "bridge-registry",
+      rankingPolicyVersion: "rank-1",
+      expectedValue: 1,
+      expectedValueUnit: "CEU_PER_WEEK",
+      valueMethodId: "bridge-value-method",
+      valueMethodVersion: "1",
+      valueWindowFrom: "2026-01-01T00:00:00.000Z",
+      valueWindowTo: APPLIED,
+      reasonCodes: ["OUTPUT_EXPOSURE"],
+      createdAt: APPLIED,
+    });
+    appendArtifactRevision(db, {
+      artifactRevisionId: "bridge-artifact",
+      recommendationRevisionId: "bridge-revision",
+      artifactKind: "advice",
+      artifactHash: "bridge-artifact-hash",
+      capabilityProfileVersion: "profile-1",
+      validationStatus: "VALIDATED",
+      rollbackAvailable: true,
+      supersedesArtifactRevisionId: null,
+      createdAt: APPLIED,
+    });
+    appendMeasurementMethod(db, {
+      measurementMethodId: "bridge-measurement",
+      artifactRevisionId: "bridge-artifact",
+      methodVersion: "h2-output-exposure-measurement-1",
+      targetMetricCode: "OUTPUT_EXPOSURE_CEU_PER_WEEK",
+      verdict: "VALIDATED_PROXY",
+      definition: {
+        targetDirection: "REDUCE",
+        horizonDays: 14,
+        baselineCohortCode: "H2_BASELINE_WINDOW",
+        afterCohortCode: "H2_AFTER_WINDOW",
+        guardrailCodes: ["NO_QUALITY_REGRESSION"],
+        comparabilityCode: "SAME_SCOPE",
+      },
+      createdAt: APPLIED,
+    });
+    appendArtifactApplication(db, {
+      artifactApplicationId: "bridge-application",
+      artifactRevisionId: "bridge-artifact",
+      observedRecommendationRevisionId: "bridge-revision",
+      authorizationId: "bridge-authorization",
+      applicationSource: "USER_ATTESTED",
+      baseHash: "bridge-base-hash",
+      postHash: "bridge-post-hash",
+      result: "APPLIED",
+      rollbackState: "AVAILABLE",
+      appliedAt: APPLIED,
+      createdAt: APPLIED,
+    });
+    appendEffectCycleLink(db, {
+      cycleId: tracked.cycle.cycleId,
+      recommendationId: "bridge-recommendation",
+      recommendationRevisionId: "bridge-revision",
+      artifactRevisionId: "bridge-artifact",
+      artifactApplicationId: "bridge-application",
+      measurementMethodId: "bridge-measurement",
+      interventionLockKey: "bridge-lock-key",
+      createdAt: APPLIED,
+    });
+
+    const reader = createEffectEngine(db, {
+      writerEnabled: false,
+      observer: { observe: (_db, cycle) => bundle(cycle, 1) },
+    });
+    expect(reader.getCycle("bridge-cycle")?.bridge).toEqual({
+      bridgeKind: "ARTIFACT_BOUND",
+      recommendationId: "bridge-recommendation",
+      recommendationRevisionId: "bridge-revision",
+      handlerFamily: "H2_OUTPUT_CONTEXT",
+      handlerVersion: "h2-handler-1",
+      registryVersion: "bridge-registry",
+      artifactRevisionId: "bridge-artifact",
+      artifactHash: "bridge-artifact-hash",
+      artifactApplicationId: "bridge-application",
+      applicationBaseHash: "bridge-base-hash",
+      applicationPostHash: "bridge-post-hash",
+      measurementMethodId: "bridge-measurement",
+      measurementMethodVersion: "h2-output-exposure-measurement-1",
+      targetMetricCode: "OUTPUT_EXPOSURE_CEU_PER_WEEK",
+      measurementVerdict: "VALIDATED_PROXY",
+      frozenMeasurementDefinition: {
+        targetDirection: "REDUCE",
+        horizonDays: 14,
+        baselineCohortCode: "H2_BASELINE_WINDOW",
+        afterCohortCode: "H2_AFTER_WINDOW",
+        guardrailCodes: ["NO_QUALITY_REGRESSION"],
+        comparabilityCode: "SAME_SCOPE",
+      },
+      interventionLockKey: "bridge-lock-key",
+    });
+    expect(listEffectEvidence(db, "ws-alpha", "bridge-rec").cycles[0]?.bridge).toEqual(
+      reader.getCycle("bridge-cycle")?.bridge,
+    );
+    const replay = engine.track(request("bridge-rec"));
+    expect(replay.supported && replay.replayed).toBe(true);
+    expect(replay.supported && replay.cycle.bridge).toEqual(
+      reader.getCycle("bridge-cycle")?.bridge,
+    );
+    db.close();
+  });
+
   it("uses a bounded supported-cycle existence query and honors stopped, boundary, and version exclusions", () => {
     const db = createInMemoryFixtureDb();
     let sequence = 0;
@@ -385,17 +539,32 @@ describe("ESF2 persisted contract boundaries", () => {
       db.prepare(
         `UPDATE effect_cycles SET ${field}='future-v99',target_definition_json='null',guardrail_definitions_json='{}' WHERE cycle_id=?`,
       ).run(result.cycle.cycleId);
+      if (i === 0) {
+        db.exec("PRAGMA ignore_check_constraints = ON");
+        db.prepare(
+          `UPDATE effect_cycles SET target_direction='RAW_TRANSCRIPT_FRAGMENT',comparison_status='RAW_TRANSCRIPT_FRAGMENT' WHERE cycle_id=?`,
+        ).run(result.cycle.cycleId);
+        db.exec("PRAGMA ignore_check_constraints = OFF");
+      }
     }
     insertRec(db, "supported");
     const supported = engine.track(request("supported"));
     if (!supported.supported) throw new Error("expected supported fixture");
 
+    const persisted = db
+      .prepare(
+        `SELECT baseline_evidence_json,provisional_evidence_json
+           FROM effect_cycles WHERE cycle_id='cycle-1'`,
+      )
+      .get() as { baseline_evidence_json: string; provisional_evidence_json: string };
     const future = engine.getCycle("cycle-1");
     expect(future).toMatchObject({
       versionStatus: "UNSUPPORTED_VERSION",
       targetDirection: null,
       comparisonStatus: null,
       finalEvidence: null,
+      baselineEvidence: JSON.parse(persisted.baseline_evidence_json),
+      provisionalEvidence: JSON.parse(persisted.provisional_evidence_json),
     });
     expect(engine.listCycles()).toHaveLength(102);
     expect(() => engine.track(request("future-0"))).toThrow(EffectUnsupportedVersionError);
@@ -430,9 +599,11 @@ describe("ESF2 persisted contract boundaries", () => {
     expect(findHandler("D4", "ROUTING_ADHERENCE_SCORE")?.target.methodVersion).toBe(
       "d4-premium-share-v2",
     );
+    // P3.2-F3: the D8 descriptor metric now selects the idle re-write method.
     expect(findHandler("D8", "cache_read_to_creation_ratio")?.target.methodVersion).toBe(
-      "d8-cache-ratio-v2",
+      "d8-idle-rewrite-tokens-v1",
     );
+    expect(findHandler("D8", "d8-cache-ratio")?.target.methodVersion).toBe("d8-cache-ratio-v2");
     expect(findHandler("D8", "CACHE_READ_TO_CREATION_RATIO")).toBeNull();
     expect(findHandler("D1", "d1-source-tokens", "future-v9")).toBeNull();
 

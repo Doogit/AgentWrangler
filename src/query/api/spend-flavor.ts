@@ -14,7 +14,7 @@
  * deliberately reconciles to capWeightedTokens(); it does not pretend that output
  * tokens share the model's input price or apply API write premiums to a subscription cap.
  *
- * Vocabulary: docs/plans/blog-dashboard-taxonomy-IA.md §1a
+ * Vocabulary: docs/plans/Archive/blog-dashboard-taxonomy-IA.md §1a
  */
 
 import type { Db } from "../../db/open.js";

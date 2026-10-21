@@ -1,4 +1,4 @@
-/** Parser-health quarantine-rate status chip coverage. */
+/** Parser-health count-based status chip coverage. */
 
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,10 +29,11 @@ function setupParserHealth(filesSeen: number, linesQuarantined: number) {
 
 describe("SettingsPage — parser-health status chip", () => {
   it.each([
-    [0, 0, "Healthy"],
-    [100, 3, "Warning"],
-    [100, 8, "Errors"],
-    [0, 8, "Healthy"],
+    [0, 0, "No parser data"],
+    [100, 3, "Quarantined lines detected"],
+    [1, 80, "Quarantined lines detected"],
+    [0, 8, "Quarantined lines detected"],
+    [100, 0, "No quarantined lines"],
   ])("renders %s/%s as %s without NaN", async (filesSeen, linesQuarantined, status) => {
     setupParserHealth(filesSeen, linesQuarantined);
     render(<SettingsPage />);
@@ -42,5 +43,7 @@ describe("SettingsPage — parser-health status chip", () => {
       expect(within(heading).getByText(status)).toBeTruthy();
     });
     expect(document.body.textContent).not.toContain("NaN");
+    expect(document.body.textContent).not.toContain("Infinity");
+    expect(screen.getByText(/Quarantine rate is unavailable/)).toBeTruthy();
   });
 });

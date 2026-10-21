@@ -39,6 +39,14 @@ async function mutate(path: string, body: Record<string, unknown>): Promise<unkn
   return payload.data ?? payload;
 }
 
+export async function changeRecommendationLifecycle(
+  recId: string,
+  action: "undo-adopt" | "reopen",
+  key: string,
+): Promise<void> {
+  await mutate(`/api/recommendations/${action}`, { rec_id: recId, idempotency_key: key });
+}
+
 export async function fetchEffectEvidence(
   recId: string,
   cursors: { cycle?: string | null; legacy?: string | null } = {},
@@ -116,4 +124,26 @@ export async function attestRollbackEffect(
     idempotency_key: idempotencyKey,
     actual_time_known: false,
   })) as RollbackOperation;
+}
+
+export interface TrackDecisionInput {
+  decision_identity: string;
+  family: string;
+  workspace_id: string | null;
+  completed_change: true;
+  concurrent_change?: boolean;
+  intent?: string;
+}
+
+/** RIQ5: open a measured effect cycle for a ranked decision. POST /api/recommendations/decision/track. */
+export async function trackDecision(input: TrackDecisionInput): Promise<unknown> {
+  const body: Record<string, unknown> = {
+    decision_identity: input.decision_identity,
+    family: input.family,
+    workspace_id: input.workspace_id,
+    completed_change: input.completed_change,
+  };
+  if (input.concurrent_change !== undefined) body.concurrent_change = input.concurrent_change;
+  if (input.intent !== undefined) body.intent = input.intent;
+  return mutate("/api/recommendations/decision/track", body);
 }

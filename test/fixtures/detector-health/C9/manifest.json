@@ -1,0 +1,16 @@
+{
+  "id": "C9",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss",
+      "target_constant": "minimum denial events (1 per workspace and label)",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-sidechain",
+      "target_constant": "main-chain only (sidechain denial events excluded)",
+      "expect": "silent"
+    }
+  ]
+}

@@ -154,14 +154,14 @@ function composeUsageChange(packet: EvidencePacket): FamilyEntry {
       "Seasonal or project-phase variation in session volume may explain volume-term movement.",
     ],
     required_caveats: [
-      "Task-normalised claims require eligible explicit ESF work records, which are not available in this packet.",
+      "Per-task ('task-normalised') comparison is never available: this signal does not capture explicit work records, so spend cannot be normalised by task. This is a permanent limitation of the signal, not data missing from this window.",
       "Cross-window model-mix alignment is impossible by packet design; per-model cost attribution is qualitative only.",
       "The decomposition uses list-price equivalents, not actual subscription spend.",
     ],
     next_step: {
       kind: "INVESTIGATION",
       description:
-        "Inspect the sessions linked by the current and prior evidence IDs to determine whether volume change, intensity change, or both are driving the delta before taking any action.",
+        "Open the linked sessions and compare the two windows on two things: how many turns ran, and the average tokens per turn. Whichever moved more tells you whether more sessions or heavier sessions drove the spend change — look there before acting.",
     },
     detail,
   };
@@ -238,7 +238,7 @@ function composeToolConcentration(packet: EvidencePacket): FamilyEntry {
     next_step: {
       kind: "INVESTIGATION",
       description:
-        "Investigate the concentrated tool_id's output prerequisites and failure-recovery pattern in a bounded trial before changing any tool configuration.",
+        "In a small bounded trial, look at why this tool produces so much output (or retries so often) before you change its configuration — so you don't disrupt a legitimate verification or repair loop.",
     },
     detail,
   };
@@ -335,7 +335,7 @@ function composeCacheBehavior(packet: EvidencePacket): FamilyEntry {
     next_step: {
       kind: "INVESTIGATION",
       description:
-        "Investigate whether session length or input patterns explain the low cache hit ratio before considering any context management change.",
+        "Check whether short sessions or large one-off inputs explain the low cache reuse before you change how you manage context — a low ratio is often normal, not waste.",
     },
     detail,
   };

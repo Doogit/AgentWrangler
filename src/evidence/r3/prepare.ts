@@ -324,7 +324,9 @@ async function freezeCorpus(
         refuse("r3_corpus_changed_during_hash");
       entries.push({
         sessionId: row.session_id,
-        path: resolvedPath,
+        // The linker matches this against sessions.file_path as written, so record the DB value,
+        // not the realpath (macOS /var -> /private/var). Identity above still pins the real file.
+        path: row.file_path,
         identity,
         sha256: digest.digest("hex"),
       });

@@ -19,6 +19,8 @@
  *     stopped flag makes it quit at the next file boundary (its contract)
  */
 
+import { type JobHandle, scheduleJob } from "./schedule-job.js";
+
 export interface TailHandleLike {
   stop(): void;
 }
@@ -32,6 +34,8 @@ export interface LifecycleDeps {
   outcomesTick(): void;
   /** Weekly report generation (overlap-guarded here); a returned promise is awaited. */
   reportsTick(): unknown;
+  /** P0-U5: 30 s check that truncates the WAL once the DB has been write-idle for 60 s. */
+  idleCheckpointTick?(): void;
   /** server.close — invoke `onClosed` once all connections have drained. */
   closeServer(onClosed: () => void): void;
   closeDb(): void;
@@ -41,6 +45,7 @@ export interface LifecycleDeps {
   calibrationIntervalMs?: number;
   outcomesIntervalMs?: number;
   reportsIntervalMs?: number;
+  idleCheckpointIntervalMs?: number;
   bootFallbackMs?: number;
 }
 
@@ -61,19 +66,21 @@ export function createDaemonLifecycle(deps: LifecycleDeps): DaemonLifecycle {
   const calibrationIntervalMs = deps.calibrationIntervalMs ?? WEEK_MS;
   const outcomesIntervalMs = deps.outcomesIntervalMs ?? 10 * 60 * 1000;
   const reportsIntervalMs = deps.reportsIntervalMs ?? WEEK_MS;
+  const idleCheckpointIntervalMs = deps.idleCheckpointIntervalMs ?? 30_000;
   const bootFallbackMs = deps.bootFallbackMs ?? 3000;
 
   let scanKicked = false;
   let shutDown = false;
   let handle: TailHandleLike | null = null;
-  let calibrationTimer: NodeJS.Timeout | null = null;
-  let outcomesTimer: NodeJS.Timeout | null = null;
-  let reportsTimer: NodeJS.Timeout | null = null;
+  let calibrationTimer: JobHandle | null = null;
+  let outcomesTimer: JobHandle | null = null;
+  let reportsTimer: JobHandle | null = null;
+  let idleCheckpointTimer: JobHandle | null = null;
   let fallbackTimer: NodeJS.Timeout | null = null;
   let reportsRunning = false;
 
   function armTimers(): void {
-    calibrationTimer = setInterval(() => {
+    calibrationTimer = scheduleJob("lifecycle.calibration-tick", calibrationIntervalMs, () => {
       try {
         deps.calibrationTick();
       } catch (e) {
@@ -81,20 +88,20 @@ export function createDaemonLifecycle(deps: LifecycleDeps): DaemonLifecycle {
           `Bytes-per-token calibration poll failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
         );
       }
-    }, calibrationIntervalMs);
+    });
 
-    outcomesTimer = setInterval(() => {
+    outcomesTimer = scheduleJob("lifecycle.outcomes-tick", outcomesIntervalMs, () => {
       try {
         deps.outcomesTick();
       } catch (e) {
         error(`Outcomes poll failed: ${e instanceof Error ? e.message : String(e)}`);
       }
-    }, outcomesIntervalMs);
+    });
 
-    reportsTimer = setInterval(() => {
+    reportsTimer = scheduleJob("lifecycle.reports-tick", reportsIntervalMs, () => {
       if (reportsRunning) return;
       reportsRunning = true;
-      Promise.resolve()
+      return Promise.resolve()
         .then(() => deps.reportsTick())
         .catch((e) => {
           error(`Weekly report poll failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -102,7 +109,25 @@ export function createDaemonLifecycle(deps: LifecycleDeps): DaemonLifecycle {
         .finally(() => {
           reportsRunning = false;
         });
-    }, reportsIntervalMs);
+    });
+
+    const idleTick = deps.idleCheckpointTick;
+    if (idleTick !== undefined) {
+      idleCheckpointTimer = scheduleJob(
+        "lifecycle.wal-idle-checkpoint",
+        idleCheckpointIntervalMs,
+        () => {
+          try {
+            idleTick();
+          } catch (e) {
+            error(
+              `WAL idle checkpoint failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+        },
+        { unref: true },
+      );
+    }
   }
 
   function kickBootScan(): void {
@@ -136,9 +161,10 @@ export function createDaemonLifecycle(deps: LifecycleDeps): DaemonLifecycle {
     if (fallbackTimer !== null) clearTimeout(fallbackTimer);
     handle?.stop();
     handle = null;
-    if (calibrationTimer !== null) clearInterval(calibrationTimer);
-    if (outcomesTimer !== null) clearInterval(outcomesTimer);
-    if (reportsTimer !== null) clearInterval(reportsTimer);
+    calibrationTimer?.cancel();
+    outcomesTimer?.cancel();
+    reportsTimer?.cancel();
+    idleCheckpointTimer?.cancel();
     deps.closeServer(() => {
       deps.closeDb();
       deps.onClosed?.();

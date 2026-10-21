@@ -92,11 +92,13 @@ describe("workspace names in recommendations", () => {
 
     const scopeStrip = await screen.findByLabelText("Filter by scope");
     await waitFor(() => expect(within(scopeStrip).getByText(/acme\/orbit-api/)).toBeDefined());
-    expect(
-      [...container.querySelectorAll(".rec-scope-badge--workspace")].some((badge) =>
-        badge.textContent?.includes("acme/orbit-api"),
-      ),
-    ).toBe(true);
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll(".rec-scope-badge--workspace")].some((badge) =>
+          badge.textContent?.includes("acme/orbit-api"),
+        ),
+      ).toBe(true),
+    );
   });
 
   it("renders owner/name for a workspace absent from the windowed listing (>30d idle, UIR-8)", async () => {
@@ -104,11 +106,13 @@ describe("workspace names in recommendations", () => {
 
     const scopeStrip = await screen.findByLabelText("Filter by scope");
     await waitFor(() => expect(within(scopeStrip).getByText(/acme\/legacy-etl/)).toBeDefined());
-    expect(
-      [...container.querySelectorAll(".rec-scope-badge--workspace")].some((badge) =>
-        badge.textContent?.includes("acme/legacy-etl"),
-      ),
-    ).toBe(true);
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll(".rec-scope-badge--workspace")].some((badge) =>
+          badge.textContent?.includes("acme/legacy-etl"),
+        ),
+      ).toBe(true),
+    );
   });
 
   it("falls back to the raw workspace slug in the scope filter and ScopeBadge when unknown", async () => {
@@ -118,10 +122,12 @@ describe("workspace names in recommendations", () => {
     await waitFor(() =>
       expect(within(scopeStrip).getByText(new RegExp(UNKNOWN_WORKSPACE_ID))).toBeDefined(),
     );
-    expect(
-      [...container.querySelectorAll(".rec-scope-badge--workspace")].some((badge) =>
-        badge.textContent?.includes(UNKNOWN_WORKSPACE_ID),
-      ),
-    ).toBe(true);
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll(".rec-scope-badge--workspace")].some((badge) =>
+          badge.textContent?.includes(UNKNOWN_WORKSPACE_ID),
+        ),
+      ).toBe(true),
+    );
   });
 });

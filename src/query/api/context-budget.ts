@@ -22,6 +22,8 @@ export interface ContextBudget {
 
 const STANDARD_WINDOW = 200_000;
 const LARGE_WINDOW = 1_000_000;
+/** Subagents can't checkpoint or /clear and are told to return by ~120k, so below this their own context never warns. */
+export const SUBAGENT_WARN_FLOOR = 100_000;
 
 /**
  * The transcript records only a base model id (e.g. `claude-opus-4-8`), never the
@@ -69,19 +71,30 @@ function response(data: ContextBudget): ApiResponse<ContextBudget> {
  * Return a strictly fail-open budget result. This endpoint exposes only session
  * identifiers and measured numbers; it never reads or returns transcript text.
  */
-export function getContextBudget(sessionId: string): ApiResponse<ContextBudget> {
+export function getContextBudget(
+  sessionId: string,
+  agentId?: string | null,
+): ApiResponse<ContextBudget> {
   try {
     const db = getQueryDb();
     const config = readHookConfig(db);
+    // A subagent call is measured against its own turns only; a main call against the main
+    // thread only. `is_sidechain = 0` (not `agent_id IS NULL`): sidechain turns can have a NULL
+    // agent_id until the backfill runs. turns.agent_id is the bare id from `agent-<id>.jsonl`.
+    const subagent = agentId === undefined || agentId === null || agentId === "" ? null : agentId;
+    const scope = subagent === null ? "is_sidechain = 0" : "agent_id = ?";
+    const scopeArgs = subagent === null ? [] : [subagent.replace(/^agent-/, "")];
     const latest = db
       .prepare(
         `SELECT ts, model, context_tokens
            FROM turns
-          WHERE session_id = ?
+          WHERE session_id = ? AND ${scope}
           ORDER BY ts DESC, rowid DESC
           LIMIT 1`,
       )
-      .get(sessionId) as { ts: string; model: string; context_tokens: number } | undefined;
+      .get(sessionId, ...scopeArgs) as
+      | { ts: string; model: string; context_tokens: number }
+      | undefined;
     if (latest === undefined) {
       const session = db
         .prepare("SELECT 1 AS present FROM sessions WHERE session_id = ? LIMIT 1")
@@ -101,9 +114,9 @@ export function getContextBudget(sessionId: string): ApiResponse<ContextBudget> 
       .prepare(
         `SELECT COALESCE(MAX(context_tokens), 0) AS max_ctx
            FROM turns
-          WHERE session_id = ?`,
+          WHERE session_id = ? AND ${scope}`,
       )
-      .get(sessionId) as { max_ctx: number };
+      .get(sessionId, ...scopeArgs) as { max_ctx: number };
     const maxObserved = Math.max(0, maxRow.max_ctx ?? 0);
     const window = effectiveWindow(config.context_window, maxObserved);
     const softAt = Math.round(config.soft_pct * window);
@@ -121,7 +134,14 @@ export function getContextBudget(sessionId: string): ApiResponse<ContextBudget> 
     }
 
     const contextTokens = Math.max(0, latest.context_tokens ?? 0);
-    const stage = contextTokens >= hardAt ? "hard" : contextTokens >= softAt ? "soft" : "ok";
+    const belowFloor = subagent !== null && contextTokens < SUBAGENT_WARN_FLOOR;
+    const stage = belowFloor
+      ? "ok"
+      : contextTokens >= hardAt
+        ? "hard"
+        : contextTokens >= softAt
+          ? "soft"
+          : "ok";
     return response({
       stage,
       context_tokens: contextTokens,

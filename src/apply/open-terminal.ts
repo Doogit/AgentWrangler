@@ -25,16 +25,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db } from "../db/open.js";
-import { getRecommendationCard } from "../query/api/recommendations.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
+import { type CardLookup, getRecommendationCard } from "../query/api/recommendations.js";
 import { getQueryDb } from "../query/db-context.js";
+import { withoutAnthropicApiKey } from "../shared/claude-child-env.js";
 
 export type OpenTerminalResult =
   | { launched: true; launcher: string }
   | { launched: false; reason: string };
 
-/** Minimal shape of the detached child we need (subset of ChildProcess). */
+/** Minimal shape of the spawned launcher we need (subset of ChildProcess). */
 interface SpawnedLike {
   unref(): void;
+  kill(signal?: NodeJS.Signals): boolean;
+  once(event: "exit", listener: (code: number | null) => void): unknown;
+  once(event: "error", listener: (err: Error) => void): unknown;
 }
 
 type SpawnLike = (
@@ -57,6 +62,8 @@ export interface OpenTerminalDeps {
   nodePath: string;
   /** Resolve a launcher command to an absolute path, or null when absent. */
   resolveCommand: (command: string) => string | null;
+  /** macOS: how long to wait for osascript before giving up (F1). */
+  exitTimeoutMs: number;
 }
 
 const WRAPPER_PATH = path.join(
@@ -77,7 +84,7 @@ export function stripClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (k === "CLAUDE_PID" || k === "CLAUDE_PLUGIN_DATA" || k === "CLAUDE_EFFORT") continue;
     out[k] = v;
   }
-  return out;
+  return withoutAnthropicApiKey(out);
 }
 
 /** PATH-search a launcher command; returns an absolute path or null. */
@@ -118,6 +125,11 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+/** Escape `\` and `"` so text sits inside an AppleScript double-quoted string literal (D4). */
+function asq(s: string): string {
+  return s.replace(/[\\"]/g, "\\$&");
+}
+
 function candidatesFor(platform: NodeJS.Platform): Candidate[] {
   const child = (ctx: { nodePath: string; promptFile: string; cwd: string }) => [
     ctx.nodePath,
@@ -138,13 +150,16 @@ function candidatesFor(platform: NodeJS.Platform): Candidate[] {
   if (platform === "darwin") {
     // UNTESTED (spec §5 Q4): no macOS host this session. Only file PATHS are
     // interpolated into the AppleScript string; prompt content stays in the file.
+    // Two layers: shq() quotes for the shell Terminal runs, asq() for AppleScript.
     return [
       {
         launcher: "osascript",
         command: "osascript",
         args: (ctx) => [
           "-e",
-          `tell application "Terminal" to do script "cd ${shq(ctx.cwd)} && ${shq(ctx.nodePath)} ${shq(WRAPPER_PATH)} ${shq(ctx.promptFile)} ${shq(ctx.cwd)}"`,
+          `tell application "Terminal" to do script "${asq(
+            `cd ${shq(ctx.cwd)} && ${shq(ctx.nodePath)} ${shq(WRAPPER_PATH)} ${shq(ctx.promptFile)} ${shq(ctx.cwd)}`,
+          )}"`,
         ],
       },
     ];
@@ -170,6 +185,7 @@ function defaultDeps(): OpenTerminalDeps {
     tmpRoot: os.tmpdir(),
     nodePath: process.execPath,
     resolveCommand: (command) => defaultResolveCommand(command, env),
+    exitTimeoutMs: 20_000,
   };
 }
 
@@ -178,10 +194,10 @@ function defaultDeps(): OpenTerminalDeps {
  * `prompt`. Pure w.r.t. the DB — takes cwd + prompt directly. Injectable deps
  * make terminal selection, env strip, and prompt hand-off unit-testable.
  */
-export function openTerminal(
+export async function openTerminal(
   input: { cwd: string; prompt: string },
   deps: Partial<OpenTerminalDeps> = {},
-): OpenTerminalResult {
+): Promise<OpenTerminalResult> {
   const d: OpenTerminalDeps = { ...defaultDeps(), ...deps };
   const { cwd, prompt } = input;
   if (typeof prompt !== "string" || prompt.length === 0) {
@@ -207,27 +223,63 @@ export function openTerminal(
   fs.writeFileSync(promptFile, prompt, "utf8");
 
   const args = candidate.args({ nodePath: d.nodePath, promptFile, cwd });
-  try {
-    const child = d.spawn(resolved, args, {
-      cwd,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: false,
-      env: stripClaudeEnv(d.env),
-    });
-    child.unref();
-  } catch (e) {
+  const removePromptDir = () => {
     try {
       fs.rmSync(promptDir, { recursive: true, force: true });
     } catch {
       // best-effort cleanup
     }
+  };
+  // osascript only hands the command to Terminal and exits, so on macOS wait for its
+  // exit code: a denied Automation permission (TCC -1743) or a script error exits non-zero.
+  const awaitExit = d.platform === "darwin";
+  let child: SpawnedLike;
+  try {
+    child = d.spawn(resolved, args, {
+      cwd,
+      detached: !awaitExit,
+      stdio: "ignore",
+      windowsHide: false,
+      env: stripClaudeEnv(d.env),
+    });
+  } catch (e) {
+    removePromptDir();
     return {
       launched: false,
       reason: `Couldn't start ${candidate.launcher} — Copy prompt instead. (${e instanceof Error ? e.message : String(e)})`,
     };
   }
-  return { launched: true, launcher: candidate.launcher };
+  if (!awaitExit) {
+    child.unref();
+    return { launched: true, launcher: candidate.launcher };
+  }
+  // F1: osascript blocks while the first-use "control Terminal" dialog is unanswered
+  // (often hidden behind the browser). Bound the wait so the request returns and a
+  // second click can't queue a second launch; an answer given later is still recorded.
+  let timer: NodeJS.Timeout | undefined;
+  const code = await new Promise<number | null | "timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), d.exitTimeoutMs);
+    child.once("error", () => resolve(null));
+    child.once("exit", (exitCode) => resolve(exitCode));
+  });
+  clearTimeout(timer);
+  if (code === 0) return { launched: true, launcher: candidate.launcher };
+  if (code === "timeout") {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // already gone
+    }
+    removePromptDir();
+    return { launched: false, reason: "Answer the macOS permission dialog, then retry." };
+  }
+  // The wrapper never ran, so nothing else will delete the prompt file (SEC-101).
+  removePromptDir();
+  return {
+    launched: false,
+    reason:
+      "macOS didn't open Terminal (osascript failed). If you denied the prompt, allow it in System Settings → Privacy & Security → Automation, then retry — or Copy prompt instead.",
+  };
 }
 
 /** Persisted counts-only demand signal for Option A (spec §4/§7). SEC-101: a scalar. */
@@ -246,13 +298,14 @@ function incrementOpenTerminalCount(db: Db): void {
  * workspace-scoped rec with a local folder, not just file-ref recs. `prompt` is
  * the UI-built INT-2 artifact (the daemon is fenced off from the UI templates).
  */
-export function openTerminalForRec(
+export async function openTerminalForRec(
   recId: string,
   prompt: string,
   deps: Partial<OpenTerminalDeps> = {},
-): OpenTerminalResult {
+  cardFor?: CardLookup,
+): Promise<OpenTerminalResult> {
   const db = getQueryDb();
-  const rec = getRecommendationCard(recId);
+  const rec = cardFor?.(recId) ?? getRecommendationCard(recId);
   if (rec === null) return { launched: false, reason: "Recommendation not found." };
   if (rec.scope_workspace_id === null) {
     return {
@@ -273,7 +326,10 @@ export function openTerminalForRec(
     };
   }
 
-  const result = openTerminal({ cwd, prompt }, deps);
-  if (result.launched) incrementOpenTerminalCount(db);
+  const result = await openTerminal({ cwd, prompt }, deps);
+  if (result.launched) {
+    await awaitDbWriteGate(); // the counter write follows the launch's await
+    incrementOpenTerminalCount(db);
+  }
   return result;
 }

@@ -90,8 +90,11 @@ if (claude === null) {
 }
 
 const spawnCwd = typeof cwd === "string" && isAbsolute(cwd) ? cwd : process.cwd();
+// D2: on macOS Terminal.app gives this window the login shell's env, not the daemon's,
+// so drop an exported ANTHROPIC_API_KEY here too: the session bills the subscription.
+const { ANTHROPIC_API_KEY: _dropped, ...childEnv } = process.env;
 // Positional prompt = seed + auto-submit as the first interactive turn.
-const result = spawnSync(claude, [prompt], { cwd: spawnCwd, stdio: "inherit" });
+const result = spawnSync(claude, [prompt], { cwd: spawnCwd, stdio: "inherit", env: childEnv });
 if (result.error !== undefined) {
   fail(`Failed to start claude (${claude}): ${String(result.error)}. Use Copy prompt instead.`);
 }

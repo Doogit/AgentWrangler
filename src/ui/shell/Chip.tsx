@@ -58,10 +58,10 @@ const KIND_CLASS: Record<ChipProps["kind"], string> = {
 };
 
 const KIND_LABEL: Record<ChipProps["kind"], string> = {
-  LIST_EQUIV: "ESTIMATED VALUE",
+  LIST_EQUIV: "Estimate",
   LIST_EQUIV_STALE: "PRICE ESTIMATE MAY BE OLD",
   PROXY: "ESTIMATE",
-  OBS_PROXY: "TOKEN-BASED ESTIMATE",
+  OBS_PROXY: "Estimate",
   EXPERIMENTAL: "EARLY ESTIMATE",
   DIRECTIONAL: "TREND ONLY",
   N_A: "NO DATA",

@@ -13,7 +13,20 @@ function makeRec(overrides: Partial<RecommendationCard> = {}): RecommendationCar
     category: "CONTEXT",
     scope_workspace_id: "workspace-1",
     lever: "Trim the workspace CLAUDE.md",
+    actions: {
+      primary: {
+        option_id: "primary",
+        kind: "EDIT",
+        summary: "Trim workspace instructions",
+        detail: [],
+        copy_text: "Review and trim the workspace CLAUDE.md.",
+        file_ref: "CLAUDE.md",
+      },
+      alternatives: [],
+    },
+    action_validation: { primary: { ok: true }, alternatives: {} },
     modeled_savings_u_per_wk: 59_400,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: {
       model: "D1_CONTEXT_TRIM_V1",
@@ -111,5 +124,44 @@ describe("RecCard — Open in Claude Code ↗", () => {
     fireEvent.click(getByRole("button", { name: /Open in Claude Code/ }));
 
     expect(await findByText(/No terminal emulator found/)).toBeDefined();
+  });
+
+  it("F1: is disabled while its request is pending, so a second click can't launch twice", async () => {
+    let finish: (v: unknown) => void = () => {};
+    const mockFetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/token")
+        return Promise.resolve({ ok: true, json: () => ({ token: "tok" }) });
+      if (url.endsWith("/open-terminal"))
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return Promise.resolve({ ok: false, json: () => ({}) });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    act(() => setExperimentalActions(true));
+
+    const { getByRole, findByText } = render(<RecCard rec={makeRec()} />);
+    const button = getByRole("button", { name: /Open in Claude Code/ }) as HTMLButtonElement;
+    fireEvent.click(button);
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    await vi.waitFor(() =>
+      expect(
+        mockFetch.mock.calls.filter(([u]) => String(u).endsWith("/open-terminal")),
+      ).toHaveLength(1),
+    );
+
+    await act(async () => {
+      finish({
+        ok: true,
+        json: () => ({
+          launched: false,
+          reason: "Answer the macOS permission dialog, then retry.",
+        }),
+      });
+    });
+    expect(await findByText(/Answer the macOS permission dialog/)).toBeDefined();
+    expect(button.disabled).toBe(false);
   });
 });

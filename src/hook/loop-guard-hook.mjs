@@ -26,14 +26,13 @@ export function stageToStdout(stage, reason) {
   }
   if (stage === "warn") {
     return JSON.stringify({
+      // additionalContext only reaches the model inside hookSpecificOutput; no "allow", which
+      // would skip the user's permission prompt.
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason:
-          "Repeated identical failures are approaching the guard threshold.",
+        additionalContext:
+          "Repeated identical failures are approaching the guard threshold. Restate the latest failure and change the approach before retrying.",
       },
-      additionalContext:
-        "Repeated identical failures are approaching the guard threshold. Restate the latest failure and change the approach before retrying.",
       systemMessage:
         "AgentWrangler: repeated identical failures are approaching the guard threshold. Change the approach before retrying.",
     });
@@ -56,7 +55,7 @@ function readStdin() {
 
 function fetchGuard(sessionId) {
   return new Promise((resolve, reject) => {
-    const port = process.env.AW_PORT ?? "47821";
+    const port = process.env.AW_PORT ?? "2929";
     const request = http.get(
       `http://127.0.0.1:${port}/api/loop-guard?session_id=${encodeURIComponent(sessionId)}`,
       (response) => {

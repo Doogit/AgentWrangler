@@ -109,6 +109,8 @@ export interface CapWeightedQuery {
   coeff?: number;
   /** Include provisional turns (default false — matches reconciled aggregates). */
   includeProvisional?: boolean;
+  /** Main-thread turns only, leaving out subagent (sidechain) turns (default false). */
+  mainOnly?: boolean;
 }
 
 export interface CapWeightedRow {
@@ -150,7 +152,9 @@ export function capWeightedTokens(db: Db, opts: CapWeightedQuery): CapWeightedRo
   const expr = capWeightExprSql("t", coeff);
   const groupCol = opts.groupBy ? GROUP_COLUMNS[opts.groupBy] : null;
   const selectGroup = groupCol ?? "NULL";
-  const provClause = opts.includeProvisional ? "" : "AND t.provisional = 0";
+  const provClause = `${opts.includeProvisional ? "" : "AND t.provisional = 0"}${
+    opts.mainOnly ? " AND t.is_sidechain = 0" : ""
+  }`;
   const groupByClause = groupCol ? `GROUP BY ${groupCol}` : "";
 
   const rows = db

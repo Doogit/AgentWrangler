@@ -26,12 +26,16 @@ interface Section {
   id: string;
   title: string;
   body: React.ReactNode;
+  returnHref: string;
+  returnLabel: string;
 }
 
 const SECTIONS: Section[] = [
   {
     id: "glossary-list-equiv",
     title: "Estimated value and usage limits",
+    returnHref: "#/overview",
+    returnLabel: "Return to Overview",
     body: (
       <>
         <p>
@@ -50,6 +54,8 @@ const SECTIONS: Section[] = [
   {
     id: "glossary-honesty-tiers",
     title: "How certain each number is",
+    returnHref: "#/overview",
+    returnLabel: "Return to Overview",
     body: (
       <>
         <p>
@@ -82,6 +88,8 @@ const SECTIONS: Section[] = [
   {
     id: "glossary-cache",
     title: "Cache write vs read economics",
+    returnHref: "#/overview",
+    returnLabel: "Return to Overview",
     body: (
       <p>
         Cache writes happen when Claude stores the current instructions and history for reuse. A
@@ -93,16 +101,23 @@ const SECTIONS: Section[] = [
   {
     id: "glossary-verdict",
     title: "Verdict band",
+    returnHref: "#/overview",
+    returnLabel: "Return to Overview",
     body: (
       <p>
-        Change versus the prior 7 days for spend, cache-write share, and hot-session count. A green
-        delta is improvement; a red one is where this week got worse.
+        Change versus the prior 7 days for spend, cache-write share, and hot-session count. Arrows
+        show numeric direction; color alone does not establish improvement or deterioration.
+        Expensive work can deliver a useful result, while a cheap session can fail its task. Compare
+        similar scope, workload, and models, then check the reported outcomes before judging the
+        change.
       </p>
     ),
   },
   {
     id: "glossary-friction",
     title: "Friction band",
+    returnHref: "#/sessions",
+    returnLabel: "Return to Sessions",
     body: (
       <p>
         A low, elevated, or high signal based on error and failed-test counts, compactions, recorded
@@ -115,6 +130,8 @@ const SECTIONS: Section[] = [
   {
     id: "glossary-offload",
     title: "Offload share",
+    returnHref: "#/sessions",
+    returnLabel: "Return to Sessions",
     body: (
       <p>
         The share of turns handled by subagents instead of the main conversation. It is shown as a
@@ -125,6 +142,8 @@ const SECTIONS: Section[] = [
   {
     id: "glossary-percentiles",
     title: "Self-percentiles",
+    returnHref: "#/sessions",
+    returnLabel: "Return to Sessions",
     body: (
       <p>
         "top X% by spend" ranks a session against your OWN workspace history (the only honest peer
@@ -136,6 +155,8 @@ const SECTIONS: Section[] = [
   {
     id: "glossary-linkage",
     title: "Linkage coverage",
+    returnHref: "#/workspaces",
+    returnLabel: "Return to Workspaces",
     body: (
       <p>
         The percentage of in-window sessions linked to a PR — unlinked spend is excluded from the
@@ -168,6 +189,7 @@ export default function GlossaryPage() {
             {section.title}
           </h2>
           {section.body}
+          <a href={section.returnHref}>{section.returnLabel}</a>
         </section>
       ))}
     </div>

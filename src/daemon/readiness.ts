@@ -5,10 +5,13 @@
  * Read by http.ts to decide whether to serve the loading page or the real SPA.
  */
 
-import * as fs from "node:fs";
-
 export type ScanState = "scanning" | "complete" | "failed";
-const state = { ready: false, scan: "scanning" as ScanState, scanRoots: [] as string[] };
+const state = {
+  ready: false,
+  scan: "scanning" as ScanState,
+  scanRoots: [] as string[],
+  unreadableRoots: new Set<string>(),
+};
 
 /** Snapshot the roots actually used by the running ingestor, not pending settings. */
 export function setScanRoots(roots: readonly string[]): void {
@@ -19,20 +22,19 @@ export function setScanState(scan: ScanState): void {
   state.scan = scan;
 }
 
-/** Aggregate-only diagnostics; never exposes a local path or filesystem error. */
+/** Recorded by ingest discovery each time it stats/reads a scan root. */
+export function noteScanRootReadable(root: string, readable: boolean): void {
+  if (readable) state.unreadableRoots.delete(root);
+  else state.unreadableRoots.add(root);
+}
+
+/**
+ * Aggregate-only diagnostics; never exposes a local path or filesystem error.
+ * PERF G-P3 M11: no disk access here. A sync stat per status poll stalled the loop by up to 2.4 s
+ * under load; the root count is what ingest discovery last saw (operator 2026-10-19).
+ */
 export function getScanStatus(): { scan_state: ScanState; invalid_scan_root_count: number } {
-  let invalid = 0;
-  for (const root of state.scanRoots) {
-    try {
-      if (!fs.statSync(root).isDirectory()) {
-        invalid += 1;
-        continue;
-      }
-      fs.accessSync(root, fs.constants.R_OK);
-    } catch {
-      invalid += 1;
-    }
-  }
+  const invalid = state.scanRoots.filter((root) => state.unreadableRoots.has(root)).length;
   return { scan_state: state.scan, invalid_scan_root_count: invalid };
 }
 

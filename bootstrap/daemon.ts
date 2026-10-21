@@ -17,7 +17,7 @@ import Database from "better-sqlite3";
 // `node --import tsx/esm`.
 
 const VERSION = "0.0.1";
-const PORT = 47821;
+const PORT = 2929;
 const HOST = "127.0.0.1";
 
 // ── 1. SQLite in-memory proof ─────────────────────────────────────────────────

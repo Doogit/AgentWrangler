@@ -29,6 +29,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db/open.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
 import {
   EXTRACTOR_VERSIONS,
   extractDeferralFindings,
@@ -36,7 +37,9 @@ import {
   projectReviewThreadFindings,
 } from "./finding-extractors.js";
 import type { GithubClient } from "./github/client.js";
+import type { PassPrPages } from "./github/pr-page.js";
 import { DEFAULT_CONCURRENCY, mapWithConcurrency } from "./pool.js";
+import { type OutcomeStageSummary, newStageSummary, observeGithubClient } from "./stage-summary.js";
 
 // ---------------------------------------------------------------------------
 // DB helpers
@@ -91,6 +94,8 @@ export interface ExtractFindingsOptions {
   now?: () => Date;
   /** Terminal-item E1 recheck TTL in ms (tests). Defaults to 7 days. */
   recheckTtlMs?: number;
+  /** This pass's GraphQL PR pages (P0-U13 S3): threads and bodies without per-PR reads. */
+  pages?: PassPrPages;
 }
 
 /** FNV-1a 32-bit — deterministic stagger phase per work_item_id. */
@@ -191,10 +196,16 @@ export async function extractFindings(
     const { wi, isOpen, e1Due, e23Due } = plan;
     const prNumber = wi.number;
     let e23Complete = true;
+    const paged = options.pages?.get(repoOwner, repoName, prNumber);
 
-    // E1: Unresolved review threads (GraphQL)
+    // E1: Unresolved review threads (GraphQL). The page holds up to 100 threads;
+    // a PR with more is read per PR, which paginates fully.
     if (e1Due) {
-      const threadsResult = await client.getReviewThreads(repoOwner, repoName, prNumber);
+      const threadsResult =
+        paged !== undefined && paged.threads !== null
+          ? { ok: true as const, data: paged.threads }
+          : await client.getReviewThreads(repoOwner, repoName, prNumber);
+      await awaitDbWriteGate();
       if (threadsResult.ok) {
         for (const finding of projectReviewThreadFindings(wi.work_item_id, threadsResult.data)) {
           const findingId = finding.sourceFindingId;
@@ -243,7 +254,11 @@ export async function extractFindings(
 
     // E2: Deferral sections in body (in-memory only)
     {
-      const bodyResult = await client.getPRBody(repoOwner, repoName, prNumber);
+      const bodyResult =
+        paged !== undefined
+          ? { ok: true as const, data: paged.body }
+          : await client.getPRBody(repoOwner, repoName, prNumber);
+      await awaitDbWriteGate();
       if (bodyResult.ok) {
         if (bodyResult.data.length > 0) {
           const items = extractDeferralFindings(bodyResult.data, wi.work_item_id);
@@ -274,9 +289,17 @@ export async function extractFindings(
       }
     }
 
-    // E3: TODO/FIXME in diff (in-memory only)
-    if (wi.state === "MERGED" && wi.final_commit !== null) {
+    // E3: TODO/FIXME in diff (in-memory only). A merged PR's diff is immutable
+    // at its merge commit: read it once (`gh_e3_diff:<id>` = the final_commit
+    // it was extracted at), not again when a post-merge update re-syncs the PR.
+    const e3Key = `gh_e3_diff:${wi.work_item_id}`;
+    if (
+      wi.state === "MERGED" &&
+      wi.final_commit !== null &&
+      (selectE1Check.get(e3Key) as { value: string | null } | undefined)?.value !== wi.final_commit
+    ) {
       const diffResult = await client.getPRDiff(repoOwner, repoName, prNumber);
+      await awaitDbWriteGate();
       if (diffResult.ok) {
         if (diffResult.data.length > 0) {
           const markers = extractDiffMarkerFindings(
@@ -306,6 +329,8 @@ export async function extractFindings(
           }
         }
         // diff variable goes out of scope here — content discarded
+        ensureConfig.run(e3Key, wi.final_commit, now);
+        updateConfig.run(wi.final_commit, now, e3Key);
       } else {
         e23Complete = false;
       }
@@ -333,6 +358,7 @@ export async function extractFindings(
     newestSeen = syncedAt;
   }
   if (workItems.length > 0) {
+    await awaitDbWriteGate();
     ensureConfig.run(seenKey, newestSeen, now);
     updateConfig.run(newestSeen, now, seenKey);
   }
@@ -341,8 +367,13 @@ export async function extractFindings(
 /**
  * Run extractors for all mapped workspaces.
  */
-export async function extractAllFindings(db: Db, client: GithubClient): Promise<void> {
-  if (!client.enabled) return;
+export async function extractAllFindings(
+  db: Db,
+  client: GithubClient,
+  pages?: PassPrPages,
+): Promise<OutcomeStageSummary> {
+  const summary = newStageSummary();
+  if (!client.enabled) return summary;
 
   const workspaces = db
     .prepare(
@@ -350,7 +381,16 @@ export async function extractAllFindings(db: Db, client: GithubClient): Promise<
     )
     .all() as Array<{ repo_owner: string; repo_name: string }>;
 
+  summary.eligibleRepositories = workspaces.length;
+  const observedClient = observeGithubClient(client, summary);
   for (const ws of workspaces) {
-    await extractFindings(db, client, ws.repo_owner, ws.repo_name);
+    await extractFindings(
+      db,
+      observedClient,
+      ws.repo_owner,
+      ws.repo_name,
+      pages === undefined ? {} : { pages },
+    );
   }
+  return summary;
 }

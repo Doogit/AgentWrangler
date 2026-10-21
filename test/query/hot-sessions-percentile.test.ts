@@ -37,6 +37,18 @@ function insSessionWithTurn(sessionId: string, workspaceId: string, cost: number
 }
 
 describe("getHotSessions self-percentile enrichment", () => {
+  it("forwards exact model filtering and server-side sorting to the ranked query", () => {
+    const rows = getHotSessions(undefined, 1, {
+      model: "claude-sonnet",
+      sort: "turns",
+      direction: "asc",
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.models).toContain("claude-sonnet");
+    expect(rows[0]?.turns).toBe(1);
+  });
+
   it("attaches spend_percentile + n identical to getSessionSpendPercentile", () => {
     db.prepare(
       "INSERT INTO workspaces (workspace_id, project_slug, registered_at) VALUES ('wsp','wsp',?)",

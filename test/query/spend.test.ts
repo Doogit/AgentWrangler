@@ -84,6 +84,17 @@ describe("globalSpend", () => {
     expect(g.unpriced_turns).toBe(0);
     expect(g.claim_kinds).toBe(1);
   });
+
+  it("returns zeros, not null, for a window with no turns", () => {
+    // SUM over zero rows is NULL in SQLite; the overview schema rejects a null `turns`.
+    expect(globalSpend(db, "2030-01-01T00:00:00.000Z", "2030-01-02T00:00:00.000Z")).toEqual({
+      cost_equiv_u: 0,
+      turns: 0,
+      turns_total: 0,
+      unpriced_turns: 0,
+      claim_kinds: 0,
+    });
+  });
 });
 
 describe("contextPerTurnByModel", () => {

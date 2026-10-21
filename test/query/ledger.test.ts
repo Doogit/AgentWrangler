@@ -14,6 +14,7 @@ import { runMeasurementPass } from "../../src/detector/measurement.js";
 import { listLedger } from "../../src/query/api/recommendations-ledger.js";
 import { adoptRecommendation } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 // Exercise the archived W4 writer explicitly. Enabled-writer isolation and
@@ -45,7 +46,7 @@ function insertHistoryRow(tokens: number, observedAtMs: number): void {
   db.prepare(
     `INSERT INTO context_inventory_history
        (workspace_id, component, file_ref, file_hash, tokens, attribution_version, observed_at)
-     VALUES ('ws-alpha', 'CLAUDE_MD', '/fake/CLAUDE.md', ?, ?, 'chars4-v1', ?)`,
+     VALUES ('ws-alpha', 'CLAUDE_MD', 'CLAUDE.md', ?, ?, 'chars4-v1', ?)`,
   ).run(`hash-${tokens}-${observedAtMs}`, tokens, new Date(observedAtMs).toISOString());
 }
 
@@ -57,14 +58,30 @@ function insertProposedRec(
     `INSERT INTO recommendations
        (rec_id, provenance, detector_id, analysis_run_id, category, scope_workspace_id,
         lever, modeled_savings_u_per_wk, modeled_formula_json, evidence_json, target_metric,
-        state, created_at)
-     VALUES (?, 'RULE', 'D1', NULL, 'CONTEXT', ?, 'test lever', ?, '{}', ?, 'avg_context_per_turn',
-             'PROPOSED', ?)`,
+        state, created_at, contract_version, template_id, contract_status)
+     VALUES (?, 'RULE', 'D1', NULL, 'CONTEXT', ?,
+             'Remove or scope always-loaded context that is not needed for most turns.',
+             ?, '{}', ?, 'avg_context_per_turn',
+             'PROPOSED', ?, 1, 'D1_CONTEXT_ALWAYS_LOADED', 'V1_VALIDATED')`,
   ).run(
     recId,
     opts?.scopeWorkspaceId ?? null,
     10_000_000, // $10/wk modeled — distinct from any token figure
-    JSON.stringify(opts?.evidence ?? { component: "CLAUDE_MD", file_ref: "/fake/CLAUDE.md" }),
+    JSON.stringify(
+      opts?.evidence ?? {
+        version: 1,
+        template_id: "D1_CONTEXT_ALWAYS_LOADED",
+        facts: {
+          component: "CLAUDE_MD",
+          source_tokens: 2_000,
+          source_target: 1_000,
+          delta_context_tokens: 1_000,
+          turns_per_week: 10,
+          scope: "workspace",
+          workspace_multiplier: 1,
+        },
+      },
+    ),
     new Date(T0 - MS_PER_DAY).toISOString(),
   );
 }
@@ -165,7 +182,7 @@ describe("listLedger", () => {
     db.prepare(
       `INSERT INTO context_inventory_history
          (workspace_id, component, file_ref, file_hash, tokens, attribution_version, observed_at)
-       VALUES ('ws-alpha', 'CLAUDE_MD', '/fake/CLAUDE.md', 'hash-after', 500, 'chars4-v1', ?)`,
+       VALUES ('ws-alpha', 'CLAUDE_MD', 'CLAUDE.md', 'hash-after', 500, 'chars4-v1', ?)`,
     ).run(new Date(T0 + MS_PER_DAY).toISOString());
     runMeasurementPass(db, new Date(T0 + 15 * MS_PER_DAY), { force: true });
 
@@ -212,14 +229,13 @@ describe("listLedger", () => {
   it("includes adopted recs with no effect rows yet (effects = [])", () => {
     // Warning-class (D5/LIMIT) recs skip measurement entirely: they appear in the
     // ledger as ADOPTED with no recommendation_effects row (design §2d).
-    db.prepare(
-      `INSERT INTO recommendations
-         (rec_id, provenance, detector_id, category, scope_workspace_id, lever,
-          modeled_savings_u_per_wk, modeled_formula_json, evidence_json, target_metric,
-          state, created_at)
-       VALUES ('rec-led-noeff', 'RULE', 'D5', 'LIMIT', NULL, 'warning-class rec',
-               NULL, '{}', '{}', 'forecast_margin', 'PROPOSED', ?)`,
-    ).run(new Date(T0 - MS_PER_DAY).toISOString());
+    seedValidatedRecommendation(db, {
+      recId: "rec-led-noeff",
+      templateId: "D5_LIMIT_BURN_WARNING",
+      scope: null,
+      savings: null,
+      createdAt: new Date(T0 - MS_PER_DAY).toISOString(),
+    });
     adoptRecommendation("rec-led-noeff", T0);
 
     const resp = listLedger();

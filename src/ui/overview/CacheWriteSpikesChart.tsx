@@ -146,7 +146,7 @@ export default function CacheWriteSpikesChart({ state }: CacheWriteSpikesChartPr
       <p className="kpi-fn" style={{ marginBottom: 4 }}>
         Rising writes vs reads signals cache misses (A1 §09 · D8 companion view)
       </p>
-      <p className="kpi-fn" style={{ color: "var(--amber, #f39c12)", marginBottom: 8 }}>
+      <p className="kpi-fn" style={{ color: "var(--amber)", marginBottom: 8 }}>
         ⚠ TTL 5m/1h volatile · Spike threshold is TTL-sensitive · active TTL unknown (run /usage to
         confirm)
       </p>
@@ -209,7 +209,7 @@ export default function CacheWriteSpikesChart({ state }: CacheWriteSpikesChartPr
           {threshold !== null && (
             <ReferenceLine
               y={threshold}
-              stroke="var(--red, #e74c3c)"
+              stroke="var(--red)"
               strokeDasharray="4 4"
               label={{
                 value: "spike threshold",

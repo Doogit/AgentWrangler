@@ -1,0 +1,24 @@
+{
+  "id": "D4",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    { "fixture": "near-miss-turns", "target_constant": "D4_OPUS_MIN_TURNS", "expect": "silent" },
+    {
+      "fixture": "near-miss-fraction",
+      "target_constant": "D4_MISMATCH_MIN_FRACTION",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-context",
+      "target_constant": "D4_MISMATCH_MIN_CONTEXT_TOKENS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-output",
+      "target_constant": "D4_MISMATCH_MAX_OUTPUT_TOKENS",
+      "expect": "silent"
+    },
+    { "fixture": "near-miss-share", "target_constant": "D4_LOOKUP_TURN_SHARE", "expect": "silent" },
+    { "fixture": "near-miss-spend", "target_constant": "D4_MIN_PCT_OF_SPEND", "expect": "silent" }
+  ]
+}

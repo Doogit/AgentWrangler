@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "note": "R-3 corpus-generator input (P2-U1). Aggregates only: counts, sizes, quantiles and shares from an aggregate census of the operator's transcript corpus (2026-10-04). No string, id or path from any transcript is stored here (SEC-101 / C-6). Tool names are the built-in-tool allowlist; everything else is one bucket.",
+  "census": {
+    "files": 2181,
+    "totalBytes": 1440820522,
+    "totalLines": 480423
+  },
+  "fileBytes": { "p10": 58535, "p50": 333465, "p90": 1728549, "p99": 3975478, "max": 12079948 },
+  "turnsPerSession": { "p10": 3, "p50": 30, "p90": 188, "p99": 391, "max": 832 },
+  "sessionDurationMin": { "p10": 0, "p50": 4, "p90": 69, "p99": 1010, "max": 8332 },
+  "bytesPerLine": { "p10": 124, "p50": 1541, "p90": 4530, "p99": 34801, "max": 893312 },
+  "nestingDepthShare": { "0": 0.2114, "2": 0.2737, "4": 0.5149 },
+  "toolUsesPerTurn": 0.538,
+  "toolMix": {
+    "Bash": 0.4102,
+    "Read": 0.2104,
+    "Edit": 0.1354,
+    "Grep": 0.0866,
+    "Write": 0.0402,
+    "Glob": 0.0137,
+    "Agent": 0.0078,
+    "Skill": 0.0071,
+    "ToolSearch": 0.003,
+    "WebSearch": 0.003,
+    "WebFetch": 0.0025,
+    "__other": 0.0801
+  },
+  "lineTypeShare": {
+    "assistant": 0.3014,
+    "attachment": 0.3294,
+    "user": 0.1745,
+    "system": 0.0107
+  },
+  "datasets": {
+    "X": {
+      "note": "X := requirements S1 (D11): 200 files, ~381 MB, mtimes over 12 weeks. File sizes keep the census shape (p50/p99 ratio) scaled to the byte target, capped at fileBytes.max.",
+      "seed": 1,
+      "files": 200,
+      "totalBytes": 381000000,
+      "weeks": 12
+    },
+    "S5": {
+      "note": "5x the X file count, one file >= 200 MB.",
+      "seed": 5,
+      "files": 1000,
+      "totalBytes": 1905000000,
+      "weeks": 12,
+      "bigFileBytes": 210000000
+    }
+  }
+}

@@ -1,132 +1,187 @@
 /**
- * src/detector/detectors/d9_idle_background_session.ts — D9 IDLE_BACKGROUND_SESSION.
+ * D9 FORK_SUBAGENT.
  *
- * Fires PER-WORKSPACE when background / subagent fan-out (is_sidechain turns)
- * dominates the cap-weighted volume — work that may not convert to forward
- * progress. Built on the buildable is_sidechain share proxy; user_turn_count is
- * now ingested per migration 009, so the zero-user-turn facet is available.
- * Savings are marked DIRECTIONAL — fan-out is a real quality/throughput
- * tradeoff, not pure waste (research B), and parent-child linkage remains
- * heuristic (issue #32175). No crisp $ headline is emitted.
+ * Fires once per workspace when parent sessions spawned fork subagents. The
+ * `subagent_meta.agent_type = 'fork'` marker is definitive; D9 deliberately
+ * does not infer forks from token volume or sidechain activity.
  *
- * Trigger (UNVALIDATED defaults, labeled): a workspace where is_sidechain=1 turns
- * contribute ≥ 25% of cap-weighted tokens AND absolute sidechain cap-weighted
- * tokens ≥ 100k in the trailing week.
+ * U7: a fork counts in the window by its own turn times (not the parent session's last turn),
+ * and the card carries a real estimate: the cache reads on the fork's turns, which re-read the
+ * context it inherited from its parent, priced from each turn's snapshot. A fork with no
+ * priced turns reads "cost not measured", never $0. The card needs the estimate to be at least
+ * 0.25% of the workspace's 7-day spend (unknown spend is not gated).
  *
- * scopeKey: "D9|<workspace_id>".
+ * SEC-101: evidence contains only structural workspace/session ids and counts.
  */
 
 import type { Db } from "../../db/open.js";
-import {
-  capWeightExprSql,
-  capWeightedTokens,
-  resolveCapReadCoeff,
-} from "../../query/cap-weighted.js";
-import {
-  D9_SIDECHAIN_ABS_CAP_TOKENS,
-  D9_SIDECHAIN_SHARE,
-  D9_UNPRODUCTIVE_FRACTION,
-  d9Formula,
-} from "../savings.js";
+import { pctOfSpend, spendByWorkspace } from "../../query/spend.js";
+import { type Estimate, d9Estimate } from "../savings.js";
 import type { Detector, DetectorContext, DetectorOutcome, Fired } from "../types.js";
 
-interface SidechainRow {
+/** Card gate: the estimate is at least this % of the workspace's 7-day spend. */
+const D9_MIN_PCT_OF_SPEND = 0.25;
+
+interface ForkRow {
+  agent_id: string;
   workspace_id: string;
-  sidechain_cap_raw: number;
-  sidechain_turns: number;
-  zero_utc_cap_raw: number;
-  zero_utc_sessions: number;
+  session_id: string;
+  session_last_turn_at: string | null;
 }
 
+interface ForkTurnAgg {
+  agent_id: string;
+  turns_total: number;
+  turns_in_window: number;
+  cache_read_tokens: number;
+  priced_read_tokens: number;
+  priced_read_spend_u: number;
+}
+
+const NOT_MEASURED: Estimate = {
+  basis: "X",
+  rank_value_u_per_wk: null,
+  summable: false,
+  label: "cost not measured",
+};
+
 export const d9Detector: Detector = {
+  contractVersion: 1,
+  version: "D9@u7-1",
+  scope: "session",
+  inputs: {
+    tables: [
+      "turns",
+      "sessions",
+      "workspaces",
+      "user_config",
+      "pricing_snapshots",
+      "subagent_meta",
+    ],
+  },
   id: "D9",
-  name: "IDLE_BACKGROUND_SESSION",
+  name: "FORK_SUBAGENT",
 
   evaluate(db: Db, ctx: DetectorContext): DetectorOutcome {
-    const coeff = resolveCapReadCoeff(db);
-
-    // Cap-weighted total per workspace (denominator for the share gate).
-    const totals = capWeightedTokens(db, {
-      fromIso: ctx.fromIso,
-      toIso: ctx.toIso,
-      groupBy: "workspace_id",
-      coeff,
-    });
-    const totalByWorkspace = new Map(totals.map((r) => [r.group ?? "", r.cap_weighted_tokens]));
-
-    // Sidechain-only cap-weighted tokens per workspace (reuses the shared meter expression).
-    const sidechainRows = db
+    const forks = db
       .prepare(
-        `SELECT t.workspace_id                    AS workspace_id,
-                SUM(${capWeightExprSql("t", coeff)}) AS sidechain_cap_raw,
-                SUM(CASE WHEN s.user_turn_count = 0
-                         THEN ${capWeightExprSql("t", coeff)} ELSE 0 END) AS zero_utc_cap_raw,
-                COUNT(DISTINCT CASE WHEN s.user_turn_count = 0 THEN t.session_id END) AS zero_utc_sessions,
-                COUNT(*)                           AS sidechain_turns
-           FROM turns t
-           JOIN sessions s ON t.session_id = s.session_id
-          WHERE t.ts >= ? AND t.ts < ? AND t.provisional = 0 AND t.is_sidechain = 1
-          GROUP BY t.workspace_id`,
+        `SELECT subagent_meta.agent_id AS agent_id,
+                sessions.workspace_id AS workspace_id,
+                subagent_meta.session_id AS session_id,
+                sessions.last_turn_at AS session_last_turn_at
+           FROM subagent_meta
+           JOIN sessions ON sessions.session_id = subagent_meta.session_id
+          WHERE subagent_meta.agent_type = 'fork'
+          ORDER BY sessions.workspace_id, subagent_meta.session_id, subagent_meta.agent_id`,
       )
-      .all(ctx.fromIso, ctx.toIso) as SidechainRow[];
+      .all() as ForkRow[];
 
+    const aggByAgent = new Map<string, ForkTurnAgg>();
+    if (forks.length > 0) {
+      const aggs = db
+        .prepare(
+          `SELECT t.agent_id AS agent_id,
+                  COUNT(*) AS turns_total,
+                  SUM(t.ts >= @from AND t.ts < @to) AS turns_in_window,
+                  COALESCE(SUM(CASE WHEN t.ts >= @from AND t.ts < @to THEN t.cache_read_tokens END), 0)
+                    AS cache_read_tokens,
+                  COALESCE(SUM(CASE WHEN t.ts >= @from AND t.ts < @to AND ps.unit_prices_json IS NOT NULL
+                                    THEN t.cache_read_tokens END), 0) AS priced_read_tokens,
+                  COALESCE(SUM(CASE WHEN t.ts >= @from AND t.ts < @to AND ps.unit_prices_json IS NOT NULL
+                                    THEN t.cache_read_tokens
+                                         * CAST(json_extract(ps.unit_prices_json, '$[2]') AS REAL) END), 0)
+                    AS priced_read_spend_u
+             FROM turns t
+             LEFT JOIN pricing_snapshots ps ON ps.snapshot_id = t.pricing_snapshot_id
+            WHERE t.provisional = 0 AND t.agent_id IN (
+                    SELECT agent_id FROM subagent_meta WHERE agent_type = 'fork')
+            GROUP BY t.agent_id`,
+        )
+        .all({ from: ctx.fromIso, to: ctx.toIso }) as ForkTurnAgg[];
+      for (const agg of aggs) aggByAgent.set(agg.agent_id, agg);
+    }
+
+    interface WorkspaceAggregate {
+      forkCount: number;
+      sessionIds: string[];
+      cacheReadTokens: number;
+      pricedReadTokens: number;
+      pricedReadSpendU: number;
+    }
+    const byWorkspace = new Map<string, WorkspaceAggregate>();
+    for (const fork of forks) {
+      const agg = aggByAgent.get(fork.agent_id);
+      // In the window by its own turns; a fork whose turns were never ingested falls back to
+      // its parent session's last turn.
+      const inWindow =
+        agg !== undefined
+          ? agg.turns_in_window > 0
+          : fork.session_last_turn_at !== null &&
+            fork.session_last_turn_at >= ctx.fromIso &&
+            fork.session_last_turn_at < ctx.toIso;
+      if (!inWindow) continue;
+      let aggregate = byWorkspace.get(fork.workspace_id);
+      if (!aggregate) {
+        aggregate = {
+          forkCount: 0,
+          sessionIds: [],
+          cacheReadTokens: 0,
+          pricedReadTokens: 0,
+          pricedReadSpendU: 0,
+        };
+        byWorkspace.set(fork.workspace_id, aggregate);
+      }
+      aggregate.forkCount += 1;
+      if (!aggregate.sessionIds.includes(fork.session_id))
+        aggregate.sessionIds.push(fork.session_id);
+      if (agg !== undefined) {
+        aggregate.cacheReadTokens += agg.cache_read_tokens;
+        aggregate.pricedReadTokens += agg.priced_read_tokens;
+        aggregate.pricedReadSpendU += agg.priced_read_spend_u;
+      }
+    }
+
+    const spendByWs = new Map(
+      spendByWorkspace(db, ctx.fromIso, ctx.toIso).map((s) => [s.workspace_id, s.cost_equiv_u]),
+    );
     const fired: Fired[] = [];
-    for (const row of sidechainRows) {
-      const sidechainCap = Math.round(row.sidechain_cap_raw ?? 0);
-      const totalCap = totalByWorkspace.get(row.workspace_id) ?? 0;
-      const share = totalCap > 0 ? sidechainCap / totalCap : 0;
-      const zeroUtcCap = Math.round(row.zero_utc_cap_raw ?? 0);
-      const zeroUtcShare = sidechainCap > 0 ? zeroUtcCap / sidechainCap : 0;
-
-      if (share < D9_SIDECHAIN_SHARE || sidechainCap < D9_SIDECHAIN_ABS_CAP_TOKENS) continue;
-
+    for (const [workspaceId, aggregate] of byWorkspace) {
+      const measured = aggregate.pricedReadTokens > 0 && aggregate.pricedReadSpendU > 0;
+      const estimate = measured
+        ? d9Estimate({
+            idleSidechainCapTokens: aggregate.pricedReadTokens,
+            cacheReadPriceUsdPerMtok: aggregate.pricedReadSpendU / aggregate.pricedReadTokens,
+          })
+        : NOT_MEASURED;
+      const pct = pctOfSpend(estimate.rank_value_u_per_wk, spendByWs.get(workspaceId));
+      if (pct !== null && pct < D9_MIN_PCT_OF_SPEND) continue;
       fired.push({
-        scopeKey: `D9|${row.workspace_id}`,
-        category: "SESSION_HYGIENE",
-        scope_workspace_id: row.workspace_id,
-        lever:
-          "Tighten subagent briefs and cap fan-out in plan mode; kill idle background sessions and /clear idle terminals. Directional — much fan-out is justified; review before cutting.",
-        target_metric: "sidechain_cap_weighted_share",
-        // Directional: no crisp $ headline (research B). Estimate lives in the formula inputs.
-        modeled_savings_u_per_wk: null,
-        modeled_formula: d9Formula(sidechainCap, D9_UNPRODUCTIVE_FRACTION),
-        evidence: {
-          title: `Review background-agent work: ${Math.round(share * 100)}% of estimated limit use`,
-          workspace_id: row.workspace_id,
-          sidechain_cap_weighted_tokens: sidechainCap,
-          total_cap_weighted_tokens: totalCap,
-          sidechain_share: Number(share.toFixed(4)),
-          sidechain_turn_count: row.sidechain_turns,
-          zero_user_turn_sidechain_cap: zeroUtcCap,
-          zero_user_turn_sidechain_share: Number(zeroUtcShare.toFixed(4)),
-          zero_user_turn_session_count: row.zero_utc_sessions,
-          sidechain_share_threshold: D9_SIDECHAIN_SHARE,
-          sidechain_abs_cap_tokens_threshold: D9_SIDECHAIN_ABS_CAP_TOKENS,
-          unproductive_fraction: D9_UNPRODUCTIVE_FRACTION,
-          thresholds_unvalidated: true,
-          directional: true,
-          linkage_note:
-            "user_turn_count is now ingested per migration 009, so the zero-user-turn facet is available; parent-child subagent linkage remains heuristic (issue #32175)",
-          steps: [
-            "Review the highest-volume background/subagent sessions in this workspace",
-            "Tighten subagent briefs so fan-out returns tight, scoped results",
-            "Cap fan-out in plan mode; kill idle background sessions and /clear idle terminals",
-          ],
+        scopeKey: `D9|${workspaceId}`,
+        scope_workspace_id: workspaceId,
+        // F6: the measured estimate is the card's standalone $ (non-summable).
+        modeled_savings_u_per_wk: estimate.rank_value_u_per_wk,
+        modeled_formula_json: { estimate },
+        payload: {
+          version: 1,
+          template_id: "D9_BACKGROUND_SESSION",
+          facts: {
+            workspace_id: workspaceId,
+            fork_count: aggregate.forkCount,
+            session_ids: aggregate.sessionIds.slice(0, 20),
+            fork_cache_read_tokens: aggregate.cacheReadTokens,
+            cost_basis: measured ? "measured" : "not_measured",
+          },
         },
       });
     }
 
     if (fired.length === 0) {
-      return {
-        fired: [],
-        status: "INACTIVE",
-        note: "no workspace met the sidechain-share threshold",
-      };
+      return { fired: [], status: "INACTIVE", note: "no fork subagents in the time window" };
     }
     return {
       fired,
       status: "ACTIVE",
-      note: `${fired.length} workspace(s) with background-heavy fan-out`,
+      note: `${fired.length} workspace(s) with fork subagents`,
     };
   },
 };

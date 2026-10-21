@@ -1,0 +1,14 @@
+{
+  "id": "D11",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    { "fixture": "near-miss-calls-ps", "target_constant": "D11_MIN_CALLS", "expect": "silent" },
+    { "fixture": "near-miss-calls-bash", "target_constant": "D11_MIN_CALLS", "expect": "silent" },
+    {
+      "fixture": "near-miss-errors",
+      "target_constant": "D11_MIN_HIGHER_ERRORS",
+      "expect": "silent"
+    },
+    { "fixture": "near-miss-ratio", "target_constant": "D11_RATE_RATIO", "expect": "silent" }
+  ]
+}

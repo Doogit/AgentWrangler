@@ -14,9 +14,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../../src/db/migrate.js";
 import { openDb } from "../../src/db/open.js";
+import { calibrateBytesPerToken as calibrateBytesPerTokenCore } from "../../src/detector/calibration.js";
+import { calibrateBytesPerToken as calibrateBytesPerTokenApi } from "../../src/query/api/settings.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import {
   RESET_DATA_TABLES,
@@ -40,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   resetQueryDb();
   db.close();
   // Clean up any on-disk DBs created in this test
@@ -380,6 +383,67 @@ describe("resetDatabase", () => {
     };
     expect(keys.n).toBe(0);
   });
+
+  it("keeps acted-on recs with their effect cycles, children and history; wipes PROPOSED", () => {
+    const insertRec = db.prepare(
+      `INSERT INTO recommendations
+         (rec_id, provenance, detector_id, analysis_run_id, category, lever,
+          modeled_formula_json, evidence_json, target_metric, state, created_at, adopted_at)
+       VALUES (?, ?, 'D1', ?, 'cache', 'lever', '{}', '{}', 'metric', ?, '2026-01-01T00:00:00Z', ?)`,
+    );
+    db.prepare(
+      `INSERT INTO analysis_runs (run_id, scope, model, prompt_version, evidence_pack_hash, ran_at)
+       VALUES ('run-kept', 'GLOBAL', 'm', 'v1', 'h', '2026-01-01T00:00:00Z'),
+              ('run-wiped', 'GLOBAL', 'm', 'v1', 'h', '2026-01-01T00:00:00Z')`,
+    ).run();
+    insertRec.run("rec-adopted", "RULE", null, "ADOPTED", "2026-01-02T00:00:00Z");
+    insertRec.run("rec-analyzed", "CLAUDE_ANALYZED", "run-kept", "DISMISSED", null);
+    insertRec.run("rec-proposed", "RULE", "run-wiped", "PROPOSED", null);
+    insertRec.run("rec-retired", "RULE", null, "RETIRED", null);
+    const insertCycle = db.prepare(
+      `INSERT INTO effect_cycles
+         (cycle_id, rec_id, cycle_no, contract_version, query_definition_version, detector_id,
+          metric_id, method_version, state, created_at, tracking_requested_at, applied_at,
+          application_source, track_idempotency_key, scope_json, cohort_json,
+          target_definition_json, guardrail_definitions_json, baseline_from, baseline_to,
+          observation_from, scheduled_observation_to, baseline_evidence_json)
+       VALUES (?, ?, 1, 'c1', 'q1', 'D1', 'm', 'v1', 'OPEN_MEASURING', 't', 't', 't',
+               'USER_ATTESTED', ?, '{}', '{}', '{}', '[]', 't', 't', 't', 't', '{}')`,
+    );
+    insertCycle.run("cycle-kept", "rec-adopted", "k1");
+    insertCycle.run("cycle-wiped", "rec-proposed", "k2");
+    const insertGuardrail = db.prepare(
+      `INSERT INTO effect_guardrail_results
+         (cycle_id, guardrail_id, method_version, availability, unit, direction,
+          reason_codes_json, evidence_json)
+       VALUES (?, 'g1', 'v1', 'SUPPORTED', 'u', 'STABLE', '[]', '{}')`,
+    );
+    insertGuardrail.run("cycle-kept");
+    insertGuardrail.run("cycle-wiped");
+    db.prepare(
+      `INSERT INTO recommendation_lifecycle_actions (idempotency_key, rec_id, action, recorded_at)
+       VALUES ('la-kept', 'rec-adopted', 'REOPEN', 't'), ('la-wiped', 'rec-proposed', 'UNDO_ADOPT', 't')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO recommendation_feedback
+         (feedback_id, scope_key, rec_identity, feedback, created_at, updated_at)
+       VALUES ('fb-1', 'scope', 'identity', 'NOT_USEFUL', 't', 't')`,
+    ).run();
+
+    resetDatabase(db);
+
+    const ids = (sql: string) => (db.prepare(sql).pluck().all() as string[]).sort();
+    expect(ids("SELECT rec_id FROM recommendations")).toEqual(["rec-adopted", "rec-analyzed"]);
+    expect(ids("SELECT cycle_id FROM effect_cycles")).toEqual(["cycle-kept"]);
+    expect(ids("SELECT cycle_id FROM effect_guardrail_results")).toEqual(["cycle-kept"]);
+    expect(ids("SELECT idempotency_key FROM recommendation_lifecycle_actions")).toEqual([
+      "la-kept",
+    ]);
+    expect(ids("SELECT run_id FROM analysis_runs")).toEqual(["run-kept"]);
+    expect(ids("SELECT feedback_id FROM recommendation_feedback")).toEqual(["fb-1"]);
+    expect(ids("SELECT session_id FROM sessions")).toEqual([]);
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -475,7 +539,62 @@ describe("applySettingsUpdate — workspace mappings", () => {
 // getSettingsData resilience
 // ---------------------------------------------------------------------------
 
+describe("applySettingsUpdate — cache-read cap coefficient", () => {
+  it("returns and persists a valid coefficient", () => {
+    expect(getSettingsData(db).cap_read_coeff).toBe(0.1);
+    applySettingsUpdate(db, { cap_read_coeff: 0.25 });
+    expect(getSettingsData(db).cap_read_coeff).toBe(0.25);
+  });
+
+  it.each([0, -0.1, 1.01, Number.NaN])("rejects out-of-range value %s", (value) => {
+    expect(() => applySettingsUpdate(db, { cap_read_coeff: value })).toThrow(/coefficient/i);
+  });
+});
+
+describe("applySettingsUpdate — usage_cli_enabled (USAGE-CLI)", () => {
+  it("defaults on, round-trips off and on, and stores the string the reader checks", () => {
+    expect(getSettingsData(db).usage_cli_enabled).toBe(true);
+    expect(applySettingsUpdate(db, { usage_cli_enabled: false }).usage_cli_enabled).toBe(false);
+    expect(
+      (
+        db.prepare("SELECT value FROM user_config WHERE key = 'usage_cli_enabled'").get() as {
+          value: string;
+        }
+      ).value,
+    ).toBe("false");
+    expect(getSettingsData(db).usage_cli_enabled).toBe(false);
+    expect(applySettingsUpdate(db, { usage_cli_enabled: true }).usage_cli_enabled).toBe(true);
+  });
+
+  it("an update that omits the field leaves it unchanged", () => {
+    applySettingsUpdate(db, { usage_cli_enabled: false });
+    applySettingsUpdate(db, { cap_read_coeff: 0.2 });
+    expect(getSettingsData(db).usage_cli_enabled).toBe(false);
+  });
+});
+
 describe("getSettingsData — corrupt persisted scan_roots", () => {
+  it("uses the environment root when no saved value exists", () => {
+    vi.stubEnv("AW_SCAN_ROOT", tmpDir);
+    expect(getSettingsData(db).scan_roots).toEqual([tmpDir]);
+  });
+
+  it("preserves an explicitly saved empty list over the environment root", () => {
+    vi.stubEnv("AW_SCAN_ROOT", tmpDir);
+    db.prepare(
+      "INSERT INTO user_config (key, value, updated_at) VALUES ('scan_roots', '[]', ?)",
+    ).run(new Date().toISOString());
+    expect(getSettingsData(db).scan_roots).toEqual([]);
+  });
+
+  it("falls back as a whole when a persisted element is not a string", () => {
+    vi.stubEnv("AW_SCAN_ROOT", tmpDir);
+    db.prepare("INSERT INTO user_config (key, value, updated_at) VALUES ('scan_roots', ?, ?)").run(
+      JSON.stringify([tmpDir, 5]),
+      new Date().toISOString(),
+    );
+    expect(getSettingsData(db).scan_roots).toEqual([tmpDir]);
+  });
   it("degrades to daemon defaults instead of throwing on non-JSON scan_roots", () => {
     db.prepare(
       `INSERT INTO user_config (key, value, updated_at) VALUES ('scan_roots', 'not-json', ?)
@@ -494,5 +613,25 @@ describe("getSettingsData — corrupt persisted scan_roots", () => {
 
     expect(() => getSettingsData(db)).not.toThrow();
     expect(Array.isArray(getSettingsData(db).scan_roots)).toBe(true);
+  });
+});
+
+describe("manual bytes calibration entry", () => {
+  it("uses the effective unsaved environment root through the API wrapper", async () => {
+    vi.stubEnv("AW_SCAN_ROOT", tmpDir);
+    db.prepare(
+      "INSERT INTO user_config (key, value, updated_at) VALUES ('bytes_per_token_calibration_enabled', 'true', ?)",
+    ).run(new Date().toISOString());
+    const sampler = vi.fn(() =>
+      Array.from({ length: 30 }, (_, i) => ({ text: `manual_${i}`, bytes: 40 })),
+    );
+    const response = await calibrateBytesPerTokenApi((calibrationDb) =>
+      calibrateBytesPerTokenCore(calibrationDb, {
+        sampler,
+        counter: async () => ({ ok: true, input_tokens: 10 }),
+      }),
+    );
+    expect(response.data?.ok).toBe(true);
+    expect(sampler).toHaveBeenCalledWith([tmpDir], { maxSamples: 150 });
   });
 });

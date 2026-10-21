@@ -1,7 +1,13 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HotSessionsPage from "../../src/ui/sessions/HotSessionsPage";
 import EmptyState from "../../src/ui/shell/EmptyState";
+
+const { fetchPage } = vi.hoisted(() => ({ fetchPage: vi.fn() }));
+vi.mock("../../src/ui/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/ui/api/client")>()),
+  fetchHotSessionsPage: fetchPage,
+}));
 
 const writeText = vi.fn<() => Promise<void>>();
 let clipboardDescriptor: PropertyDescriptor | undefined;
@@ -45,24 +51,23 @@ describe("EmptyState", () => {
     ).toBeTruthy();
     expect(screen.getByText("claude")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy command: claude" }));
+    const copyButton = screen.getByRole("button", { name: "Copy command: claude" });
+    expect(copyButton.classList).toContain("btn-secondary");
+    fireEvent.click(copyButton);
     expect(writeText).toHaveBeenCalledWith("claude");
   });
 
   it("uses the sessions-specific onboarding copy for a loaded zero-row response", async () => {
+    fetchPage.mockReset().mockResolvedValue({ rows: [], next_cursor: null });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => [] }));
 
     render(<HotSessionsPage onSelectSession={vi.fn()} />);
 
     expect(await screen.findByRole("heading", { name: "No session cost data yet" })).toBeTruthy();
-    expect(
-      screen.getByText("The daemon has not recorded any completed sessions with token usage."),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Cost-ranked sessions will appear after the next observed session completes.",
-      ),
-    ).toBeTruthy();
+    await waitFor(() => expect(fetchPage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/Loading the selected range\./)).toBeNull());
+    expect(screen.getByText("No sessions with recorded turns in this range.")).toBeTruthy();
+    expect(screen.getByText("Sessions with recorded turns will appear here.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Copy command: claude" })).toBeTruthy();
     expect(screen.queryByText("Nothing here")).toBeNull();
   });

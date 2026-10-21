@@ -1,0 +1,9 @@
+{
+  "id": "D9",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "D9_MIN_PCT_OF_SPEND",
+    "expect": "silent"
+  }
+}

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 
+import { buildSeededPrompt } from "../../src/query/api/rec-prompt";
 import type { RecommendationCard } from "../../src/query/api/recommendations";
 import {
   buildPromptArtifact,
@@ -14,240 +15,83 @@ import {
 
 function card(overrides: Partial<RecommendationCard>): RecommendationCard {
   return {
+    rec_id: "rec-prompt-test",
     detector_id: "D1",
+    category: "CONTEXT",
+    scope_workspace_id: null,
     evidence: {},
     modeled_formula: { inputs: {}, model: "test" },
+    modeled_savings_u_per_wk: null,
     file_ref: null,
     lever: "test lever",
     ...overrides,
   } as unknown as RecommendationCard;
 }
 
-function assertMeasuredLines(text: string): void {
-  const exempt =
-    /^(Prompt artifact|Work-through|Title|Lever|Component|File|Measured |MEASURED CONTEXT|TASK|CONSTRAINTS|ACCEPTANCE|Evidence |Formula input |Acceptance|Caveat|Attributed tool):/;
-  for (const line of text.split("\n").filter(Boolean)) {
-    if (!exempt.test(line)) {
-      expect(line).toMatch(/[0-9]|[/\\]/);
-    }
-  }
-}
-
 describe("buildPromptArtifact", () => {
-  it("creates a turnkey D1 artifact with the source path, measured quantities, and verification", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D1",
-        evidence: {
-          source_tokens: 12000,
-          source_target: 4000,
-          delta_context_tokens: 8000,
-          component: "CLAUDE.md",
-        },
-        file_ref: "/repo/CLAUDE.md",
-      }),
-    );
+  it("uses the exact server bytes and preserves only allow-listed aggregates", () => {
+    const rec = card({
+      detector_id: "D2",
+      scope_workspace_id: "workspace-private-id",
+      lever: "powershell -NoProfile -Command Get-Secret",
+      file_ref: "C:\\Users\\private-user\\sensitive-repo\\CLAUDE.md",
+      steps: [{ kind: "generic", description: "Permission denied: customer-token.txt" }],
+      evidence: {
+        qualifying_session_count: 12,
+        raw_context_average_tokens_per_turn: 24_000,
+        cap_weighted_burn_tokens_per_week: 96_000,
+        cache_read_tokens_per_week: 36_000,
+        cache_read_exposure_spend_u_per_week: 4_800,
+        transcript: "user: paste the production credential here",
+      },
+    });
+    const result = buildPromptArtifact(rec);
     assert(result !== null);
 
-    expect(result.flavor).toBe("TURNKEY");
-    expect(result.text).toContain("/repo/CLAUDE.md");
-    expect(result.text).toContain("12,000");
-    expect(result.text).toContain("4,000");
-    expect(result.text).toContain("8,000");
-    expect(result.text).toMatch(/verify|confirm/i);
-    assertMeasuredLines(result.text);
-  });
-
-  it("creates a guided D2 artifact that preserves the measured context without prescribing a one-line fix", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D2",
-        evidence: {
-          qualifying_session_count: 12,
-          raw_context_average_tokens_per_turn: 24000,
-          cap_weighted_burn_tokens_per_week: 96000,
-          cache_read_tokens_per_week: 36000,
-          cache_read_exposure_spend_u_per_week: 4800,
-        },
-      }),
-    );
-    assert(result !== null);
-
+    expect(result.text).toBe(buildSeededPrompt(rec));
     expect(result.flavor).toBe("GUIDED");
-    for (const number of ["12", "24,000", "96,000", "36,000", "4,800"]) {
-      expect(result.text).toContain(number);
+    expect(result.text).toContain("Average context: 24,000 tokens/turn; denominator 12 sessions");
+    expect(result.text).toContain("Cache-read exposure: 4,800 microUSD/week");
+    for (const unsafe of [
+      "powershell -NoProfile -Command Get-Secret",
+      "Permission denied: customer-token.txt",
+      "user: paste the production credential here",
+      "C:\\Users\\private-user\\sensitive-repo\\CLAUDE.md",
+      "workspace-private-id",
+    ]) {
+      expect(result.text).not.toContain(unsafe);
     }
-    expect(result.text).toMatch(/work (this )?through|with Claude|with an agent/i);
-    expect(result.text).not.toMatch(/^(Fix|Change|Replace|Delete):/im);
-    assertMeasuredLines(result.text);
   });
 
-  it("routes D10 to a turnkey artifact with a verification line", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D10",
-        evidence: {
-          catalog_tokens: 9000,
-          catalog_target_tokens: 3000,
-          delta_context_tokens: 6000,
-          source_count: 14,
-          turns_per_week: 55,
-        },
-        file_ref: "/repo/.claude/commands",
-      }),
-    );
-    assert(result !== null);
-
-    expect(result.flavor).toBe("TURNKEY");
-    expect(result.text).toContain("9,000");
-    expect(result.text).toMatch(/verify|confirm/i);
-    assertMeasuredLines(result.text);
-  });
-
-  it("routes D4 to a turnkey artifact with the cap caveat and a verification line", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D4",
-        evidence: {
-          mismatch_turns_per_week: 30,
-          total_opus_turns_per_week: 100,
-          mismatch_fraction: 0.3,
-        },
-      }),
-    );
-    assert(result !== null);
-
-    expect(result.flavor).toBe("TURNKEY");
-    expect(result.text).toContain("30");
-    expect(result.text).toContain("100");
-    expect(result.text).toMatch(/verify|confirm/i);
-    assertMeasuredLines(result.text);
-  });
-
-  it("routes D6 to a guided artifact retaining the attributed tool and metrics", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D6",
-        evidence: {
-          tool_result_bytes: 500000,
-          bloat_share: 0.6,
-          session_cap_weighted_tokens: 82000,
-          attributed_tool: "Bash",
-        },
-      }),
-    );
+  it("returns a guided product message and structured reason for unsupported detectors", () => {
+    const result = buildPromptArtifact(card({ detector_id: "DZZ" }));
     assert(result !== null);
 
     expect(result.flavor).toBe("GUIDED");
-    expect(result.text).toContain("500,000");
-    expect(result.text).toContain("Bash");
-    assertMeasuredLines(result.text);
+    expect(result.text).toContain(
+      "No validated automatic handler is available; use the bounded read-only investigation below.",
+    );
+    expect(result.text).toContain("Reason code: HANDLER_UNAVAILABLE.");
+    expect(result.text).toContain("[AUTOMATIC_HANDLER]");
   });
 
-  it("routes D8 to a guided artifact with churn metrics", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D8",
-        evidence: {
-          churn_event_count: 7,
-          total_churn_creation_tokens: 45000,
-          session_cap_weighted_tokens: 82000,
-        },
-      }),
+  it("distinguishes global and workspace scope without exposing concrete paths", () => {
+    const workspace = buildPromptArtifact(
+      card({ scope_workspace_id: "ws-private", file_ref: "/private/repo/CLAUDE.md" }),
     );
-    assert(result !== null);
+    const global = buildPromptArtifact(card({ scope_workspace_id: null }));
+    assert(workspace !== null);
+    assert(global !== null);
 
-    expect(result.flavor).toBe("GUIDED");
-    expect(result.text).toContain("45,000");
-    assertMeasuredLines(result.text);
-  });
-
-  it("returns null for detectors with no template (routed or unknown) — no generic filler", () => {
-    // RV4 deletes buildFallback: routed behavioral detectors (D5/D7/D9) and any
-    // unknown detector get no artifact rather than metric-only filler. Callers
-    // (RecCard, buildBrief) guard the null and route or omit the prompt.
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "DZZ",
-        evidence: { observed_tokens: 12345 },
-        modeled_formula: { inputs: { weekly_turns: 42 }, model: "test" },
-      }),
+    expect(workspace.text).toContain(
+      "SCOPE: WORKSPACE; concrete identifiers and paths are intentionally withheld.",
     );
-    expect(result).toBeNull();
-  });
-
-  // FB2 — scope preamble tests
-  it("workspace-scoped rec prompt contains repo-targeting preamble", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D1",
-        scope_workspace_id: "ws-abc123",
-        cross_workspace: false,
-        evidence: {
-          source_tokens: 5000,
-          source_target: 2000,
-          delta_context_tokens: 3000,
-          component: "CLAUDE.md",
-        },
-        file_ref: "/repo/CLAUDE.md",
-      }),
+    expect(global.text).toContain(
+      "SCOPE: GLOBAL; concrete identifiers and paths are intentionally withheld.",
     );
-    assert(result !== null);
-    // Preamble must identify this as a workspace-scoped target
-    expect(result.text).toMatch(/SCOPE:\s*Workspace/i);
-    expect(result.text).toMatch(/\.claude\/settings\.json|CLAUDE\.md/);
-    // Must NOT reference ~/.claude (that is global territory)
-    expect(result.text).not.toContain("~/.claude");
-  });
-
-  it("global rec prompt contains ~/.claude preamble", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D1",
-        scope_workspace_id: null,
-        cross_workspace: true,
-        evidence: {
-          source_tokens: 8000,
-          source_target: 3000,
-          delta_context_tokens: 5000,
-          component: "CLAUDE.md",
-        },
-        file_ref: null,
-      }),
-    );
-    assert(result !== null);
-    // Preamble must identify this as global and target ~/.claude
-    expect(result.text).toMatch(/SCOPE:\s*Global/i);
-    expect(result.text).toContain("~/.claude");
-    expect(result.text).toContain("all workspaces");
-  });
-
-  it("global and workspace recs produce different prompt text", () => {
-    const baseEvidence = {
-      source_tokens: 5000,
-      source_target: 2000,
-      delta_context_tokens: 3000,
-      component: "CLAUDE.md",
-    };
-    const wsResult = buildPromptArtifact(
-      card({
-        detector_id: "D1",
-        scope_workspace_id: "ws-xyz",
-        cross_workspace: false,
-        evidence: baseEvidence,
-      }),
-    );
-    const globalResult = buildPromptArtifact(
-      card({
-        detector_id: "D1",
-        scope_workspace_id: null,
-        cross_workspace: true,
-        evidence: baseEvidence,
-      }),
-    );
-    assert(wsResult !== null);
-    assert(globalResult !== null);
-    expect(wsResult.text).not.toBe(globalResult.text);
+    expect(workspace.text).not.toContain("ws-private");
+    expect(workspace.text).not.toContain("/private/repo");
+    expect(workspace.text).not.toBe(global.text);
   });
 });
 
@@ -312,6 +156,26 @@ describe("generated snippets", () => {
 
     expect(result?.text).not.toContain("enableToolSearch");
     expect(result?.text).toContain("1 MCP server(s) currently set alwaysLoad:true");
+  });
+
+  it("labels a U7 D10 row's catalog_target_tokens as the 5% context share, not a target", () => {
+    const result = generateSettingsDisableBlock(
+      card({
+        detector_id: "D10",
+        evidence: {
+          catalog_tokens: 18_400,
+          catalog_target_tokens: 3_100,
+          delta_context_tokens: 6_200,
+          removable_tokens: 6_200,
+          tool_search_mode: "deferred",
+        },
+      }),
+    );
+
+    expect(result?.text).toContain(
+      "18,400 tokens, 6,200 in items with no recorded use this week (5% of mean context per turn: 3,100)",
+    );
+    expect(result?.text).not.toContain("target");
   });
 
   it("returns null for non-D10 cards and missing D10 catalog evidence", () => {
@@ -421,22 +285,5 @@ describe("generateTrailerWriterSnippet (RI10/R3)", () => {
     expect(result.caption).toContain(".git/hooks/prepare-commit-msg");
     expect(result.caption.toLowerCase()).toContain("install");
     expect(result.caption.toLowerCase()).toContain("uninstall");
-  });
-});
-
-describe("buildD1 cache-invalidation backfire warning (RI8/R13)", () => {
-  it("carries the boundary-edit warning in the CONSTRAINTS section", () => {
-    const result = buildPromptArtifact(
-      card({
-        detector_id: "D1",
-        evidence: { source_tokens: 12000, source_target: 4000, component: "CLAUDE.md" },
-        file_ref: "/repo/CLAUDE.md",
-      }),
-    );
-    assert(result !== null);
-    const constraints = result.text.split("\n").find((l) => l.startsWith("CONSTRAINTS:"));
-    assert(constraints !== undefined);
-    expect(constraints).toContain("/clear");
-    expect(constraints.toLowerCase()).toContain("backfire");
   });
 });

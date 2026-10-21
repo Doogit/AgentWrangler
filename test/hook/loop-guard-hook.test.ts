@@ -6,11 +6,13 @@ describe("loop-guard hook stage output", () => {
     expect(stageToStdout("ok", "below_threshold")).toBe("");
   });
 
-  it("allows with additional context for warn", () => {
-    expect(JSON.parse(stageToStdout("warn", "near_repeated_identical_failures"))).toMatchObject({
-      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" },
+  it("warns via hookSpecificOutput.additionalContext without deciding permission", () => {
+    const out = JSON.parse(stageToStdout("warn", "near_repeated_identical_failures"));
+    expect(out.hookSpecificOutput).toEqual({
+      hookEventName: "PreToolUse",
       additionalContext: expect.any(String),
     });
+    expect(out).not.toHaveProperty("additionalContext");
   });
 
   it("denies for block without exposing raw tool text", () => {

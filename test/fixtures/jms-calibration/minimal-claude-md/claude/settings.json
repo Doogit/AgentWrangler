@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": ["Bash(npm test)", "Bash(npm run lint)"],
+    "deny": ["Read(./.env)"],
+    "defaultMode": "default"
+  },
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "npm run format" }] }
+    ]
+  }
+}

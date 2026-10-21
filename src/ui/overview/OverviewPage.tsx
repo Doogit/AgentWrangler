@@ -1,108 +1,201 @@
 /**
- * src/ui/overview/OverviewPage.tsx — Global Overview surface.
+ * src/ui/overview/OverviewPage.tsx — Global Overview surface (overview-v2).
  *
- * Fetches three independent data sources and manages their load states.
- * Three distinct UI states per section (never conflated):
- *   1. loading   → skeleton (aria-busy, pulsing animation)
- *   2. error     → error banner (role="alert", daemon-unreachable messaging)
- *   3. ok/empty  → real data or explicit N/A — never blank, never silent
+ * Section order (operator-settled, docs/plans/Archive/spec-overview-redesign.md):
+ *   1. Usage limits (hero)     — UsageLimitsCard, GET /api/query/limits
+ *   2. This period (4 KPI tiles)
+ *   3. Top Usage Recommendations
+ *   4. Most expensive sessions this week
+ *   5. Across the dashboard
+ *   6. Context per turn by model (table)
+ *   7. Where your tokens go (100% bar + weights table, basis toggle)
+ *   8. Spend by day (1 chart, 3 tabs)
+ *   9. Workspaces (table)
+ *  10. Data notes
  *
- * Date presets: 24h / 7d (default) / 30d — shared filter for overview + workspaces.
- * Live strip refreshes independently every 30 s.
+ * The page reads one GET /api/overview-view (perf plan P1-U4), refetched every 30 s, plus the
+ * limits card's own poll. Every "live" indicator (header chip, Sessions tile, Live strip,
+ * Workspaces "Active now") reads its one `live` section so they cannot disagree.
  *
- * Claim chip mapping (from frozen contract):
- *   cost_equiv_u  → LIST_EQUIV (teal)
- *   forecast      → PROXY (red/salmon)  — visually distinct from LIST_EQUIV
- *   context/turn  → OBS_PROXY (cyan)    — visually distinct from LIST_EQUIV
+ * Each card renders its own section (`safeSection`-validated): ok, pending (a sized skeleton)
+ * or error (the WidgetBoundary failure card), so one bad section never blanks the page.
+ * The daemon owns pace/burn/projection; the UI only renders.
  */
 
-import { lazy, useCallback, useEffect, useState } from "react";
-import type { BurnStatus } from "../../query/api/burn-status";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { LIST_PRICE_WEIGHTS, REF_PRICE_U_PER_TOKEN } from "../../ingest/pricing";
 import type { HookConfigResponse } from "../../query/api/hook-config";
+import type { LinkageRateData } from "../../query/api/outcomes";
 import type {
+  ContextPerTurnRow,
   GlobalOverview,
   LiveSessionRow,
-  ModelMixRow,
   PagedList,
-  WindowFilter,
   WorkspaceSummary,
 } from "../../query/api/overview";
+import type { OverviewSection } from "../../query/api/overview-view";
 import type { RecommendationCard } from "../../query/api/recommendations";
-import type {
-  CacheEfficiency,
-  FlavorDecomposition as FlavorDecompositionData,
-} from "../../query/api/spend-flavor";
+import type { FlavorDecomposition } from "../../query/api/spend-flavor";
 import type { CacheWriteTrend, TrendData } from "../../query/api/trends";
-import type { ApiResponse } from "../../query/envelope";
 import type { ForecastFromDbResult } from "../../query/forecast";
+import type { WeeklyHistoryWeek, WeeklyMax, WeeklyMaxState } from "../../query/limits/types";
 import type { HotSessionRow } from "../../query/spend";
 import {
-  fetchBurnStatus,
-  fetchCacheWriteTrend,
-  fetchFlavorDecomposition,
-  fetchGithubTokenStatus,
-  fetchGlobalOverview,
-  fetchHookConfig,
-  fetchHotSessions,
-  fetchLiveSessions,
-  fetchRecommendations,
-  fetchStatus,
-  fetchTrends,
-  fetchWorkspaces,
-  getCachedResponse,
-  getLastFetchTimestamp,
-} from "../api/client";
-import type { DaemonStatus } from "../api/client";
-import { ObservationEvidence } from "../esf/ObservationEvidence";
+  type OverviewSectionName,
+  overviewSectionSchemas,
+} from "../../shared/schemas/overview-view";
+import { fetchGithubTokenStatus, fetchLimits, fetchOverviewView } from "../api/client";
+import type { DaemonStatus, OverviewViewResponse } from "../api/client";
+import { safeSection } from "../api/parse";
+import { queryClient } from "../api/query-client";
+import { OVERVIEW_LIVE_SECTIONS, queryKeys } from "../api/query-keys";
+import { PRESET_DAYS, fillDailyBuckets } from "../lib/fill-days";
+import { coverageLabel } from "../lib/history-status";
+import type { MetricId } from "../lib/metric-copy";
+import { headlineSavings } from "../lib/rec-presentation";
 import { useForegroundPoll } from "../lib/use-foreground-poll";
-import Chip from "../shell/Chip";
-import ChipLegend from "../shell/ChipLegend";
-import DeferredChart from "../shell/DeferredChart";
-import SectionHeader from "../shell/SectionHeader";
-import { SkeletonKpi, SkeletonRow } from "../shell/Skeleton";
-import BurnForecastCard from "./BurnForecastCard";
-import CacheEfficiencyKPI from "./CacheEfficiencyKPI";
-const CacheWriteSpikesChart = lazy(() => import("./CacheWriteSpikesChart"));
-const FlavorDecomposition = lazy(() => import("./FlavorDecomposition"));
-import HookTile from "./HookTile";
+import InfoTip from "../shell/InfoTip";
+import PartialBadge from "../shell/PartialBadge";
+import WidgetBoundary, { WidgetErrorCard } from "../shell/WidgetBoundary";
+import { AcrossDashboard } from "./AcrossDashboard";
+import { ExpensiveSessions } from "./ExpensiveSessions";
+import { KpiCard } from "./KpiCard";
 import LiveStrip from "./LiveStrip";
-import RateLimitGauges from "./RateLimitGauges";
-const TrendChart = lazy(() => import("./TrendChart"));
-import VerdictBand, { DeltaBadge, TrendSparkline, windowDelta } from "./VerdictBand";
+import SetupGradeCard from "./SetupGradeCard";
+import { TopRecommendations, TopRecommendationsSkeleton } from "./TopRecommendations";
+import UsageLimitsCard, { asOfTime } from "./UsageLimitsCard";
 import WorkspaceTable, { type TopRec } from "./WorkspaceTable";
-import { seriesPalette } from "./chart-theme";
 
 // ---------------------------------------------------------------------------
-// Types
+// Types & helpers
 // ---------------------------------------------------------------------------
 
-type Preset = "24h" | "7d" | "30d";
+type Preset = "24h" | "7d" | "30d" | "all";
 
-const CAVEAT_COPY =
-  "ℹ List-price equivalents only — Max/Team plans are NOT billed this way. Tokens drive rate limits. Check /usage or the status-line 5h/7d % for your real budget signal.";
+/** The legacy types each section's validated `data` is read as (the schema checks the fields read). */
+interface SectionTypes {
+  kpis: GlobalOverview;
+  workspaces: PagedList<WorkspaceSummary>;
+  trends: TrendData;
+  trends_prior: TrendData;
+  flavor: FlavorDecomposition;
+  cache_write: CacheWriteTrend;
+  weekly_sessions: { rows: HotSessionRow[]; cost_equiv_u: number };
+  live: PagedList<LiveSessionRow>;
+  status: DaemonStatus;
+  top_recs: {
+    active: RecommendationCard[];
+    adopted: RecommendationCard[];
+    active_groups?: unknown[];
+  };
+  linkage: LinkageRateData;
+  hook_config: HookConfigResponse;
+}
 
-type LoadState<T> =
-  | { status: "loading" }
-  | { status: "error"; message: string }
-  | { status: "ok"; value: T };
+/** One card's view of its section: `loading` until the page response arrives. */
+type SectionState<T> =
+  | { state: "loading" }
+  | { state: "pending"; progress?: OverviewSection["progress"] }
+  | { state: "error" }
+  | { state: "ok"; data: T; freshness?: OverviewSection["freshness"] };
 
-type OnboardingStatusState =
-  | { status: "pending" }
-  | { status: "error"; message: string }
-  | { status: "ok"; value: DaemonStatus };
+type Sections = { [K in OverviewSectionName]: SectionState<SectionTypes[K]> };
+
+function readSection<K extends OverviewSectionName>(
+  view: OverviewViewResponse | undefined,
+  name: K,
+): SectionState<SectionTypes[K]> {
+  if (view === undefined) return { state: "loading" };
+  const section = view.sections[name];
+  if (section === undefined || section.status === "error") return { state: "error" };
+  if (section.status === "pending") {
+    return section.progress
+      ? { state: "pending", progress: section.progress }
+      : { state: "pending" };
+  }
+  const parsed = safeSection(name, overviewSectionSchemas[name], section.data);
+  if (!parsed.ok) return { state: "error" };
+  const data = parsed.data as SectionTypes[K];
+  return section.freshness
+    ? { state: "ok", data, freshness: section.freshness }
+    : { state: "ok", data };
+}
+
+function readSections(view: OverviewViewResponse | undefined): Sections {
+  const names = Object.keys(overviewSectionSchemas) as OverviewSectionName[];
+  return Object.fromEntries(names.map((name) => [name, readSection(view, name)])) as Sections;
+}
+
+function okData<T>(section: SectionState<T>): T | null {
+  return section.state === "ok" ? section.data : null;
+}
 
 const SKELETON_DELAY_MS = 300;
+/** While `top_recs` is pending or recomputing, refetch just that section this often. */
+const TOP_RECS_POLL_MS = 2_000;
+/** Fetched alongside the page request so the KPI strip does not wait for all 12 sections. */
+const KPI_FIRST_SECTIONS: OverviewSectionName[] = ["kpis", "status"];
+const SERIES = [
+  "var(--series-1)",
+  "var(--series-2)",
+  "var(--series-3)",
+  "var(--series-4)",
+  "var(--series-5)",
+];
 
-function cachedLoadState<T>(endpoint: string, params?: unknown): LoadState<T> {
-  const cached = getCachedResponse<T>(endpoint, params);
-  return cached === undefined ? { status: "loading" } : { status: "ok", value: cached };
+function fmtUsd0(usd: number): string {
+  return `$${usd.toLocaleString("en-US", {
+    minimumFractionDigits: usd >= 1000 ? 0 : 2,
+    maximumFractionDigits: usd >= 1000 ? 0 : 2,
+  })}`;
 }
 
-function retainDataWhileRefreshing<T>(
-  setState: React.Dispatch<React.SetStateAction<LoadState<T>>>,
-): void {
-  setState((current) => (current.status === "ok" ? current : { status: "loading" }));
+/** Task 9: how concentrated a window's session spend is. Costs are micro-USD. */
+function sessionConcentration(sessions: { cost_equiv_u: number }[]): {
+  top3Share: number | null;
+  median_u: number;
+  avg_u: number;
+  /** Top 3 costs then the rest summed; empty below 4 sessions. */
+  segments: number[];
+} | null {
+  if (sessions.length === 0) return null;
+  const costs = sessions.map((s) => s.cost_equiv_u).sort((a, b) => b - a);
+  const total = costs.reduce((sum, c) => sum + c, 0);
+  const mid = Math.floor(costs.length / 2);
+  const median_u =
+    costs.length % 2 === 1 ? (costs[mid] ?? 0) : ((costs[mid - 1] ?? 0) + (costs[mid] ?? 0)) / 2;
+  const hasStrip = costs.length >= 4 && total > 0;
+  const top3 = costs.slice(0, 3);
+  const top3Sum = top3.reduce((sum, c) => sum + c, 0);
+  return {
+    top3Share: hasStrip ? top3Sum / total : null,
+    median_u,
+    avg_u: total / costs.length,
+    segments: hasStrip ? [...top3, total - top3Sum] : [],
+  };
 }
+
+function fmtModel(m: string): string {
+  const stripped = m.replace("claude-", "");
+  return stripped.charAt(0).toUpperCase() + stripped.slice(1);
+}
+
+function fmtTokensCompact(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(Math.round(value));
+}
+
+function fmtPct1(fraction: number): string {
+  if (fraction > 0 && fraction < 0.001) return "<0.1%";
+  return `${(fraction * 100).toFixed(1)}%`;
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding (unchanged behaviour — first-run + scan status)
+// ---------------------------------------------------------------------------
 
 function ScanStatus({ status }: { status: DaemonStatus }) {
   if (status.scan_state === "failed") {
@@ -173,8 +266,6 @@ function FirstRunWelcome({
   ];
   const completeCount = steps.filter((step) => step.complete).length;
 
-  // Activation items surface only while their feature is inactive. Each carries
-  // one specific sentence and a deep link to the Settings panel that turns it on.
   const activationItems = [
     {
       key: "calibrate",
@@ -245,213 +336,1040 @@ function FirstRunWelcome({
 }
 
 // ---------------------------------------------------------------------------
-// Formatters
+// §3 — KPI strip
 // ---------------------------------------------------------------------------
 
-function fmtUsd(u: number): string {
-  const usd = u / 1_000_000;
-  return `$${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** OV-12 Q6: dotted day-boundary line, shared by the sparkline and Spend by day. */
+function DayDivider({ x, y1, y2 }: { x: number; y1: number; y2: number }) {
+  return (
+    <line
+      x1={x.toFixed(1)}
+      y1={y1}
+      x2={x.toFixed(1)}
+      y2={y2}
+      stroke="var(--muted)"
+      strokeOpacity={0.35}
+      strokeDasharray="2 3"
+      vectorEffect="non-scaling-stroke"
+    />
+  );
 }
 
-function fmtModel(m: string): string {
-  // "claude-opus-5" → "Opus 5", "claude-sonnet-5" → "Sonnet 5"
-  const stripped = m.replace("claude-", "");
-  return stripped.charAt(0).toUpperCase() + stripped.slice(1);
-}
-
-function fmtTokensCompact(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(Math.round(value));
-}
-
-// ---------------------------------------------------------------------------
-// Sub-sections (inlined, tightly coupled to GlobalOverview shape)
-// ---------------------------------------------------------------------------
-
-function SpendCard({
-  overview,
-  preset,
-  trends,
-  priorTrends,
+/** Small daily sparkline: current window solid --cyan, prior dashed --muted. No endpoint labels. */
+function Sparkline({
+  current,
+  prior,
+  dayDividers = false,
 }: {
-  overview: GlobalOverview;
-  preset: Preset;
-  trends: TrendData | null;
-  priorTrends: TrendData | null;
+  current: number[];
+  prior: number[];
+  dayDividers?: boolean;
 }) {
-  const currentCost =
-    trends?.buckets.reduce((total, bucket) => total + bucket.cost_equiv_u, 0) ?? null;
-  const priorCost =
-    priorTrends?.buckets.reduce((total, bucket) => total + bucket.cost_equiv_u, 0) ?? null;
+  const W = 200;
+  const H = 34;
+  const all = [...current, ...prior];
+  const max = Math.max(1, ...all);
+  const toPoints = (vals: number[]): string => {
+    if (vals.length === 0) return "";
+    const step = vals.length === 1 ? 0 : W / (vals.length - 1);
+    return vals
+      .map((v, i) => `${(i * step).toFixed(1)},${(H - (v / max) * (H - 4) - 2).toFixed(1)}`)
+      .join(" ");
+  };
+  const step = current.length > 1 ? W / (current.length - 1) : 0;
   return (
-    <div className="kpi kpi-secondary card">
-      <div className="kpi-label-row">
-        <div className="kpi-label">{preset.toUpperCase()} SPEND-EQUIV</div>
-        <DeltaBadge delta={windowDelta(currentCost, priorCost)} />
-      </div>
-      <div className="kpi-value">{fmtUsd(overview.cost_equiv_u)}</div>
-      <TrendSparkline
-        values={trends?.buckets.map((bucket) => bucket.cost_equiv_u) ?? []}
-        label={`${preset} spend trend`}
-      />
-      <div className="kpi-subval">
-        {overview.turns.toLocaleString()} in-window turns · {overview.turns_total.toLocaleString()}{" "}
-        total
-      </div>
-      {overview.unpriced_turns > 0 && (
-        <div className="kpi-subval" style={{ color: "var(--amber)" }}>
-          ⚠ {overview.unpriced_turns} unpriced turns
-        </div>
-      )}
-      <div className="chips">
-        <Chip kind="LIST_EQUIV" />
-      </div>
-    </div>
-  );
-}
-
-function ModelMixFootnote({ rows }: { rows: ModelMixRow[] }) {
-  const total = rows.reduce((s, r) => s + r.turns, 0);
-  if (total === 0 || rows.length === 0) return null;
-  return (
-    <p className="kpi-fn" style={{ marginTop: 4 }}>
-      Model mix:{" "}
-      {rows.map((r) => `${fmtModel(r.model)} ${((r.turns / total) * 100).toFixed(1)}%`).join(" · ")}{" "}
-      · <Chip kind="EXACT" label="EXACT" />
-    </p>
-  );
-}
-
-function ContextPerTurnSection({ rows }: { rows: GlobalOverview["context_per_turn"] }) {
-  return (
-    <div
-      className="card"
-      data-testid="context-per-turn-section"
-      style={{ padding: "16px 18px", marginBottom: 13 }}
+    <svg
+      width="100%"
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+      style={{ margin: "6px 0 2px" }}
     >
-      <div className="section-head">
-        <h2>Context / Turn</h2>
-        <div className="chips">
-          <Chip kind="OBS_PROXY" />
-        </div>
-      </div>
+      {dayDividers &&
+        step > 0 &&
+        current
+          .slice(1)
+          .map((_, i) => (i + 0.5) * step)
+          .map((x) => <DayDivider key={x} x={x} y1={0} y2={H} />)}
+      {prior.length > 0 && (
+        <polyline
+          points={toPoints(prior)}
+          fill="none"
+          stroke="var(--muted)"
+          strokeWidth={1.5}
+          strokeDasharray="3 3"
+        />
+      )}
+      {current.length > 0 && (
+        <polyline points={toPoints(current)} fill="none" stroke="var(--cyan)" strokeWidth={2} />
+      )}
+    </svg>
+  );
+}
 
-      {rows.length === 0 ? (
-        <div className="banner banner-info">
-          <span>No context-per-turn data in this window.</span>
-        </div>
-      ) : (
+type SpendUnit = "usd" | "tokens";
+
+/** "≈ $1,285" or "≈ 642.5M tokens" for a µUSD max. */
+function fmtMax(maxU: number, unit: SpendUnit): string {
+  return unit === "usd"
+    ? `≈ $${Math.round(maxU / 1_000_000).toLocaleString("en-US")}`
+    : `≈ ${fmtTokensCompact(maxU / REF_PRICE_U_PER_TOKEN)} tokens`;
+}
+
+/** Local "Thu 11:00 PM". */
+function fmtReset(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtPct(pct: number): string {
+  return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
+}
+
+/** One per-model row value, by the same state rules as the all-models line. */
+function perModelValue(
+  m: { state: WeeklyMaxState; usedPct: number; impliedMaxSpendU: number | null },
+  unit: SpendUnit,
+) {
+  if (m.state === "too-early") return <>Too early ({fmtPct(m.usedPct)})</>;
+  if (m.state === "unavailable" || m.impliedMaxSpendU === null) return <>Unavailable</>;
+  return (
+    <>
+      {fmtMax(m.impliedMaxSpendU, unit)} · {fmtPct(m.usedPct)}
+      {m.state === "low-confidence" && (
         <>
-          <div
-            data-testid="context-per-turn-grid"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-              gap: 14,
-            }}
-          >
-            {rows.map((row, index) => {
-              const model = fmtModel(row.model);
-              const ratio =
-                row.avg_context_per_turn > 0
-                  ? (row.avg_output_per_turn / row.avg_context_per_turn) * 100
-                  : 0;
-              const fill = Math.max(0, Math.min(ratio, 100));
-
-              return (
-                <div
-                  key={row.model}
-                  data-testid="context-per-turn-cell"
-                  style={{
-                    background: "var(--panel2)",
-                    border: "1px solid var(--line)",
-                    borderRadius: 10,
-                    padding: "12px 14px",
-                    minWidth: 0,
-                  }}
-                >
-                  <div
-                    style={{
-                      color: "var(--soft)",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      marginBottom: 6,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        display: "inline-block",
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: seriesPalette[index % seriesPalette.length],
-                        marginRight: 6,
-                      }}
-                    />
-                    {model}
-                  </div>
-                  <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em" }}>
-                    {fmtTokensCompact(row.avg_context_per_turn)}
-                    <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: 4 }}>ctx</span>
-                  </div>
-                  <div style={{ fontSize: 12.5, color: "var(--soft)", margin: "2px 0 8px" }}>
-                    {fmtTokensCompact(row.avg_output_per_turn)} out
-                  </div>
-                  <div
-                    role="progressbar"
-                    tabIndex={0}
-                    aria-label={`Output is ${ratio.toFixed(1)}% of context for ${model}`}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={fill}
-                    style={{
-                      height: 10,
-                      borderRadius: 5,
-                      background: "rgba(132,146,166,.18)",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      aria-hidden="true"
-                      style={{
-                        width: `${fill}%`,
-                        minWidth: fill > 0 ? 3 : 0,
-                        height: "100%",
-                        background: seriesPalette[index % seriesPalette.length],
-                        borderRadius: "5px 0 0 5px",
-                      }}
-                    />
-                  </div>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 5 }}>
-                    output = {ratio.toFixed(1)}% of context
-                  </div>
-                  <div className="chips" style={{ marginTop: 6 }}>
-                    <Chip kind="OBS_PROXY" />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <p
-            style={{
-              margin: "12px 0 0",
-              fontSize: 12.5,
-              color: "var(--soft)",
-              borderLeft: "3px solid var(--teal)",
-              paddingLeft: 10,
-            }}
-          >
-            Context : Output ratio — if output is a small fraction of context, you're paying mostly
-            to re-read history, not to generate. Consider more frequent /clear.
-          </p>
+          {" "}
+          <span className="chip est">Low confidence</span>
         </>
       )}
+    </>
+  );
+}
+
+/** OV-12: "Max spend this week" line under the spend card; nothing when unavailable/absent. */
+function WeeklyMaxLine({
+  max,
+  asOf,
+  unit,
+}: {
+  max: WeeklyMax | undefined;
+  asOf: string | null;
+  unit: SpendUnit;
+}) {
+  if (max === undefined || max.state === "unavailable" || max.usedPct === null) return null;
+  const sub = `${fmtPct(max.usedPct)} used · resets ${max.resetsAt === null ? "" : fmtReset(max.resetsAt)}`;
+  const perModel = max.perModel ?? [];
+  return (
+    <div className="wmax" data-testid="weekly-max">
+      {max.state === "too-early" || max.impliedMaxSpendU === null ? (
+        <div className="wmax-early">Too early in the week to estimate a max</div>
+      ) : (
+        <div className="wmax-v">
+          <span>
+            Max spend this week <b>{fmtMax(max.impliedMaxSpendU, unit)}</b>
+          </span>
+          {max.state === "low-confidence" && <span className="chip est">Low confidence</span>}
+          {max.stale && asOf !== null && (
+            <span className="chip unv">Stale · as of {asOfTime(asOf)}</span>
+          )}
+          <InfoTip label="About max spend this week" metricId="spend.weekly_max" />
+        </div>
+      )}
+      <div className="wmax-s">{sub}</div>
+      <VsLastWeek max={max} unit={unit} />
+      <PastWeeks max={max} unit={unit} />
+      {perModel.length > 0 && (
+        <details data-testid="weekly-max-per-model">
+          <summary>Show per-model max ({perModel.length})</summary>
+          <div className="pm-list">
+            {perModel.map((m) => (
+              <div className="pm-row" key={m.id}>
+                <span className="k">Weekly · {m.label}</span>
+                <span>{perModelValue(m, unit)}</span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
+  );
+}
+
+// OV-12 U5: past limit weeks under the max line. The server sends weeks with a max (newest first);
+// the card lays them on 11 fixed past-week slots so gaps show.
+const WEEK_MS = 7 * 864e5;
+const HOUR_MS = 36e5;
+const PAST_SLOTS = 11;
+const SOURCE_LABEL: Record<string, string> = {
+  api: "Live",
+  "api-backup": "Live",
+  statusline: "Status line",
+  "calibration-backup": "Calibration",
+  "limit-hit": "Limit hit",
+};
+
+/** "$1,156" or "578.0M": a history value, no "≈" or unit word. */
+function fmtVal(maxU: number, unit: SpendUnit): string {
+  return unit === "usd"
+    ? `$${Math.round(maxU / 1_000_000).toLocaleString("en-US")}`
+    : fmtTokensCompact(maxU / REF_PRICE_U_PER_TOKEN);
+}
+
+/** Local "Thu Sep 24" for a week's reset. */
+function fmtWeekTo(resetMs: number): string {
+  const d = new Date(resetMs);
+  return `${d.toLocaleDateString("en-US", { weekday: "short" })} ${fmtDay(resetMs)}`;
+}
+function fmtDay(ms: number): string {
+  return new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+const roundHour = (iso: string) => Math.round(Date.parse(iso) / HOUR_MS) * HOUR_MS;
+
+/**
+ * The 11 past-week slots before this week, newest first. Each week goes to its nearest slot, so
+ * weeks still line up if the reset time moved; history is newest first, so the newest week wins a slot.
+ */
+function pastSlots(max: WeeklyMax): { resetMs: number; week?: WeeklyHistoryWeek }[] {
+  const cur = roundHour(max.resetsAt ?? "");
+  const bySlot = new Map<number, WeeklyHistoryWeek>();
+  for (const h of max.history ?? []) {
+    const i = Math.round((cur - roundHour(h.resetsAt)) / WEEK_MS) - 1;
+    if (i >= 0 && i < PAST_SLOTS && !bySlot.has(i)) bySlot.set(i, h);
+  }
+  return Array.from({ length: PAST_SLOTS }, (_, i) => {
+    const week = bySlot.get(i);
+    return week === undefined
+      ? { resetMs: cur - (i + 1) * WEEK_MS }
+      : { resetMs: roundHour(week.resetsAt), week };
+  });
+}
+
+/** "↑12% vs last week ($1,156)" / "vs last week: no clear change"; hidden when too early. */
+function VsLastWeek({ max, unit }: { max: WeeklyMax; unit: SpendUnit }) {
+  if (max.state === "too-early") return null;
+  const v = max.vsLastWeek;
+  let text: ReactNode;
+  if ((max.history ?? []).length === 0) text = "vs last week: no past weeks yet";
+  else if (v === undefined) text = "vs last week: compare once this week passes 10%";
+  else {
+    const prev = roundHour(max.resetsAt ?? "") - WEEK_MS;
+    const ref = roundHour(v.resetsAt);
+    const label = ref === prev ? "last week" : `week to ${fmtDay(ref)}`;
+    text = v.clear ? (
+      <>
+        <b>
+          {v.pct > 0 ? "↑" : "↓"}
+          {Math.round(Math.abs(v.pct))}%
+        </b>{" "}
+        vs {label} ({fmtVal(v.impliedMaxSpendU, unit)})
+      </>
+    ) : (
+      `vs ${label}: no clear change`
+    );
+  }
+  return (
+    <div className="wcmp" data-testid="weekly-max-vs">
+      {text}
+    </div>
+  );
+}
+
+/** 12-slot dot strip: 11 past weeks + this week (hollow, once ≥ 10%), shaded noise band. */
+function WeeklyTrend({ max, unit }: { max: WeeklyMax; unit: SpendUnit }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const slots = pastSlots(max).reverse(); // oldest first
+  const thisWeek = max.state === "ok" ? max.impliedMaxSpendU : null;
+  const pts = [...slots.map((s) => s.week?.impliedMaxSpendU ?? null), thisWeek];
+  let first = -1;
+  let latest = -1;
+  slots.forEach((s, i) => {
+    if (s.week === undefined) return;
+    if (first < 0) first = i;
+    latest = i;
+  });
+  if (latest < 0) return null;
+  const ref = slots[latest]?.week?.impliedMaxSpendU as number;
+  const noise = (max.noisePct ?? 3) / 100;
+  const vals = pts.filter((p): p is number => p !== null);
+  const lo = Math.min(...vals, ref * (1 - noise));
+  const hi = Math.max(...vals, ref * (1 + noise));
+  const d0 = lo - (hi - lo) * 0.1;
+  const d1 = hi + (hi - lo) * 0.1;
+  const x = (i: number) => 10 + 20 * i;
+  const y = (v: number) => 56 - ((v - d0) / (d1 - d0)) * 48;
+  const hovered = hover === null ? null : { i: hover, slot: slots[hover], v: pts[hover] };
+  const tip =
+    hovered === null
+      ? null
+      : hovered.i === PAST_SLOTS
+        ? thisWeek === null
+          ? "This week · under 10% so far"
+          : `This week so far · ${fmtVal(thisWeek, unit)} · ${fmtPct(max.usedPct ?? 0)} used`
+        : hovered.slot?.week !== undefined
+          ? `Week to ${fmtWeekTo(hovered.slot.resetMs)} · ${fmtVal(hovered.slot.week.impliedMaxSpendU, unit)} · read at ${fmtPct(hovered.slot.week.usedPctAtSample)} · ${SOURCE_LABEL[hovered.slot.week.source] ?? hovered.slot.week.source}`
+          : `Week to ${fmtWeekTo(hovered.slot?.resetMs ?? 0)} · no reading ≥ 10%`;
+  const label = slots
+    .filter((s) => s.week !== undefined)
+    .map((s) => `week to ${fmtDay(s.resetMs)} ${fmtVal(s.week?.impliedMaxSpendU ?? 0, unit)}`)
+    .join("; ");
+  return (
+    <div className="wtrend" data-testid="weekly-max-trend">
+      <div className="wtrend-h">
+        <span>Weekly max · 12 weeks</span>
+        <span className="wtrend-r">
+          {fmtVal(d0, unit)} – {fmtVal(d1, unit)}
+        </span>
+      </div>
+      <svg viewBox="0 0 240 64" role="img" aria-label={`Weekly max by week: ${label}`}>
+        <rect
+          x={0}
+          y={y(ref * (1 + noise))}
+          width={240}
+          height={y(ref * (1 - noise)) - y(ref * (1 + noise))}
+          fill="var(--tint-cyan)"
+        />
+        <line x1={0} y1={60} x2={240} y2={60} stroke="var(--line)" />
+        {pts.map((_, i) => (
+          <line
+            // biome-ignore lint/suspicious/noArrayIndexKey: fixed 12-slot axis
+            key={`t${i}`}
+            x1={x(i)}
+            y1={58}
+            x2={x(i)}
+            y2={62}
+            stroke="var(--muted)"
+            strokeOpacity={0.45}
+          />
+        ))}
+        {slots.map((s, i) =>
+          s.week === undefined && i > first ? (
+            <line
+              key={`g${s.resetMs}`}
+              x1={x(i)}
+              y1={8}
+              x2={x(i)}
+              y2={56}
+              stroke="var(--muted)"
+              strokeOpacity={0.6}
+              strokeDasharray="2 3"
+            />
+          ) : null,
+        )}
+        {pts.slice(0, -1).map((p, i) => {
+          const q = pts[i + 1];
+          if (p === null || q === null || q === undefined) return null;
+          return (
+            <line
+              // biome-ignore lint/suspicious/noArrayIndexKey: fixed 12-slot axis
+              key={`s${i}`}
+              x1={x(i)}
+              y1={y(p)}
+              x2={x(i + 1)}
+              y2={y(q)}
+              stroke="var(--cyan)"
+              strokeWidth={2}
+              strokeDasharray={i + 1 === PAST_SLOTS ? "3 3" : undefined}
+            />
+          );
+        })}
+        {pts.map((p, i) =>
+          p === null ? null : (
+            <circle
+              // biome-ignore lint/suspicious/noArrayIndexKey: fixed 12-slot axis
+              key={`p${i}`}
+              cx={x(i)}
+              cy={y(p)}
+              r={4}
+              fill={i === PAST_SLOTS ? "var(--inset)" : "var(--cyan)"}
+              stroke={
+                i === PAST_SLOTS ? "var(--cyan)" : hover === i ? "var(--text)" : "var(--inset)"
+              }
+              strokeWidth={2}
+            />
+          ),
+        )}
+        <text x={x(latest)} y={y(ref) - 8} textAnchor="middle" fontSize={10} fill="var(--text)">
+          {fmtVal(ref, unit)}
+        </text>
+        {pts.map((_, i) => (
+          <rect
+            // biome-ignore lint/suspicious/noArrayIndexKey: fixed 12-slot axis
+            key={`h${i}`}
+            x={x(i) - 10}
+            y={0}
+            width={20}
+            height={64}
+            fill="transparent"
+            onMouseEnter={() => setHover(i)}
+            onMouseLeave={() => setHover(null)}
+          />
+        ))}
+      </svg>
+      {tip !== null && hovered !== null && (
+        <output className={`wtrend-tip${hovered.i > 5 ? " right" : ""}`}>{tip}</output>
+      )}
+      <div className="wtrend-x">
+        <span>{fmtDay(slots[0]?.resetMs ?? 0)}</span>
+        <span>This week</span>
+      </div>
+      <div className="wtrend-k">
+        Shaded = noise (±{Math.round(noise * 100)}%) around the latest week · dashed = no reading
+      </div>
+    </div>
+  );
+}
+
+/** "Show past weeks (N)": the trend strip, then one row per week down to the oldest with a max. */
+function PastWeeks({ max, unit }: { max: WeeklyMax; unit: SpendUnit }) {
+  const [all, setAll] = useState(false);
+  const slots = pastSlots(max);
+  let oldest = -1;
+  slots.forEach((s, i) => {
+    if (s.week !== undefined) oldest = i;
+  });
+  if (oldest < 0) {
+    return max.state === "too-early" ? null : (
+      <div className="wmax-empty">Past weeks appear once a week's reading reaches 10%.</div>
+    );
+  }
+  const rows = slots.slice(0, oldest + 1);
+  return (
+    <details data-testid="weekly-max-history">
+      <summary>Show past weeks ({rows.length})</summary>
+      <div className="pm-list">
+        <WeeklyTrend max={max} unit={unit} />
+        {(all ? rows : rows.slice(0, 3)).map((s) => (
+          <div key={s.resetMs} className="pm-week">
+            <div className="pm-row">
+              <span className="k">Week to {fmtWeekTo(s.resetMs)}</span>
+              {s.week === undefined ? (
+                <span className="pm-gap">No reading ≥ 10%</span>
+              ) : (
+                <span>
+                  ≈ <b>{fmtVal(s.week.impliedMaxSpendU, unit)}</b> ·{" "}
+                  {fmtPct(s.week.usedPctAtSample)}{" "}
+                  <span className={`chip${s.week.source === "limit-hit" ? " unv" : ""}`}>
+                    {SOURCE_LABEL[s.week.source] ?? s.week.source}
+                  </span>
+                </span>
+              )}
+            </div>
+            {s.week?.spread !== undefined && (
+              <div className="pm-sub">
+                {s.week.spread.readings} readings, {Math.round(s.week.spread.pct)}% apart (
+                {fmtVal(s.week.spread.minSpendU, unit)} – {fmtVal(s.week.spread.maxSpendU, unit)})
+              </div>
+            )}
+          </div>
+        ))}
+        {rows.length > 3 && (
+          <button type="button" className="btn-ghost pm-more" onClick={() => setAll(!all)}>
+            {all ? "Show fewer" : `Show all ${rows.length} weeks`}
+          </button>
+        )}
+        <div className="pm-note">
+          Changes under {Math.round(max.noisePct ?? 3)}% read "no clear change" (the spread between
+          readings in one week, at least 3%).
+        </div>
+      </div>
+    </details>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// §6 — Spend by day (1 chart, 3 tabs)
+// ---------------------------------------------------------------------------
+
+type SpendTab = "spend" | "cap" | "writes";
+
+function bucketShort(bucket: string): string {
+  // "2026-09-13" -> "09-13"; leave week/month keys as-is.
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(bucket);
+  return m ? `${m[1]}-${m[2]}` : bucket;
+}
+
+function SpendByDayCard({
+  trend,
+  cacheWrite,
+  workspaceLabels,
+  tab,
+  setTab,
+  preset,
+  now,
+  d8SavingsU,
+}: {
+  trend: TrendData | null;
+  cacheWrite: CacheWriteTrend | null;
+  workspaceLabels: Map<string, string>;
+  tab: SpendTab;
+  setTab: (tab: SpendTab) => void;
+  preset: Preset;
+  /** Server clock of the page response; null leaves days unfilled. */
+  now: Date | null;
+  /** Largest active D8 (cache-miss) fix, µ$/wk; shown on the Cache writes tab. */
+  d8SavingsU: number | null;
+}) {
+  // OV-12 Q7: a day with no turns is a zero bar, not a missing one (all 3 tabs key off this).
+  const rawDays = trend?.buckets.map((b) => ({ bucket: b.bucket })) ?? [];
+  const buckets = (
+    now === null ? rawDays : fillDailyBuckets(rawDays, preset, now, (bucket) => ({ bucket }))
+  ).map((b) => b.bucket);
+  const chip =
+    tab === "spend" ? (
+      <span className="chip est">Estimate</span>
+    ) : tab === "cap" ? (
+      <span className="chip unv">Unverified</span>
+    ) : (
+      <span className="chip exact">Exact · raw tokens</span>
+    );
+
+  // Build per-bucket stacked segments.
+  const wsByBucket = new Map<string, { id: string; value: number }[]>();
+  if (trend) {
+    for (const row of trend.by_workspace) {
+      const list = wsByBucket.get(row.bucket) ?? [];
+      list.push({ id: row.workspace_id, value: row.cost_equiv_u / 1_000_000 });
+      wsByBucket.set(row.bucket, list);
+    }
+  }
+  const wsIds = [...new Set(trend?.by_workspace.map((r) => r.workspace_id) ?? [])];
+  const capByBucket = new Map(
+    trend?.cap_weighted.map((r) => [r.bucket, r.cap_weighted_tokens]) ?? [],
+  );
+  const writeByBucket = new Map(
+    cacheWrite?.buckets.map((r) => [r.bucket, r.cache_creation_tokens]) ?? [],
+  );
+
+  const totals = buckets.map((b) => {
+    if (tab === "spend") return (wsByBucket.get(b) ?? []).reduce((s, x) => s + x.value, 0);
+    if (tab === "cap") return capByBucket.get(b) ?? 0;
+    return writeByBucket.get(b) ?? 0;
+  });
+  const max = Math.max(1, ...totals);
+
+  const W = 1000;
+  const H = 180;
+  const padL = 8;
+  const padB = 22;
+  const plotW = W - padL * 2;
+  const plotH = H - padB;
+  const barW = buckets.length > 0 ? (plotW / buckets.length) * 0.7 : 0;
+  const gap = buckets.length > 0 ? plotW / buckets.length : 0;
+  // Over 31 days ("All") the date labels collide; label every k-th day so at most 31 show.
+  const labelEvery = Math.ceil(buckets.length / 31);
+
+  const readingKey =
+    tab === "spend"
+      ? "Bar = one day · color = workspace · ① = a recommendation was applied"
+      : tab === "cap"
+        ? "Bar = one day · cap-weighted tokens that count toward your limit"
+        : "Bar = one day · cache-write tokens (spikes = likely cache misses)";
+
+  return (
+    <section className="sec" id="spend-by-day" aria-labelledby="spend-by-day-title">
+      <div className="sec-h">
+        <h2 id="spend-by-day-title">
+          Spend by day <InfoTip label="About spend by day" metricId="chart.spend_by_day" />
+        </h2>
+        <span className="desc">{chip}</span>
+      </div>
+      <div className="card">
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div className="seg">
+            <button
+              type="button"
+              className={tab === "spend" ? "on" : ""}
+              onClick={() => setTab("spend")}
+            >
+              Spend $
+            </button>
+            <button
+              type="button"
+              className={tab === "cap" ? "on" : ""}
+              onClick={() => setTab("cap")}
+            >
+              Cap-weighted tokens
+            </button>
+            <button
+              type="button"
+              className={tab === "writes" ? "on" : ""}
+              onClick={() => setTab("writes")}
+            >
+              Cache writes
+            </button>
+          </div>
+          <span className="lbl">{readingKey}</span>
+          {tab === "writes" && d8SavingsU !== null && (
+            <span className="chip est">Fix worth up to {fmtUsd0(d8SavingsU / 1_000_000)}/wk</span>
+          )}
+        </div>
+        {buckets.length === 0 ? (
+          <p className="foot">No spend in this window yet.</p>
+        ) : (
+          <div style={{ minHeight: 180, marginTop: 12 }}>
+            <svg
+              viewBox={`0 0 ${W} ${H}`}
+              width="100%"
+              height={H}
+              role="img"
+              aria-label="Spend by day"
+            >
+              <line x1={padL} y1={plotH} x2={W - padL} y2={plotH} stroke="var(--line)" />
+              {(preset === "7d" || preset === "30d") &&
+                buckets
+                  .slice(1)
+                  .map((b, i) => <DayDivider key={b} x={padL + (i + 1) * gap} y1={0} y2={plotH} />)}
+              {buckets.map((b, i) => {
+                const x = padL + i * gap + (gap - barW) / 2;
+                if (tab === "spend") {
+                  const segs = wsByBucket.get(b) ?? [];
+                  let y = plotH;
+                  return (
+                    <g key={b} data-day={b}>
+                      {segs.map((seg) => {
+                        const h = (seg.value / max) * (plotH - 4);
+                        y -= h;
+                        const idx = wsIds.indexOf(seg.id);
+                        return (
+                          <rect
+                            key={seg.id}
+                            x={x}
+                            y={y}
+                            width={barW}
+                            height={Math.max(0, h)}
+                            fill={SERIES[idx % SERIES.length]}
+                          />
+                        );
+                      })}
+                      {i % labelEvery === 0 && (
+                        <text
+                          x={x + barW / 2}
+                          y={H - 6}
+                          textAnchor="middle"
+                          fontSize={11}
+                          fill="var(--muted)"
+                        >
+                          {bucketShort(b)}
+                        </text>
+                      )}
+                    </g>
+                  );
+                }
+                const h = ((totals[i] ?? 0) / max) * (plotH - 4);
+                return (
+                  <g key={b} data-day={b}>
+                    <rect
+                      x={x}
+                      y={plotH - h}
+                      width={barW}
+                      height={Math.max(0, h)}
+                      fill="var(--series-1)"
+                    />
+                    {i % labelEvery === 0 && (
+                      <text
+                        x={x + barW / 2}
+                        y={H - 6}
+                        textAnchor="middle"
+                        fontSize={11}
+                        fill="var(--muted)"
+                      >
+                        {bucketShort(b)}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+              {(trend?.adoption_markers ?? []).map((marker, i) => {
+                const bi = buckets.indexOf(marker.bucket);
+                if (bi === -1) return null;
+                const x = padL + bi * gap + gap / 2;
+                return (
+                  <g key={marker.rec_id}>
+                    <line
+                      x1={x}
+                      y1={6}
+                      x2={x}
+                      y2={plotH}
+                      stroke="var(--amber)"
+                      strokeDasharray="3 3"
+                    />
+                    <circle cx={x} cy={8} r={7} fill="var(--amber)" />
+                    <text
+                      x={x}
+                      y={12}
+                      textAnchor="middle"
+                      fontSize={11}
+                      fontWeight={700}
+                      fill="var(--accent-ink)"
+                    >
+                      {i + 1}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+            {tab === "spend" && wsIds.length > 0 && (
+              <div className="legend">
+                {wsIds.map((id, i) => (
+                  <span key={id}>
+                    <i style={{ background: SERIES[i % SERIES.length] }} />
+                    {workspaceLabels.get(id) ?? id}
+                  </span>
+                ))}
+                {(trend?.adoption_markers ?? []).map((marker, i) => (
+                  <span key={marker.rec_id}>
+                    <i style={{ background: "var(--amber)", borderRadius: "50%" }} />①{i + 1}{" "}
+                    <a href={`#/recommendations?applied=${encodeURIComponent(marker.rec_id)}`}>
+                      {marker.lever} (before/after →)
+                    </a>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// §5 — Where your tokens go
+// ---------------------------------------------------------------------------
+
+type Basis = "raw" | "list" | "cap";
+
+interface TokenTypeRow {
+  key: string;
+  label: string;
+  raw: number;
+  listWeight: number;
+  capWeight: number;
+  capUnverified: boolean;
+}
+
+function buildTokenRows(flavor: FlavorDecomposition): TokenTypeRow[] {
+  const coeff = flavor.coeff_used;
+  const byKey = new Map(flavor.flavors.map((f) => [f.flavor, f]));
+  const order: {
+    key: string;
+    label: string;
+    listWeight: number;
+    capWeight: number;
+    capUnverified: boolean;
+  }[] = [
+    {
+      key: "cache_read",
+      label: "cache read",
+      listWeight: LIST_PRICE_WEIGHTS.cacheRead,
+      capWeight: coeff,
+      capUnverified: true,
+    },
+    {
+      key: "cache_write_5m",
+      label: "cache write (5 min)",
+      listWeight: LIST_PRICE_WEIGHTS.cacheWrite5m,
+      capWeight: 1,
+      capUnverified: true,
+    },
+    {
+      key: "cache_write_1h",
+      label: "cache write (1 hr)",
+      listWeight: LIST_PRICE_WEIGHTS.cacheWrite1h,
+      capWeight: 1,
+      capUnverified: true,
+    },
+    {
+      key: "output",
+      label: "output",
+      listWeight: LIST_PRICE_WEIGHTS.output,
+      capWeight: 1,
+      capUnverified: true,
+    },
+    {
+      key: "fresh_input",
+      label: "fresh input",
+      listWeight: LIST_PRICE_WEIGHTS.input,
+      capWeight: 1,
+      capUnverified: false,
+    },
+  ];
+  return order.map((o) => ({
+    ...o,
+    raw: byKey.get(o.key as FlavorDecomposition["flavors"][number]["flavor"])?.raw_tokens ?? 0,
+  }));
+}
+
+function TokensGoSection({ flavor }: { flavor: FlavorDecomposition | null }) {
+  const [basis, setBasis] = useState<Basis>("raw");
+
+  const chip =
+    basis === "raw" ? (
+      <span className="chip exact">Exact · raw tokens</span>
+    ) : basis === "list" ? (
+      <span className="chip est">Estimate · list price</span>
+    ) : (
+      <span className="chip unv">Unverified · cap-weighted</span>
+    );
+
+  const rows = flavor ? buildTokenRows(flavor) : [];
+  const weightFor = (r: TokenTypeRow): number =>
+    basis === "raw" ? 1 : basis === "list" ? r.listWeight : r.capWeight;
+  const weighted = rows.map((r) => r.raw * weightFor(r));
+  const total = weighted.reduce((s, v) => s + v, 0);
+
+  return (
+    <section className="sec" aria-labelledby="tokens-go-title">
+      <div className="sec-h">
+        <h2 id="tokens-go-title">
+          Where your tokens go{" "}
+          <InfoTip label="About where your tokens go" metricId="chart.tokens_by_type" />
+        </h2>
+        <span className="desc">Same window · one basis toggle for the whole section</span>
+      </div>
+      <div className="card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <div className="seg">
+            <button
+              type="button"
+              className={basis === "raw" ? "on" : ""}
+              onClick={() => setBasis("raw")}
+            >
+              Raw tokens
+            </button>
+            <button
+              type="button"
+              className={basis === "list" ? "on" : ""}
+              onClick={() => setBasis("list")}
+            >
+              List price $
+            </button>
+            <button
+              type="button"
+              className={basis === "cap" ? "on" : ""}
+              onClick={() => setBasis("cap")}
+            >
+              Cap-weighted
+            </button>
+          </div>
+          {chip}
+        </div>
+        {flavor === null || total === 0 ? (
+          <p className="foot">No token activity in this window yet.</p>
+        ) : (
+          <>
+            <div className="stack num" style={{ marginTop: 14 }}>
+              {rows.map((r, i) => {
+                const share = (r.raw * weightFor(r)) / total;
+                if (share <= 0) return null;
+                return (
+                  <div
+                    key={r.key}
+                    style={{ flex: share * 100, background: SERIES[i % SERIES.length] }}
+                  />
+                );
+              })}
+            </div>
+            <div className="legend num">
+              {rows.map((r, i) => {
+                const share = (r.raw * weightFor(r)) / total;
+                return (
+                  <span key={r.key}>
+                    <i style={{ background: SERIES[i % SERIES.length] }} />
+                    {r.label} {(share * 100).toFixed(1)}%
+                  </span>
+                );
+              })}
+            </div>
+            <div className="table-wrap">
+              <table className="num" style={{ marginTop: 14 }}>
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Raw tokens</th>
+                    <th>
+                      List-price weight{" "}
+                      <InfoTip label="About list-price weights" metricId="weight.listprice" />
+                    </th>
+                    <th>
+                      Cap weight <InfoTip label="About cap weights" metricId="weight.cap" />
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.key}>
+                      <td>{r.label}</td>
+                      <td>{fmtTokensCompact(r.raw)}</td>
+                      <td>{r.listWeight}×</td>
+                      <td>
+                        {r.capWeight}×{" "}
+                        {r.capUnverified && <span className="chip unv">unverified</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="foot">
+              Weights stated per basis so a "1×" is never silently wrong. List-price weights are
+              published API multipliers; the Fable/Mythos 5.1 family caches reads at 0.025× (not
+              0.1×).
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// §4 — Context per turn by model (table)
+// ---------------------------------------------------------------------------
+
+function ContextPerTurnTable({
+  rows,
+  totalUsd,
+}: {
+  rows: ContextPerTurnRow[];
+  totalUsd: number;
+}) {
+  return (
+    <section
+      className="sec"
+      aria-labelledby="context-per-turn-title"
+      data-testid="context-per-turn-section"
+    >
+      <div className="sec-h">
+        <h2 id="context-per-turn-title">
+          Context per turn by model{" "}
+          <InfoTip label="About context per turn" metricId="table.context_per_turn" />
+        </h2>
+        <span className="desc">
+          <span className="chip est">Estimate</span>
+        </span>
+      </div>
+      <div className="card">
+        {rows.length === 0 ? (
+          <p className="foot">No context-per-turn data in this window.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="num">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Avg context</th>
+                  <th>Avg output</th>
+                  <th>Output share</th>
+                  <th>Share of spend</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const outShare =
+                    row.avg_context_per_turn > 0
+                      ? row.avg_output_per_turn / row.avg_context_per_turn
+                      : 0;
+                  const perModelUsd = (row.usd_per_turn ?? 0) * row.n;
+                  const spendShare = totalUsd > 0 ? perModelUsd / totalUsd : 0;
+                  return (
+                    <tr key={row.model}>
+                      <td>
+                        <i className="dot" style={{ background: SERIES[i % SERIES.length] }} />
+                        {fmtModel(row.model)}
+                      </td>
+                      <td>{fmtTokensCompact(row.avg_context_per_turn)}</td>
+                      <td>{fmtTokensCompact(row.avg_output_per_turn)}</td>
+                      <td className={outShare < 0.01 ? "bad" : undefined}>
+                        {fmtPct1(outShare)}
+                        <small className="metric-operands">
+                          {fmtTokensCompact(row.avg_output_per_turn)} output /{" "}
+                          {fmtTokensCompact(row.avg_context_per_turn)} context
+                        </small>
+                      </td>
+                      <td>{fmtPct1(spendShare)}</td>
+                      <td>
+                        <a href={`#/sessions?model=${encodeURIComponent(row.model)}`}>sessions →</a>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="foot">
+          Output share below 1% means each turn is mostly re-reading history — consider{" "}
+          <code>/clear</code> between tasks.
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// §8 — Data notes
+// ---------------------------------------------------------------------------
+
+function DataNotes({ flavor }: { flavor: FlavorDecomposition | null }) {
+  const readShare = flavor?.cache_read_share ?? null;
+  const reads = flavor?.cache_read_tokens ?? 0;
+  const writes = flavor?.cache_creation_tokens ?? 0;
+  const ratio = writes > 0 ? reads / writes : null;
+
+  return (
+    <section className="sec" id="data-notes" aria-labelledby="data-notes-title">
+      <div className="sec-h">
+        <h2 id="data-notes-title">Data notes</h2>
+        <span className="desc">
+          Every caveat once, here — cards link to it instead of repeating it
+        </span>
+      </div>
+      <div className="card" style={{ fontSize: "var(--font-sm)", color: "var(--soft)" }}>
+        <div className="notice warn" style={{ marginBottom: 10 }}>
+          ⚠{" "}
+          <span>
+            <b>Cache TTL unknown for this window.</b> 5-minute vs 1-hour caching changes both the
+            list-price weights and the cache-miss threshold. Run <code>/usage</code> in Claude Code
+            once to confirm; the setting is read on the next ingest.
+          </span>
+        </div>
+        <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+          <li>
+            <b>Spend-equivalent</b> = tokens × API list price. A comparison figure, not billing
+            data.
+          </li>
+          <li>
+            <b>Cap weight</b> = share of the subscription limit per token type. 0.1× for cache reads
+            is unverified; calibrate it against the Usage limits card&apos;s estimate-vs-actual
+            delta.
+          </li>
+          <li>
+            <b>Cache-read share</b>{" "}
+            {readShare === null
+              ? "unavailable for this window."
+              : `${(readShare * 100).toFixed(1)}% (${fmtTokensCompact(reads)} reads : ${fmtTokensCompact(writes)} writes${ratio !== null ? ` = ${ratio.toFixed(1)}×` : ""}). Diagnostic; a high share is normal for long sessions and is not by itself good or bad.`}
+          </li>
+          <li>
+            <b>Provisional turns</b> (sessions still open) are excluded from all window totals and
+            included in the live 5-hour burn.
+          </li>
+        </ul>
+      </div>
+    </section>
   );
 }
 
@@ -462,339 +1380,302 @@ function ContextPerTurnSection({ rows }: { rows: GlobalOverview["context_per_tur
 export default function OverviewPage({
   onSelectSession,
 }: { onSelectSession?: (sessionId: string) => void }) {
-  const [isCaveatVisible, setIsCaveatVisible] = useState(() => {
-    try {
-      return (
-        typeof window === "undefined" || window.localStorage.getItem("aw-caveat-dismissed") !== "1"
-      );
-    } catch {
-      return true;
-    }
-  });
   const [preset, setPreset] = useState<Preset>("7d");
-  const [observationWorkspaceId, setObservationWorkspaceId] = useState<string | null>(null);
-  // Keep the range that produced each response alongside the response. A
-  // preset change can occur before the first request resolves; the prior
-  // range must not briefly render as the newly selected range.
-  const [overviewDataPreset, setOverviewDataPreset] = useState<Preset>(preset);
-  const [workspacesDataPreset, setWorkspacesDataPreset] = useState<Preset>(preset);
-  const [overviewState, setOverviewState] = useState<LoadState<ApiResponse<GlobalOverview>>>(() =>
-    cachedLoadState("/api/overview", { preset: overviewDataPreset }),
-  );
-  const [workspacesState, setWorkspacesState] = useState<
-    LoadState<ApiResponse<PagedList<WorkspaceSummary>>>
-  >(() => cachedLoadState("/api/workspaces", { preset: workspacesDataPreset }));
-  const [liveState, setLiveState] = useState<LoadState<ApiResponse<PagedList<LiveSessionRow>>>>(
-    () => cachedLoadState("/api/live"),
-  );
-  const [statusState, setStatusState] = useState<OnboardingStatusState>({ status: "pending" });
   const [showInitialSkeletons, setShowInitialSkeletons] = useState(false);
-  const [liveLastFetchedAt, setLiveLastFetchedAt] = useState(() =>
-    getLastFetchTimestamp("/api/live"),
-  );
-  // Burn status — live 5h/7d utilization (non-fatal on failure, non-blocking)
-  const [liveRefreshError, setLiveRefreshError] = useState<string | null>(null);
-  const [burnRefreshError, setBurnRefreshError] = useState(false);
-  const [burnStatus, setBurnStatus] = useState<BurnStatus | null>(null);
-  const [burnStatusLoading, setBurnStatusLoading] = useState(true);
-  // Hook config — installed state (non-fatal on failure)
-  const [hookConfig, setHookConfig] = useState<HookConfigResponse | null>(null);
-  const [hookConfigLoading, setHookConfigLoading] = useState(true);
-  // GitHub token status — outcomes-sync activation signal (non-fatal on failure)
   const [githubTokenConfigured, setGithubTokenConfigured] = useState(false);
-  // Hot sessions top-3 (non-fatal on failure)
-  const [hotSessions, setHotSessions] = useState<HotSessionRow[]>([]);
-  const [hotSessionsLoading, setHotSessionsLoading] = useState(true);
-  // Top waste source per workspace (additive; feeds WorkspaceTable's rec column).
-  // Failure is non-fatal — the column falls back to "—".
-  const [topRecByWorkspace, setTopRecByWorkspace] = useState<Map<string, TopRec>>(new Map());
-  // Spend-over-time trends (additive; non-fatal on failure)
-  const [trendsState, setTrendsState] = useState<
-    | { status: "loading" }
-    | { status: "error"; message: string }
-    | { status: "ok"; value: ApiResponse<TrendData> }
-  >({ status: "loading" });
-  const [priorTrendsState, setPriorTrendsState] = useState<
-    | { status: "loading" }
-    | { status: "error"; message: string }
-    | { status: "ok"; value: ApiResponse<TrendData> }
-  >({ status: "loading" });
-  const [topRecommendation, setTopRecommendation] = useState<RecommendationCard | null>(null);
-  const [hasRecommendation, setHasRecommendation] = useState<boolean | null>(null);
-  // Spend-Viz-v2 — separate LoadState per surface, all non-fatal
-  const [flavorState, setFlavorState] = useState<LoadState<ApiResponse<FlavorDecompositionData>>>({
-    status: "loading",
-  });
-  const [cacheEffState, setCacheEffState] = useState<LoadState<ApiResponse<CacheEfficiency>>>({
-    status: "loading",
-  });
-  const [cacheWriteState, setCacheWriteState] = useState<LoadState<ApiResponse<CacheWriteTrend>>>({
-    status: "loading",
-  });
+  const [usageSource, setUsageSource] = useState<
+    "api" | "cli" | "statusline" | "unavailable" | null
+  >(null);
+  const [calibrationDriftPoints, setCalibrationDriftPoints] = useState<number | null>(null);
+  const [limits, setLimits] = useState<{ weeklyMax: WeeklyMax | undefined; asOf: string } | null>(
+    null,
+  );
+  const [spendUnit, setSpendUnit] = useState<SpendUnit>("usd");
+  const [spendTab, setSpendTab] = useState<SpendTab>(() =>
+    new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("tab") === "writes"
+      ? "writes"
+      : "spend",
+  );
 
   useEffect(() => {
     const id = window.setTimeout(() => setShowInitialSkeletons(true), SKELETON_DELAY_MS);
     return () => window.clearTimeout(id);
   }, []);
 
-  // Fetch overview + workspaces when preset changes
-  const loadMain = useCallback((p: Preset) => {
-    const filter: WindowFilter = { preset: p };
-    retainDataWhileRefreshing(setOverviewState);
-    retainDataWhileRefreshing(setWorkspacesState);
+  // One page request (P1-U4). It refetches only when the status poller sees one of its data
+  // scopes move (P2-U5).
+  const query = useQuery(
+    {
+      queryKey: queryKeys.overviewView(preset),
+      queryFn: ({ signal }) => fetchOverviewView(preset, signal),
+      placeholderData: keepPreviousData,
+    },
+    queryClient,
+  );
+  const view = query.data;
+  // P2-U5: a `live` scope change (tail commits) refetches only these two sections, never the
+  // page. Seeded from the page response, so mounting it costs no request.
+  const liveQuery = useQuery(
+    {
+      queryKey: queryKeys.overviewViewSections(preset, OVERVIEW_LIVE_SECTIONS),
+      queryFn: ({ signal }) => fetchOverviewView(preset, signal, [...OVERVIEW_LIVE_SECTIONS]),
+      enabled: view !== undefined,
+      initialData: view,
+      initialDataUpdatedAt: query.dataUpdatedAt,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+    queryClient,
+  );
+  const liveView = liveQuery.dataUpdatedAt > query.dataUpdatedAt ? liveQuery.data : undefined;
+  // G-P1 (M5 on L): the page request yields between its 12 sections, and during boot each yield
+  // waits behind boot work, so the KPIs first ask for just `kpis,status` and render the KPI strip
+  // from it until the page lands. Only the strip uses it; every other card waits for the page.
+  const kpiFirstQuery = useQuery(
+    {
+      queryKey: queryKeys.overviewViewSections(preset, KPI_FIRST_SECTIONS),
+      queryFn: ({ signal }) => fetchOverviewView(preset, signal, KPI_FIRST_SECTIONS),
+      enabled: view === undefined && !query.isError,
+      refetchInterval: false,
+    },
+    queryClient,
+  );
+  const early = view === undefined ? kpiFirstQuery.data : undefined;
+  const sections = useMemo(() => {
+    const all = readSections(view);
+    if (liveView !== undefined) {
+      return {
+        ...all,
+        live: readSection(liveView, "live"),
+        status: readSection(liveView, "status"),
+      };
+    }
+    if (early === undefined) return all;
+    const kpis = readSection(early, "kpis");
+    const status = readSection(early, "status");
+    return kpis.state === "ok" && status.state === "ok" ? { ...all, kpis, status } : all;
+  }, [view, early, liveView]);
+  const refetch = () => void query.refetch();
 
-    fetchGlobalOverview(filter)
-      .then((v) => {
-        setOverviewState({ status: "ok", value: v });
-        setOverviewDataPreset(p);
-      })
-      .catch((e: unknown) => {
-        setOverviewState({ status: "error", message: String(e) });
-        setOverviewDataPreset(p);
-      });
-
-    fetchWorkspaces(filter)
-      .then((v) => {
-        setWorkspacesState({ status: "ok", value: v });
-        setWorkspacesDataPreset(p);
-      })
-      .catch((e: unknown) => {
-        setWorkspacesState({ status: "error", message: String(e) });
-        setWorkspacesDataPreset(p);
-      });
-
-    // Spend-over-time trends (non-fatal)
-    retainDataWhileRefreshing(setTrendsState);
-    retainDataWhileRefreshing(setPriorTrendsState);
-    fetchTrends(filter)
-      .then((v) => {
-        setTrendsState({ status: "ok", value: v });
-        const { from, to } = v.meta.window;
-        const duration = Date.parse(to) - Date.parse(from);
-        return fetchTrends({
-          from: new Date(Date.parse(from) - duration).toISOString(),
-          to: from,
-        })
-          .then((prior) => setPriorTrendsState({ status: "ok", value: prior }))
-          .catch((e: unknown) => setPriorTrendsState({ status: "error", message: String(e) }));
-      })
-      .catch((e: unknown) => {
-        setTrendsState({ status: "error", message: String(e) });
-        setPriorTrendsState({ status: "error", message: String(e) });
-      });
-
-    // Spend-Viz-v2 — flavor decomposition (also derives cacheEffState)
-    retainDataWhileRefreshing(setFlavorState);
-    retainDataWhileRefreshing(setCacheEffState);
-    fetchFlavorDecomposition(filter)
-      .then((v) => {
-        setFlavorState({ status: "ok", value: v });
-        // Reuse the query-provided selected-window diagnostic (no browser classifier).
-        const fd = v.data;
-        if (fd !== null) {
-          const effData: CacheEfficiency = {
-            ratio: fd.cache_read_share,
-            cache_read_tokens: fd.cache_read_tokens,
-            cache_creation_tokens: fd.cache_creation_tokens,
-            reuse_band: fd.reuse_band,
-            cap_weighted_tokens: fd.cap_weighted_tokens,
-            coeff_used: fd.coeff_used,
-            coeff_unverified: fd.coeff_unverified,
-            turns: fd.turns,
-          };
-          setCacheEffState({
-            status: "ok",
-            value: { ...v, data: effData },
-          });
-        } else {
-          setCacheEffState({ status: "ok", value: { ...v, data: null } });
-        }
-      })
-      .catch((e: unknown) => {
-        setFlavorState({ status: "error", message: String(e) });
-        setCacheEffState({ status: "error", message: String(e) });
-      });
-
-    // Spend-Viz-v2 — cache-write spike timeline (non-fatal)
-    retainDataWhileRefreshing(setCacheWriteState);
-    fetchCacheWriteTrend(filter)
-      .then((v) => setCacheWriteState({ status: "ok", value: v }))
-      .catch((e: unknown) => setCacheWriteState({ status: "error", message: String(e) }));
-
-    // Top-rec column: highest-modeled active rec per workspace. Non-fatal.
-    fetchRecommendations()
-      .then((v) => {
-        const active = v.data?.active ?? [];
-        const d = v.data;
-        setHasRecommendation(
-          d == null
-            ? null
-            : d.active.length + d.limit_warnings.length + d.adopted.length + d.dismissed.length > 0,
-        );
-        setTopRecommendation(
-          active.reduce<RecommendationCard | null>(
-            (top, rec) =>
-              top === null ||
-              (rec.modeled_savings_u_per_wk ?? -1) > (top.modeled_savings_u_per_wk ?? -1)
-                ? rec
-                : top,
-            null,
-          ),
-        );
-        const map = new Map<string, TopRec>();
-        for (const rec of active) {
-          if (rec.scope_workspace_id === null) continue;
-          const existing = map.get(rec.scope_workspace_id);
-          const savings = rec.modeled_savings_u_per_wk ?? -1;
-          if (existing === undefined || savings > (existing.savings ?? -1)) {
-            map.set(rec.scope_workspace_id, {
-              detector_id: rec.detector_id,
-              state: rec.state,
-              savings,
-            });
-          }
-        }
-        setTopRecByWorkspace(map);
-      })
-      .catch(() => {
-        setTopRecByWorkspace(new Map());
-        setTopRecommendation(null);
-        setHasRecommendation(null);
-      });
-  }, []);
-
+  // A cold recs build answers `top_recs: pending`, a rebuild behind the snapshot `recomputing`;
+  // poll just that section until either resolves.
+  const topRecsBusy = (section: OverviewSection | undefined) =>
+    section?.status === "pending" || section?.freshness?.status === "recomputing";
+  const topRecsWaiting =
+    sections.top_recs.state === "pending" ||
+    (sections.top_recs.state === "ok" && sections.top_recs.freshness?.status === "recomputing");
+  const topRecsQuery = useQuery(
+    {
+      queryKey: queryKeys.overviewViewSections(preset, ["top_recs"]),
+      queryFn: ({ signal }) => fetchOverviewView(preset, signal, ["top_recs"]),
+      enabled: topRecsWaiting,
+      refetchInterval: (q) =>
+        topRecsBusy(q.state.data?.sections.top_recs) ? TOP_RECS_POLL_MS : false,
+    },
+    queryClient,
+  );
+  const polledTopRecs = useMemo(
+    () => readSection(topRecsQuery.data, "top_recs"),
+    [topRecsQuery.data],
+  );
+  // Only a poll newer than the page response wins (a cached poll from an earlier wait is older).
+  const topRecs =
+    topRecsWaiting &&
+    polledTopRecs.state !== "loading" &&
+    topRecsQuery.dataUpdatedAt >= query.dataUpdatedAt
+      ? polledTopRecs
+      : sections.top_recs;
+  // Arrival: rows fade up once when a build that kept the section pending lands.
+  const [topRecsWasPending, setTopRecsWasPending] = useState(false);
+  const [topRecsEntering, setTopRecsEntering] = useState(false);
   useEffect(() => {
-    loadMain(preset);
-  }, [preset, loadMain]);
+    if (topRecs.state === "pending") setTopRecsWasPending(true);
+    else if (topRecs.state === "ok" && topRecsWasPending) {
+      setTopRecsWasPending(false);
+      setTopRecsEntering(true);
+    }
+  }, [topRecs.state, topRecsWasPending]);
+  useEffect(() => {
+    if (!topRecsEntering) return;
+    const id = window.setTimeout(() => setTopRecsEntering(false), 1_000);
+    return () => window.clearTimeout(id);
+  }, [topRecsEntering]);
 
-  // Shares the foreground status request with Sidebar, including cancellation.
-  useForegroundPoll(
-    fetchStatus,
-    30_000,
-    (value) => {
-      if (value === undefined) {
-        setStatusState({ status: "error", message: "Status response was empty" });
-      } else {
-        setStatusState({ status: "ok", value });
+  const recs = useMemo(() => {
+    const active = topRecs.state === "ok" ? topRecs.data.active : [];
+    // Active is ordered by shown $, which can differ from d8Value (legacy range fallback), so the
+    // first D8 is not always the largest. Pick the D8 with the largest net headline; a $0 D8 only wins if none is > 0.
+    const d8Value = (rec: RecommendationCard): number | null =>
+      headlineSavings(rec) ??
+      (rec.allocated_u_per_wk === undefined ? (rec.range_u_per_wk?.[1] ?? null) : null);
+    let d8SavingsU: number | null = null;
+    for (const rec of active) {
+      if (rec.detector_id !== "D8") continue;
+      const value = d8Value(rec);
+      if (value !== null && (d8SavingsU === null || value > d8SavingsU)) d8SavingsU = value;
+    }
+    const topRecByWorkspace = new Map<string, TopRec>();
+    for (const rec of active) {
+      if (rec.scope_workspace_id === null) continue;
+      const existing = topRecByWorkspace.get(rec.scope_workspace_id);
+      const savings = headlineSavings(rec) ?? -1;
+      if (existing === undefined || savings > (existing.savings ?? -1)) {
+        topRecByWorkspace.set(rec.scope_workspace_id, {
+          detector_id: rec.detector_id,
+          state: rec.state,
+          savings,
+        });
       }
-    },
-    (error) => {
-      setStatusState((previous) =>
-        previous.status === "ok" ? previous : { status: "error", message: String(error) },
-      );
-    },
-  );
+    }
+    return { d8SavingsU, topRecByWorkspace };
+  }, [topRecs]);
+  const { d8SavingsU, topRecByWorkspace } = recs;
 
+  // Re-read every 180 s while visible (OV-12 E8) so the spend card's "Y% used" tracks the limits
+  // card. Same request + cadence as UsageLimitsCard, so useForegroundPoll shares its fetch.
   useForegroundPoll(
-    fetchLiveSessions,
-    30_000,
-    (value) => {
-      setLiveState({ status: "ok", value });
-      setLiveLastFetchedAt(getLastFetchTimestamp("/api/live"));
-      setLiveRefreshError(null);
-    },
-    (error) => {
-      setLiveRefreshError(String(error));
-      setLiveState((previous) =>
-        previous.status === "ok" ? previous : { status: "error", message: String(error) },
+    fetchLimits,
+    180_000,
+    (model) => {
+      setUsageSource(
+        model.state === "connected"
+          ? (model.source ?? "api")
+          : model.state === "error"
+            ? "unavailable"
+            : null,
       );
+      setCalibrationDriftPoints(model.estimateVsActual?.deltaPts ?? null);
+      setLimits({ weeklyMax: model.weeklyMax, asOf: model.asOf });
     },
+    () => setUsageSource("unavailable"),
   );
 
-  useForegroundPoll(
-    fetchBurnStatus,
-    60_000,
-    (value) => {
-      setBurnStatus(value.data);
-      setBurnStatusLoading(false);
-      setBurnRefreshError(false);
-    },
-    () => {
-      setBurnStatusLoading(false);
-      setBurnRefreshError(true);
-    },
+  // Every page-body read below goes through a validated section (P0-U6 / P1-U1): a malformed
+  // field fails only its own section, never the whole page.
+  const overviewData = okData(sections.kpis);
+  const trendData = okData(sections.trends);
+  const priorTrendData = okData(sections.trends_prior);
+  const flavorData = okData(sections.flavor);
+  const cacheWriteData = okData(sections.cache_write);
+  const spendCurrent =
+    trendData?.buckets.reduce((total, bucket) => total + bucket.cost_equiv_u, 0) ?? null;
+  const spendPrior =
+    priorTrendData?.buckets.reduce((total, bucket) => total + bucket.cost_equiv_u, 0) ?? null;
+  // OV-12 Q7: zero-fill days against the server's clock (the response window's end).
+  const serverNowMs = Date.parse((view ?? early)?.window.to ?? "");
+  const serverNow = Number.isNaN(serverNowMs) ? null : new Date(serverNowMs);
+  const dailySpend = (buckets: TrendData["buckets"] | undefined, now: Date | null): number[] => {
+    const rows = (buckets ?? []).map((b) => ({ bucket: b.bucket, cost_equiv_u: b.cost_equiv_u }));
+    return (
+      now === null
+        ? rows
+        : fillDailyBuckets(rows, preset, now, (bucket) => ({ bucket, cost_equiv_u: 0 }))
+    ).map((b) => b.cost_equiv_u);
+  };
+  const sparkCurrent = dailySpend(trendData?.buckets, serverNow);
+  // "All" has no prior window to draw.
+  const sparkPrior =
+    preset === "all"
+      ? []
+      : dailySpend(
+          priorTrendData?.buckets,
+          serverNow === null
+            ? null
+            : new Date(serverNow.getTime() - PRESET_DAYS[preset] * 86_400_000),
+        );
+
+  const workspaceItems = okData(sections.workspaces)?.items ?? [];
+  const workspaceLabels = new Map(
+    workspaceItems.map((w) => [w.workspace_id, w.repo_name ?? w.project_slug ?? w.workspace_id]),
   );
 
-  // Non-fatal configuration and hot-session reads on mount.
+  const liveSessions = okData(sections.live)?.items ?? [];
+  const liveWorkspaceIds = new Set(liveSessions.map((s) => s.workspace_id));
+  const liveWorkspaceItems =
+    sections.live.state === "ok"
+      ? workspaceItems.map((w) => ({ ...w, has_live: liveWorkspaceIds.has(w.workspace_id) }))
+      : workspaceItems;
+  const onboardingStatus = okData(sections.status);
+  const isOnboardingStatusPending = sections.status.state === "loading" && !query.isError;
+  const isFirstRun = onboardingStatus?.sessions === 0;
+  const hookConfig = okData(sections.hook_config);
+  const linkageRate = okData(sections.linkage)?.linkage_rate ?? null;
+
+  // The GitHub token only matters to the first-run checklist; don't spend a request otherwise.
   useEffect(() => {
-    fetchHookConfig()
-      .then((v) => setHookConfig(v.data))
-      .catch(() => setHookConfig(null))
-      .finally(() => setHookConfigLoading(false));
-
-    fetchHotSessions()
-      .then((rows) => setHotSessions(rows.slice(0, 3)))
-      .catch(() => setHotSessions([]))
-      .finally(() => setHotSessionsLoading(false));
-
+    if (!isFirstRun) return;
     void Promise.resolve(fetchGithubTokenStatus())
       .then((s) => setGithubTokenConfigured(s?.configured ?? false))
       .catch(() => setGithubTokenConfigured(false));
-  }, []);
+  }, [isFirstRun]);
 
-  const handleRetry = () => loadMain(preset);
+  const isOverviewPending = view === undefined;
+  const isOverviewLoading = isOverviewPending && !query.isError && showInitialSkeletons;
+  const isLiveLoading = isOverviewLoading;
+  // A failed page request with nothing to show; a failed background refetch keeps the last view.
+  const daemonError = query.isError && view === undefined ? String(query.error) : null;
+  const liveRefreshError = query.isError && view !== undefined ? String(query.error) : null;
 
-  const dismissCaveat = () => {
-    try {
-      window.localStorage.setItem("aw-caveat-dismissed", "1");
-    } catch {
-      // Continue hiding the banner when storage is unavailable.
-    }
-    setIsCaveatVisible(false);
-  };
+  // KPI derived values
+  const totalUsd = (overviewData?.cost_equiv_u ?? 0) / 1_000_000;
+  const spendDeltaPct =
+    spendCurrent !== null && spendPrior !== null && spendPrior > 0
+      ? ((spendCurrent - spendPrior) / spendPrior) * 100
+      : null;
+  // Sessions with turns in this window; /api/status `sessions` is the all-time count.
+  const sessionsCount = overviewData?.subagent_spend?.sessions_in_window ?? null;
+  // Task 9: concentration and the count delta come from the reconciled-session lists.
+  const concentration = sessionConcentration(trendData?.sessions ?? []);
+  const priorSessionCount = priorTrendData?.sessions.length ?? 0;
+  const sessionDeltaPct =
+    trendData && priorSessionCount > 0
+      ? ((trendData.sessions.length - priorSessionCount) / priorSessionCount) * 100
+      : null;
+  // The expensive-sessions table is always the 7-day top 5; other presets open Sessions by cost.
+  const expensiveHref =
+    preset === "7d"
+      ? "#/overview"
+      : preset === "all"
+        ? "#/sessions?sort=cost&direction=desc"
+        : `#/sessions?from=${new Date(Date.now() - PRESET_DAYS[preset] * 86_400_000).toISOString().slice(0, 10)}&sort=cost&direction=desc`;
+  const presetLabel = preset === "all" ? "all time" : preset;
 
-  // ---------------------------------------------------------------------------
-  // Derived values from OK states
-  // ---------------------------------------------------------------------------
+  const unconfirmedModels = overviewData?.unconfirmed_models ?? [];
+  const ctxRows = overviewData?.context_per_turn ?? [];
+  const subagentSpend = overviewData?.subagent_spend;
 
-  const hasOverviewForPreset = overviewDataPreset === preset;
-  const hasWorkspacesForPreset = workspacesDataPreset === preset;
-  const overviewData =
-    hasOverviewForPreset && overviewState.status === "ok" ? overviewState.value.data : null;
-  const trendData = trendsState.status === "ok" ? trendsState.value.data : null;
-  const priorTrendData = priorTrendsState.status === "ok" ? priorTrendsState.value.data : null;
+  // The page response is in and this is not a first run: each card then shows its own section.
+  const showMetrics = !isOnboardingStatusPending && !isFirstRun && !isOverviewPending;
+  // The KPI strip alone, from the KPI-first subset, while the page request is still in flight.
+  const showEarlyKpis =
+    isOverviewPending && !isOnboardingStatusPending && !isFirstRun && overviewData !== null;
 
-  const workspaceItems =
-    hasWorkspacesForPreset && workspacesState.status === "ok"
-      ? (workspacesState.value.data?.items ?? [])
-      : [];
-
-  const liveSessions = liveState.status === "ok" ? (liveState.value.data?.items ?? []) : [];
-  const onboardingStatus = statusState.status === "ok" ? statusState.value : null;
-  const isOnboardingStatusPending = statusState.status === "pending";
-  const isFirstRun = onboardingStatus?.sessions === 0;
-
-  const isOverviewPending = overviewState.status === "loading" || !hasOverviewForPreset;
-  const isWorkspacesPending = workspacesState.status === "loading" || !hasWorkspacesForPreset;
-  const isLivePending = liveState.status === "loading";
-  const isOverviewLoading = isOverviewPending && showInitialSkeletons;
-  const isWorkspacesLoading = isWorkspacesPending && showInitialSkeletons;
-  const isLiveLoading = isLivePending && showInitialSkeletons;
-
-  const overviewError =
-    hasOverviewForPreset && overviewState.status === "error" ? overviewState.message : null;
-  const workspacesError =
-    hasWorkspacesForPreset && workspacesState.status === "error" ? workspacesState.message : null;
-  const liveError = liveState.status === "error" ? liveState.message : null;
-
-  // Aggregate error for the top-level daemon-unreachable banner
-  const daemonError = overviewError ?? workspacesError;
-
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  // U5: partial-data affordances — pipeline is incomplete when it exists and hasn't finished.
+  const pipelineIsIncomplete =
+    onboardingStatus?.pipeline != null && onboardingStatus.pipeline.phase !== "done";
+  // P2-U7: a preset wider than the history read so far says how many of its days are in.
+  // "All" counts against the planned history instead of a fixed window.
+  const periodCoverage = coverageLabel(
+    onboardingStatus?.history_coverage,
+    preset === "all" ? undefined : PRESET_DAYS[preset],
+  );
 
   return (
     <div>
-      {/* Page header */}
       <div className="page-top">
         <div className="page-title">
-          <h1>Overview</h1>
-          <p className="page-sub">Where your tokens go · burn forecast · live sessions</p>
+          <h1>
+            Overview{" "}
+            {liveSessions.length > 0 && (
+              <span className="chip live" data-testid="overview-live-chip">
+                ● {liveSessions.length} live
+              </span>
+            )}
+          </h1>
+          <p className="page-sub">Limits, spend, and the one thing to do next.</p>
         </div>
         <div className="page-top-controls">
           <div className="date-range" aria-label="Date range">
-            {(["24h", "7d", "30d"] as const).map((p) => (
+            {(["24h", "7d", "30d", "all"] as const).map((p) => (
               <button
                 key={p}
                 type="button"
@@ -802,134 +1683,421 @@ export default function OverviewPage({
                 onClick={() => setPreset(p)}
                 aria-pressed={preset === p}
               >
-                {p}
+                {p === "all" ? "All" : p}
               </button>
             ))}
           </div>
-          {isCaveatVisible && (
-            <div className="banner banner-info">
-              <span>{CAVEAT_COPY}</span>
-              <button
-                className="banner-dismiss"
-                type="button"
-                aria-label="Dismiss usage caveat"
-                onClick={dismissCaveat}
-              >
-                ✕
-              </button>
-            </div>
-          )}
         </div>
       </div>
 
-      <ChipLegend />
-
-      {/* Daemon-unreachable error banner — distinct from loading and N/A */}
       {daemonError !== null && (
         <div className="banner banner-error" role="alert" aria-live="assertive">
           <span>⚠ Daemon unreachable — {daemonError}</span>
-          <button className="banner-retry" type="button" onClick={handleRetry}>
+          <button className="banner-retry" type="button" onClick={refetch}>
             Retry
           </button>
         </div>
       )}
 
-      <SectionHeader title="Summary" />
-      <VerdictBand
-        preset={preset}
-        trend={trendData}
-        priorTrend={priorTrendData}
-        isLoading={trendsState.status === "loading" || priorTrendsState.status === "loading"}
-        topRecommendation={topRecommendation}
-      />
-
-      {/* RV7 tile row — rate-limit gauges · hook status · hot sessions top-3 */}
-      <SectionHeader title="Needs attention" />
-      <div
-        data-testid="rv7-tile-row"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 2fr",
-          gap: 12,
-          marginBottom: 13,
-        }}
-      >
-        <div>
-          <RateLimitGauges burnStatus={burnStatus} isLoading={burnStatusLoading} />
-          {burnRefreshError && (
-            <output>Burn status refresh failed; displayed data may be stale. Will retry.</output>
-          )}
+      {unconfirmedModels.length > 0 && (
+        <div className="banner banner-info" role="note" data-testid="unconfirmed-models-banner">
+          <span>
+            {unconfirmedModels
+              .map((m) =>
+                m.tier === null
+                  ? `New model ${m.model} is not priced: prices not confirmed.`
+                  : `New model ${m.model} priced as ${m.tier}: prices not confirmed.`,
+              )
+              .join(" ")}
+          </span>
         </div>
-        <HookTile hookConfig={hookConfig} isLoading={hookConfigLoading} />
-        <div className="card" data-testid="hot-sessions-tile" style={{ padding: "14px 16px" }}>
-          <div style={{ marginBottom: 10, fontWeight: 700, fontSize: 13, color: "var(--soft)" }}>
-            HOT SESSIONS
-          </div>
-          {hotSessionsLoading && (
-            <div
-              className="skeleton"
-              style={{ height: 64, borderRadius: 6 }}
-              aria-label="Loading hot sessions"
+      )}
+
+      {/* §1 Usage limits hero — always the first section, self-contained polling. */}
+      <WidgetBoundary label="usage-limits">
+        <UsageLimitsCard />
+      </WidgetBoundary>
+
+      {!isFirstRun && !showEarlyKpis && (isOnboardingStatusPending || isOverviewLoading) ? (
+        <div
+          className="grid g4 g4-lead"
+          aria-busy="true"
+          aria-label="Loading overview metrics"
+          data-section-status="pending"
+          style={{ marginTop: 24 }}
+        >
+          <div className="card kpi skeleton" style={{ height: 120 }} />
+          <div className="card kpi skeleton" style={{ height: 120 }} />
+          <div className="card kpi skeleton" style={{ height: 120 }} />
+          <div className="card kpi skeleton" style={{ height: 120 }} />
+        </div>
+      ) : null}
+
+      {/* §3 KPI strip */}
+      {showMetrics && sections.kpis.state === "error" && (
+        <WidgetErrorCard label="kpis" onRetry={refetch} />
+      )}
+      {(showMetrics || showEarlyKpis) && overviewData !== null && (
+        <WidgetBoundary label="kpis">
+          <section
+            className="sec"
+            aria-labelledby="this-period-title"
+            aria-busy={query.isPlaceholderData}
+          >
+            <div className="sec-h">
+              <h2 id="this-period-title">This period ({presetLabel})</h2>
+              <span className="desc">
+                {periodCoverage !== null && (
+                  <span className="chip chip-plain" data-testid="coverage-chip">
+                    {periodCoverage}
+                  </span>
+                )}{" "}
+                <span className="chip est">Estimate · list price</span>
+              </span>
+            </div>
+            <div className="grid g4 g4-lead">
+              <KpiCard
+                label={spendUnit === "usd" ? "Spend-equivalent" : "Token Spend"}
+                metricId={spendUnit === "usd" ? "spend.equiv" : "spend.tokens"}
+                dataMetric="spend.equiv"
+                value={
+                  spendUnit === "usd"
+                    ? fmtUsd0(totalUsd)
+                    : fmtTokensCompact((overviewData.cost_equiv_u ?? 0) / REF_PRICE_U_PER_TOKEN)
+                }
+                headerExtra={
+                  <div className="seg seg-sm">
+                    {(["usd", "tokens"] as const).map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        className={spendUnit === u ? "on" : ""}
+                        aria-pressed={spendUnit === u}
+                        onClick={() => setSpendUnit(u)}
+                      >
+                        {u === "usd" ? "$" : "Tokens"}
+                      </button>
+                    ))}
+                  </div>
+                }
+                moreHref="#/overview"
+                moreLabel="Spend by day ↓"
+                onMoreClick={(event) => {
+                  event.preventDefault();
+                  setSpendTab("spend");
+                  document.getElementById("spend-by-day")?.scrollIntoView?.();
+                }}
+                cmp={
+                  preset === "all" ? (
+                    "All recorded history"
+                  ) : spendDeltaPct === null ? (
+                    showEarlyKpis ? (
+                      "Loading prior window…"
+                    ) : (
+                      "Prior window unavailable"
+                    )
+                  ) : (
+                    <>
+                      <span className={spendDeltaPct <= 0 ? "ok" : "bad"}>
+                        {spendDeltaPct <= 0 ? "↓" : "↑"}
+                        {Math.abs(Math.round(spendDeltaPct))}% vs prior {preset}
+                      </span>{" "}
+                      {spendPrior !== null &&
+                        `(${
+                          spendUnit === "usd"
+                            ? fmtUsd0(spendPrior / 1_000_000)
+                            : fmtTokensCompact(spendPrior / REF_PRICE_U_PER_TOKEN)
+                        })`}
+                    </>
+                  )
+                }
+              >
+                <Sparkline
+                  current={sparkCurrent}
+                  prior={sparkPrior}
+                  dayDividers={preset === "7d"}
+                />
+                <div className="foot" style={{ marginTop: 0 }}>
+                  Daily{spendUnit === "tokens" && " · weighted by model price"}
+                  {preset !== "all" && ` · dashed = prior ${preset}`}
+                  {preset === "7d" && " · dotted = day boundary"}
+                </div>
+                <WeeklyMaxLine
+                  max={limits?.weeklyMax}
+                  asOf={limits?.asOf ?? null}
+                  unit={spendUnit}
+                />
+              </KpiCard>
+
+              <KpiCard
+                label="Sessions"
+                metricId="sessions.count"
+                dataMetric="sessions.count"
+                value={sessionsCount === null ? "—" : sessionsCount.toLocaleString()}
+                moreHref={expensiveHref}
+                moreLabel="Most expensive →"
+                {...(preset === "7d"
+                  ? {
+                      onMoreClick: (event: React.MouseEvent<HTMLAnchorElement>) => {
+                        event.preventDefault();
+                        document.getElementById("expensive-sessions-title")?.scrollIntoView?.();
+                      },
+                    }
+                  : {})}
+                cmp={
+                  preset === "all" ? (
+                    "All recorded history"
+                  ) : sessionDeltaPct === null ? (
+                    showEarlyKpis ? (
+                      "Loading prior window…"
+                    ) : (
+                      "Prior window unavailable"
+                    )
+                  ) : Math.round(sessionDeltaPct) === 0 ? (
+                    `Flat vs prior ${preset}`
+                  ) : (
+                    <span>
+                      {sessionDeltaPct < 0 ? "↓" : "↑"}
+                      {Math.abs(Math.round(sessionDeltaPct))}% vs prior {preset}
+                    </span>
+                  )
+                }
+              >
+                {concentration !== null && (
+                  <>
+                    {concentration.segments.length > 0 && (
+                      <div
+                        data-testid="sessions-cost-strip"
+                        aria-label="Session spend, costliest first"
+                        style={{
+                          display: "flex",
+                          height: 8,
+                          overflow: "hidden",
+                          borderRadius: "var(--r)",
+                          marginTop: "var(--space-3)",
+                        }}
+                      >
+                        {concentration.segments.map((cost, index) => (
+                          <span
+                            // biome-ignore lint/suspicious/noArrayIndexKey: fixed 4-slot strip
+                            key={index}
+                            style={{
+                              width: `${(cost / concentration.segments.reduce((a, b) => a + b, 0)) * 100}%`,
+                              background: index < 3 ? SERIES[index] : "var(--muted)",
+                              opacity: index < 3 ? 1 : 0.35,
+                            }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <div className="foot">
+                      {concentration.top3Share !== null &&
+                        `Top 3 = ${Math.round(concentration.top3Share * 100)}% of spend · `}
+                      median {fmtUsd0(concentration.median_u / 1_000_000)} (avg{" "}
+                      {fmtUsd0(concentration.avg_u / 1_000_000)})
+                    </div>
+                  </>
+                )}
+              </KpiCard>
+
+              <KpiCard
+                label="Subagent spend"
+                info="Sidechain turns are subagent and background calls. A larger share means more of this window's estimated cost came from those calls; open Sessions to inspect them."
+                dataMetric="subagent.spend"
+                value={subagentSpend ? fmtPct1(subagentSpend.share) : "—"}
+                moreHref="#/sessions?sort=subagent&direction=desc"
+                moreLabel="Sessions by subagent cost →"
+                cmp={
+                  subagentSpend
+                    ? `${fmtUsd0(subagentSpend.sidechain_cost_u / 1_000_000)} of ${fmtUsd0(subagentSpend.total_cost_u / 1_000_000)} · in ${subagentSpend.sessions_with_sidechain_spend} of ${subagentSpend.sessions_in_window} sessions`
+                    : "No spend data"
+                }
+              >
+                {subagentSpend && subagentSpend.sidechain_cost_u > 0 && (
+                  <>
+                    <div
+                      aria-label="Subagent spend by model family"
+                      style={{
+                        display: "flex",
+                        height: 8,
+                        overflow: "hidden",
+                        borderRadius: "var(--r)",
+                        marginTop: "var(--space-3)",
+                      }}
+                    >
+                      {subagentSpend.by_model_family.map((row, index) => (
+                        <span
+                          key={row.family}
+                          style={{
+                            width: `${(row.cost_u / subagentSpend.sidechain_cost_u) * 100}%`,
+                            background: SERIES[index % SERIES.length],
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div
+                      className="foot"
+                      style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-2)" }}
+                    >
+                      {subagentSpend.by_model_family.map((row, index) => (
+                        <span key={row.family}>
+                          <span aria-hidden="true" style={{ color: SERIES[index % SERIES.length] }}>
+                            ●
+                          </span>{" "}
+                          {row.family} {fmtUsd0(row.cost_u / 1_000_000)}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </KpiCard>
+
+              <SetupGradeCard />
+            </div>
+          </section>
+        </WidgetBoundary>
+      )}
+
+      {/* Ranked recommendations */}
+      {showMetrics &&
+        (topRecs.state === "ok" ? (
+          <WidgetBoundary label="recommendations">
+            <TopRecommendations
+              recommendations={topRecs.data.active}
+              groupCount={topRecs.data.active_groups?.length}
+              pipelineIsIncomplete={pipelineIsIncomplete}
+              freshness={topRecs.freshness}
+              entering={topRecsEntering}
+              onEffectMutated={() =>
+                void queryClient.invalidateQueries({ queryKey: ["overview-view"] })
+              }
             />
-          )}
-          {!hotSessionsLoading && hotSessions.length === 0 && (
-            <div className="kpi-off-hint" style={{ fontSize: 12 }}>
-              No sessions yet.
-            </div>
-          )}
-          {!hotSessionsLoading && hotSessions.length > 0 && (
-            <div>
-              {hotSessions.map((s) => (
-                <button
-                  key={s.session_id}
-                  type="button"
-                  data-testid={`hot-session-row-${s.session_id}`}
-                  onClick={() => onSelectSession?.(s.session_id)}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    width: "100%",
-                    padding: "5px 0",
-                    background: "none",
-                    border: "none",
-                    borderBottom: "1px solid var(--line)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                  }}
-                >
-                  <span style={{ fontSize: 12, color: "var(--text)", fontFamily: "monospace" }}>
-                    {s.session_id.slice(0, 12)}…
-                  </span>
-                  <span style={{ fontSize: 12, color: "var(--amber)", fontWeight: 600 }}>
-                    ${(s.cost_equiv_u / 1_000_000).toFixed(2)}
-                  </span>
-                </button>
-              ))}
-              <div style={{ textAlign: "right", marginTop: 6 }}>
-                <a href="#/sessions" style={{ fontSize: 12, color: "var(--teal)" }}>
-                  All sessions →
-                </a>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+          </WidgetBoundary>
+        ) : topRecs.state === "error" ? (
+          <WidgetErrorCard label="recommendations" onRetry={refetch} />
+        ) : (
+          <TopRecommendationsSkeleton
+            load={
+              topRecs.state === "pending"
+                ? {
+                    kind: "building",
+                    label: "Building recommendations",
+                    startedAt: topRecs.progress?.started_at,
+                    expectedMs: topRecs.progress?.expected_ms,
+                  }
+                : null
+            }
+          />
+        ))}
 
-      {/* KPI grid — loading skeleton / error / data */}
+      {/* Most expensive sessions this week */}
+      {showMetrics &&
+        (sections.weekly_sessions.state === "ok" ? (
+          <WidgetBoundary label="expensive-sessions">
+            <ExpensiveSessions
+              sessions={sections.weekly_sessions.data.rows}
+              windowCostU={sections.weekly_sessions.data.cost_equiv_u}
+            />
+          </WidgetBoundary>
+        ) : (
+          <WidgetErrorCard label="expensive-sessions" onRetry={refetch} />
+        ))}
+
+      {/* Across the dashboard */}
+      {showMetrics &&
+        (overviewData === null ? (
+          <WidgetErrorCard label="across-dashboard" onRetry={refetch} />
+        ) : topRecs.state === "pending" ? (
+          <section
+            className="sec"
+            aria-busy="true"
+            aria-label="Loading the dashboard summary"
+            data-section-status="pending"
+          >
+            <div className="card skeleton" style={{ height: 120 }} />
+          </section>
+        ) : (
+          <WidgetBoundary label="across-dashboard">
+            <AcrossDashboard
+              overview={overviewData}
+              adopted={topRecs.state === "ok" ? topRecs.data.adopted : []}
+              usageSource={usageSource}
+              linkageRate={linkageRate}
+              calibrationDriftPoints={calibrationDriftPoints}
+              haikuSidechainTurns={overviewData.subagent_spend?.haiku_sidechain_turns ?? null}
+            />
+          </WidgetBoundary>
+        ))}
+
+      {showMetrics && overviewData !== null && overviewData.cost_equiv_u === 0 && (
+        <output className="banner banner-info">
+          <span>
+            No metrics for this window yet — try a wider window or check back after more sessions
+            are ingested.
+          </span>
+        </output>
+      )}
+
+      {/* §4 Context per turn */}
+      {showMetrics &&
+        (overviewData === null ? (
+          <WidgetErrorCard label="context-per-turn" onRetry={refetch} />
+        ) : (
+          <WidgetBoundary label="context-per-turn">
+            <ContextPerTurnTable rows={ctxRows} totalUsd={totalUsd} />
+          </WidgetBoundary>
+        ))}
+
+      {/* §5 Where your tokens go */}
+      {showMetrics &&
+        (sections.flavor.state === "error" ? (
+          <WidgetErrorCard label="token-breakdown" onRetry={refetch} />
+        ) : (
+          <WidgetBoundary label="token-breakdown">
+            <TokensGoSection flavor={flavorData} />
+          </WidgetBoundary>
+        ))}
+
+      {/* §6 Spend by day */}
+      {showMetrics && sections.trends.state === "error" && (
+        <WidgetErrorCard label="trends" onRetry={refetch} />
+      )}
+      {showMetrics && sections.trends.state !== "error" && (
+        <WidgetBoundary label="trends">
+          <SpendByDayCard
+            trend={trendData}
+            cacheWrite={cacheWriteData}
+            workspaceLabels={workspaceLabels}
+            tab={spendTab}
+            setTab={setSpendTab}
+            preset={preset}
+            now={serverNow}
+            d8SavingsU={d8SavingsU}
+          />
+        </WidgetBoundary>
+      )}
+
+      {/* Live strip */}
+      <WidgetBoundary label="live-sessions">
+        <LiveStrip
+          sessions={liveSessions}
+          isLoading={isLiveLoading}
+          isPending={isOverviewPending}
+          error={
+            liveRefreshError ??
+            (sections.live.state === "error" ? "Live sessions unavailable" : null)
+          }
+          lastFetchedAt={
+            query.dataUpdatedAt === 0
+              ? undefined
+              : Math.max(query.dataUpdatedAt, liveQuery.dataUpdatedAt)
+          }
+          onSelectSession={onSelectSession}
+        />
+      </WidgetBoundary>
+
+      {/* Onboarding / scan status */}
       {!isFirstRun && onboardingStatus !== null && <ScanStatus status={onboardingStatus} />}
-      {!isFirstRun &&
-        onboardingStatus?.scan_state === "complete" &&
-        (onboardingStatus?.sessions ?? 0) > 0 &&
-        (onboardingStatus?.lines_quarantined ?? 0) === 0 &&
-        (onboardingStatus?.invalid_scan_root_count ?? 0) === 0 &&
-        hasRecommendation === false && (
-          <p>
-            Setup complete — your history is ready and no recommendations were found.{" "}
-            <a href="#/sessions">Read an ingested session</a>; optional integrations are not
-            required.
-          </p>
-        )}
       {isFirstRun && onboardingStatus !== null && (
         <FirstRunWelcome
           status={onboardingStatus}
@@ -942,154 +2110,40 @@ export default function OverviewPage({
         />
       )}
 
-      {!isFirstRun && (isOnboardingStatusPending || isOverviewLoading) ? (
-        <div className="kpi-grid" aria-busy="true" aria-label="Loading overview data">
-          <SkeletonKpi />
-          <SkeletonKpi />
-          <SkeletonKpi />
-          <SkeletonKpi />
-        </div>
-      ) : null}
-
-      {!isOnboardingStatusPending && !isFirstRun && !isOverviewPending && overviewData !== null && (
-        <>
-          <SectionHeader
-            title="Spend vs your limit"
-            sub="Watch spend and your configured limit together; each answers a different question."
-          />
-          <p className="kpi-fn" style={{ marginTop: 2, marginBottom: 8 }}>
-            Absolute cap values are unpublished (Anthropic publishes only relative multipliers).
-            Which cap you're hitting is visible only in /usage.
-          </p>
-          <div className="kpi-grid overview-secondary-kpis">
-            <SpendCard
-              overview={overviewData}
-              preset={preset}
-              trends={trendData}
-              priorTrends={priorTrendData}
+      {/* §7 Workspaces */}
+      {showMetrics && sections.workspaces.state === "error" && (
+        <WidgetErrorCard label="workspaces" onRetry={refetch} />
+      )}
+      {showMetrics && sections.workspaces.state === "ok" && (
+        <WidgetBoundary label="workspaces">
+          <section className="sec" aria-labelledby="workspaces-title">
+            <div className="sec-h">
+              <h2 id="workspaces-title">
+                <a href="#/workspaces">Workspaces</a>
+              </h2>
+              <span className="desc">
+                <span className="chip est">Estimate</span>
+                {pipelineIsIncomplete && <PartialBadge variant="may-change" />}
+              </span>
+            </div>
+            <WorkspaceTable
+              workspaces={liveWorkspaceItems.slice(0, 3)}
+              globalCostU={overviewData?.cost_equiv_u ?? 0}
+              globalTurns={overviewData?.turns ?? 0}
+              isLoading={false}
+              topRecByWorkspace={topRecByWorkspace}
+              teaser
+              hideHeader
             />
-            <BurnForecastCard
-              forecast={overviewData.forecast as unknown as ForecastFromDbResult}
-              burnStatus={burnStatus}
-            />
-          </div>
-          <ModelMixFootnote rows={overviewData.model_mix} />
-          <ContextPerTurnSection rows={overviewData.context_per_turn} />
-        </>
+          </section>
+        </WidgetBoundary>
       )}
 
-      {/* Empty / null data state (distinct from loading and error) */}
-      {!isOnboardingStatusPending &&
-        !isFirstRun &&
-        !isOverviewPending &&
-        overviewError === null &&
-        overviewData === null && (
-          <div className="banner banner-info">
-            <span>No spend data in this window.</span>
-          </div>
-        )}
-
-      {/* Live strip — independent state */}
-      <LiveStrip
-        sessions={liveSessions}
-        isLoading={isLiveLoading}
-        isPending={isLivePending}
-        error={liveRefreshError ?? liveError}
-        lastFetchedAt={liveLastFetchedAt}
-        onSelectSession={onSelectSession}
-      />
-
-      <SectionHeader
-        title="Where your tokens go"
-        sub="Use these breakdowns to see which usage patterns are driving the total."
-      />
-
-      {/* Spend-Viz-v2 — "Where your tokens go" section (taxonomy §4 Section 1.2) */}
-      <CacheEfficiencyKPI state={cacheEffState} forecast={overviewData?.forecast ?? null} />
-      <DeferredChart label="token breakdown" ready={!isOverviewPending && !isLivePending}>
-        <FlavorDecomposition state={flavorState} />
-      </DeferredChart>
-      <DeferredChart label="cache writes chart" ready={!isOverviewPending && !isLivePending}>
-        <CacheWriteSpikesChart state={cacheWriteState} />
-      </DeferredChart>
-
-      {/* Workspace table */}
-      <SectionHeader title="Workspaces" />
-      {isWorkspacesLoading ? (
-        <div className="card" style={{ marginBottom: 13 }}>
-          <div className="section-head">
-            <h2>Top Workspaces</h2>
-          </div>
-          <div className="table-wrap" aria-busy="true" aria-label="Loading workspace data">
-            <table>
-              <thead>
-                <tr>
-                  <th>Workspace</th>
-                  <th>Spend</th>
-                  <th>Share</th>
-                  <th>Live now</th>
-                  <th>$/turn</th>
-                  <th>Top waste source</th>
-                </tr>
-              </thead>
-              <tbody>
-                <SkeletonRow cols={6} />
-                <SkeletonRow cols={6} />
-                <SkeletonRow cols={6} />
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ) : isWorkspacesPending ? null : (
-        <WorkspaceTable
-          workspaces={workspaceItems.slice(0, 3)}
-          globalCostU={overviewData?.cost_equiv_u ?? 0}
-          globalTurns={overviewData?.turns ?? 0}
-          isLoading={false}
-          topRecByWorkspace={topRecByWorkspace}
-          teaser
-        />
-      )}
-
-      {/* Spend-over-time trend chart */}
-      <DeferredChart label="spend trends chart" ready={!isOverviewPending && !isLivePending}>
-        <TrendChart state={trendsState} />
-      </DeferredChart>
-
-      {hasOverviewForPreset && overviewState.status === "ok" && (
-        <details data-testid="overview-data-notes" style={{ marginBottom: 13 }}>
-          <summary style={{ cursor: "pointer" }}>
-            <SectionHeader
-              title="Data notes"
-              sub="See how this page's totals and observations were selected."
-            />
-          </summary>
-          <label style={{ display: "block", marginBottom: 8 }}>
-            Observation workspace{" "}
-            <select
-              value={observationWorkspaceId ?? ""}
-              onChange={(event) => setObservationWorkspaceId(event.target.value || null)}
-              style={{ maxWidth: "100%" }}
-            >
-              <option value="">All workspaces</option>
-              {hasWorkspacesForPreset &&
-                workspacesState.status === "ok" &&
-                workspacesState.value.data?.items.map((workspace) => (
-                  <option key={workspace.workspace_id} value={workspace.workspace_id}>
-                    {workspace.workspace_id}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <ObservationEvidence
-            workspaceId={observationWorkspaceId}
-            filter={{
-              from: overviewState.value.meta.window.from,
-              to: overviewState.value.meta.window.to,
-            }}
-            title={null}
-          />
-        </details>
+      {/* §8 Data notes */}
+      {showMetrics && (
+        <WidgetBoundary label="data-notes">
+          <DataNotes flavor={flavorData} />
+        </WidgetBoundary>
       )}
     </div>
   );

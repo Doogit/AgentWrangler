@@ -21,7 +21,8 @@ vi.mock("recharts", async (importOriginal) => {
     CartesianGrid: () => null,
     XAxis: () => null,
     YAxis: () => null,
-    Tooltip: () => null,
+    // First child of the deferred series block: present once the series have mounted.
+    Tooltip: () => <i data-testid="rc-series" />,
     Line: () => null,
     ReferenceLine: () => null,
     Scatter: ({
@@ -35,6 +36,9 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 afterEach(cleanup);
+
+/** The chart mounts after paint and its series one task later. */
+const seriesMounted = () => screen.findByTestId("rc-series");
 
 function turn(index: number, overrides: Partial<TurnRow> = {}): TurnRow {
   return {
@@ -62,7 +66,7 @@ function turn(index: number, overrides: Partial<TurnRow> = {}): TurnRow {
 }
 
 describe("ESF timeline observation markers", () => {
-  it("marks completed-test failures and passes at their turn positions without task-quality styling", () => {
+  it("marks completed-test failures and passes at their turn positions without task-quality styling", async () => {
     // The audited session shape: failures, then an observed later pass.
     const turns = [
       turn(1),
@@ -73,6 +77,7 @@ describe("ESF timeline observation markers", () => {
     ];
 
     const { container } = render(<ContextGrowthChart turns={turns} />);
+    await seriesMounted();
 
     const markers = screen.getAllByTestId("timeline-observation-marker");
     expect(
@@ -99,20 +104,23 @@ describe("ESF timeline observation markers", () => {
     ).toBe(true);
   });
 
-  it("renders no markers or legend when no completed-test events are observed", () => {
+  it("renders no markers or legend when no completed-test events are observed", async () => {
     render(<ContextGrowthChart turns={[turn(1), turn(2)]} />);
+    await seriesMounted();
     expect(screen.queryByTestId("timeline-observation-marker")).toBeNull();
     expect(screen.queryByTestId("timeline-observation-legend")).toBeNull();
   });
 
-  it("renders no markers for turns lacking the observation fields (older fixtures)", () => {
+  it("renders no markers for turns lacking the observation fields (older fixtures)", async () => {
     const { test_fail_events: _fail, test_pass_events: _pass, ...bare } = turn(1);
     render(<ContextGrowthChart turns={[bare]} />);
+    await seriesMounted();
     expect(screen.queryByTestId("timeline-observation-marker")).toBeNull();
   });
 
-  it("puts the completed-test method caveat in every marker tooltip", () => {
+  it("puts the completed-test method caveat in every marker tooltip", async () => {
     render(<ContextGrowthChart turns={[turn(1, { test_fail_events: 1 })]} />);
+    await seriesMounted();
 
     expect(
       screen.getByTestId("timeline-observation-marker").querySelector("title")?.textContent,

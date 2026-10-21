@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // PUB-6 regression coverage for src/apply/open-terminal-child.mjs — the wrapper
@@ -9,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // real subprocess (piped stdio → isTTY false → the hold-open pause is skipped,
 // so failures exit instead of hanging the suite).
 
-const WRAPPER = path.resolve("src/apply/open-terminal-child.mjs");
+// Resolve from this file, not cwd, so a run from another checkout tests THIS wrapper.
+const WRAPPER = fileURLToPath(new URL("../../src/apply/open-terminal-child.mjs", import.meta.url));
 
 let tmpRoot: string;
 
@@ -48,6 +50,31 @@ describe("open-terminal-child wrapper", () => {
     const res = runWrapper({ PATH: emptyDir }, writePrompt(), tmpRoot);
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/Could not find a claude executable/);
+  });
+
+  it("D2: starts claude without ANTHROPIC_API_KEY, keeping the rest of the env", () => {
+    // Fake `claude` = a copy of node; the seeded prompt (claude's argv[1]) is a script
+    // that reports which env vars it received.
+    const bin = path.join(tmpRoot, "bin");
+    fs.mkdirSync(bin);
+    const fakeClaude = path.join(bin, process.platform === "win32" ? "claude.exe" : "claude");
+    fs.copyFileSync(process.execPath, fakeClaude);
+    fs.chmodSync(fakeClaude, 0o755);
+    const probe = path.join(tmpRoot, "probe.cjs");
+    fs.writeFileSync(
+      probe,
+      "process.stdout.write(JSON.stringify({key: process.env.ANTHROPIC_API_KEY ?? null, keep: process.env.KEEP ?? null}))",
+      "utf8",
+    );
+    const promptFile = path.join(tmpRoot, "prompt.txt");
+    fs.writeFileSync(promptFile, probe, "utf8");
+    const res = runWrapper(
+      { PATH: bin, ANTHROPIC_API_KEY: "sk-ant-daemon", KEEP: "yes" },
+      promptFile,
+      tmpRoot,
+    );
+    expect(res.status).toBe(0);
+    expect(JSON.parse(res.stdout)).toEqual({ key: null, keep: "yes" });
   });
 
   it.runIf(process.platform === "win32")(

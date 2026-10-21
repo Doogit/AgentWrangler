@@ -328,7 +328,10 @@ function samePath(left: string, right: string): boolean {
 
 function within(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`));
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
 }
 
 function existingFile(inputPath: string, code: string): string {

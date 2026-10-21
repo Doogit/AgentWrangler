@@ -25,7 +25,7 @@ function addToolEvent(
   const ts = new Date(Date.UTC(2026, 8, 1, 12, 0, index)).toISOString();
   db.prepare(
     `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash, exit_class)
-     VALUES (?, 'sess-a1', ?, 'Bash', ?, ?)`,
+     VALUES (?, 'sess-a1', ?, 'ToolA', ?, ?)`,
   ).run(`guard-event-${index}`, ts, inputHash, exitClass);
 }
 

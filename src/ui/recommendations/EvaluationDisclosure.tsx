@@ -113,7 +113,7 @@ export default function EvaluationDisclosure({
           </p>
         </>
       )}
-      <button type="button" className="rec-action-btn" onClick={onClose}>
+      <button type="button" className="btn-secondary" onClick={onClose}>
         Back
       </button>
     </section>

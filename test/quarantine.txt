@@ -1,0 +1,6 @@
+# Known load flakes (perf plan §6 flake rule, review M35).
+# A listed file may be re-run once, alone; paste both outputs in the PR.
+# A test added or changed by the unit is never re-run-eligible.
+# Format: <file> — <reason> — <tracking ref>
+test/daemon/background-pipeline.test.ts — NFR-105 /api/overview 250 ms budget fails under full-suite load, passes alone — rec-trust-execution-plan §gate-flakes; fix in P0-U9
+test/ui/workspace-scope-navigation.test.tsx — fails under full UI-suite load (6 failures seen 2026-09-25), 21/21 alone — rec-trust-execution-plan §gate-flakes

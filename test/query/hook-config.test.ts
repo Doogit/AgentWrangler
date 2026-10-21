@@ -29,16 +29,16 @@ describe("hook config", () => {
   it("persists a partial update and reads it back", () => {
     const updated = updateHookConfig({
       context_window: 1_000_000,
-      soft_pct: 0.5,
+      soft_pct: 0.25,
       stale_s: 90,
       d7_fail_count: 4,
       d7_window_turns: 12,
     }).data;
     expect(updated).toMatchObject({
       context_window: 1_000_000,
-      soft_pct: 0.5,
+      soft_pct: 0.25,
       stale_s: 90,
-      hard_pct: 0.8,
+      hard_pct: 0.3,
       d7_fail_count: 4,
       d7_window_turns: 12,
     });
@@ -60,7 +60,7 @@ describe("hook config", () => {
 
   it.each([
     { hard_pct: 2 },
-    { hard_pct: 0.5 }, // must exceed the default soft_pct (0.6)
+    { hard_pct: 0.15 }, // must exceed the default soft_pct (0.2)
     { soft_pct: 0 },
     { context_window: 0 },
     { stale_s: -1 },

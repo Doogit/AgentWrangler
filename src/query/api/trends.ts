@@ -11,6 +11,10 @@ import { getQueryDb } from "../db-context.js";
 import type { ApiResponse, QueryWindow } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
 import {
+  type PersistedRecommendationContractRow,
+  trustedRecommendationContract,
+} from "../recommendation-contract.js";
+import {
   type BucketSize,
   type CacheWriteBucketRow,
   type CapWeightedBucketRow,
@@ -39,6 +43,12 @@ export interface AdoptionMarker {
   lever: string;
   adopted_at: string;
   /** X-axis coordinate normalized to the response bucket size. */
+  bucket: string;
+}
+
+interface AdoptionMarkerRow extends PersistedRecommendationContractRow {
+  rec_id: string;
+  adopted_at: string;
   bucket: string;
 }
 
@@ -113,7 +123,9 @@ function adoptionMarkers(
   workspaceId?: string,
 ): AdoptionMarker[] {
   const bucketSql = adoptionBucketExpr(bucket);
-  const base = `SELECT rec_id, detector_id, lever, adopted_at, ${bucketSql} AS bucket
+  const base = `SELECT rec_id, detector_id, category, lever, target_metric,
+                       evidence_json, contract_version,
+                       template_id, contract_status, rule_id, adopted_at, ${bucketSql} AS bucket
                   FROM recommendations
                  WHERE adopted_at IS NOT NULL
                    AND adopted_at >= ? AND adopted_at < ?
@@ -121,12 +133,27 @@ function adoptionMarkers(
                                  'MEASURED_NO_EFFECT')`;
   const tail = "ORDER BY adopted_at ASC, rec_id ASC";
 
-  if (workspaceId !== undefined) {
-    return db
-      .prepare(`${base} AND scope_workspace_id = ? ${tail}`)
-      .all(from, to, workspaceId) as AdoptionMarker[];
-  }
-  return db.prepare(`${base} ${tail}`).all(from, to) as AdoptionMarker[];
+  const rows =
+    workspaceId !== undefined
+      ? (db
+          .prepare(`${base} AND scope_workspace_id = ? ${tail}`)
+          .all(from, to, workspaceId) as AdoptionMarkerRow[])
+      : (db.prepare(`${base} ${tail}`).all(from, to) as AdoptionMarkerRow[]);
+
+  return rows.flatMap((row) => {
+    const contract = trustedRecommendationContract(row);
+    return contract === null
+      ? []
+      : [
+          {
+            rec_id: row.rec_id,
+            detector_id: contract.definition.detector_id,
+            lever: contract.definition.lever,
+            adopted_at: row.adopted_at,
+            bucket: row.bucket,
+          },
+        ];
+  });
 }
 
 /** SQLite BINARY collation (UTF-8 byte order) — keeps derived orderings identical to the previous per-series ORDER BY. */

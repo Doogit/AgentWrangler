@@ -68,15 +68,12 @@ function evidenceSummary(
         {" Distinct sessions: "}
         {aggregate.sessionN}. Exposures: {aggregate.exposureN}.
       </p>
-      <p>
-        Exclusions: {excluded || "none recorded"}. Method: {evidence.methodVersion}; query:{" "}
-        {evidence.queryDefinitionVersion}.
-      </p>
+      <p>Exclusions: {excluded || "none recorded"}.</p>
     </>
   );
 }
 
-function openProgress(cycle: EffectCycle, evidence: ObservationBundle | null) {
+function cycleDays(cycle: EffectCycle): { elapsedDays: number; totalDays: number } {
   const start = new Date(cycle.observationFrom).getTime();
   const end = new Date(cycle.scheduledObservationTo).getTime();
   const totalDays = Math.max(1, Math.ceil((end - start) / 86_400_000));
@@ -84,6 +81,20 @@ function openProgress(cycle: EffectCycle, evidence: ObservationBundle | null) {
     1,
     Math.min(totalDays, Math.ceil((Date.now() - start) / 86_400_000)),
   );
+  return { elapsedDays, totalDays };
+}
+
+/** One status line for an open cycle: "Measuring · day N of T · verdict ~YYYY-MM-DD". */
+export function measuringStatusLine(cycle: EffectCycle): string {
+  const verdict = `verdict ~${cycle.scheduledObservationTo?.slice(0, 10) ?? "date pending"}`;
+  const { elapsedDays, totalDays } = cycleDays(cycle);
+  return Number.isFinite(elapsedDays) && Number.isFinite(totalDays)
+    ? `Measuring · day ${elapsedDays} of ${totalDays} · ${verdict}`
+    : `Measuring · ${verdict}`;
+}
+
+function openProgress(cycle: EffectCycle, evidence: ObservationBundle | null) {
+  const { elapsedDays, totalDays } = cycleDays(cycle);
   const sessions = evidence?.after.sessionN ?? 0;
   const gate = cycle.targetDefinition.minimumSessions;
   return {
@@ -302,7 +313,7 @@ export default function EffectEvidence({
             <button
               key={item.cycleId}
               type="button"
-              className="rec-action-btn"
+              className="btn-secondary"
               aria-label={`${label}. Contract version ${item.contractVersion}.`}
               aria-pressed={item.cycleId === cycle.cycleId}
               onClick={() => setSelectedCycleId(item.cycleId)}
@@ -317,12 +328,7 @@ export default function EffectEvidence({
         })}
       </div>
       {nextCycleCursor !== null && onLoadMore !== undefined && (
-        <button
-          type="button"
-          className="rec-action-btn"
-          onClick={onLoadMore}
-          disabled={loadingMore}
-        >
+        <button type="button" className="btn-secondary" onClick={onLoadMore} disabled={loadingMore}>
           {loadingMore ? "Loading more cycles…" : "Load more cycles"}
         </button>
       )}
@@ -359,10 +365,6 @@ export default function EffectEvidence({
         </span>
       </div>
       <div className="ledger-row">
-        <span className="ledger-key">Contract version</span>
-        <span className="ledger-val">{cycle.contractVersion}</span>
-      </div>
-      <div className="ledger-row">
         <span className="ledger-key">Evidence state</span>
         <span className="ledger-val">{label}</span>
       </div>
@@ -386,13 +388,6 @@ export default function EffectEvidence({
       )}
       <section className="rec-section" aria-label="Evidence and limits">
         <h4 className="rec-section-label">Evidence and limits</h4>
-        <p style={{ overflowWrap: "anywhere" }}>
-          Frozen cycle ID: {cycle.cycleId}. Workspace: {cycle.scope.workspaceId ?? "all"}.
-          {cycle.scope.sourceIdentity && ` Source identity: ${cycle.scope.sourceIdentity}.`}
-          {cycle.scope.tool && ` Tool: ${cycle.scope.tool}.`}
-          {" Frozen cohort: "}
-          {JSON.stringify(cycle.cohort)}.
-        </p>
         <p>
           Baseline window: [{cycle.baselineFrom}, {cycle.baselineTo}); observation window: [
           {cycle.observationFrom}, {cycle.observationTo ?? cycle.scheduledObservationTo}). Boundary
@@ -419,6 +414,21 @@ export default function EffectEvidence({
             : `closed ${date(cycle.attributionClosedAt)}`}
         </span>
       </div>
+      <details className="rec-diagnostics">
+        <summary>Technical</summary>
+        <div className="rec-diagnostics-body">
+          <p style={{ overflowWrap: "anywhere" }}>
+            Frozen cycle ID: {cycle.cycleId}. Contract version: {cycle.contractVersion}. Workspace:{" "}
+            {cycle.scope.workspaceId ?? "all"}.
+            {cycle.scope.sourceIdentity && ` Source identity: ${cycle.scope.sourceIdentity}.`}
+            {cycle.scope.tool && ` Tool: ${cycle.scope.tool}.`}
+            {evidence !== null &&
+              ` Method: ${evidence.methodVersion}; query: ${evidence.queryDefinitionVersion}.`}
+            {" Frozen cohort: "}
+            {JSON.stringify(cycle.cohort)}.
+          </p>
+        </div>
+      </details>
     </div>
   );
 }

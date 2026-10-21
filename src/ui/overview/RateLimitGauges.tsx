@@ -24,9 +24,9 @@ function band(utilization: number): Band {
 }
 
 function bandColor(b: Band): string {
-  if (b === "red") return "var(--red, #e05252)";
-  if (b === "amber") return "var(--amber, #d4a017)";
-  return "var(--green, #3fa66b)";
+  if (b === "red") return "var(--red)";
+  if (b === "amber") return "var(--amber)";
+  return "var(--green)";
 }
 
 function fmtResetTime(iso: string): string {
@@ -42,7 +42,7 @@ function Gauge({
   label,
   utilization,
   resetsAt,
-}: { label: string; utilization: number; resetsAt: string }) {
+}: { label: string; utilization: number; resetsAt: string | null }) {
   const pct = Math.round(utilization * 100);
   const b = band(utilization);
   const color = bandColor(b);
@@ -69,7 +69,7 @@ function Gauge({
         style={{
           height: 8,
           borderRadius: 4,
-          background: "rgba(132,146,166,.18)",
+          background: "var(--meter-track)",
           overflow: "hidden",
           marginBottom: 4,
         }}
@@ -86,7 +86,9 @@ function Gauge({
           }}
         />
       </div>
-      <div style={{ fontSize: 11, color: "var(--muted)" }}>resets {fmtResetTime(resetsAt)}</div>
+      <div style={{ fontSize: 11, color: "var(--muted)" }}>
+        {resetsAt !== null ? `resets ${fmtResetTime(resetsAt)}` : "no active window"}
+      </div>
     </div>
   );
 }

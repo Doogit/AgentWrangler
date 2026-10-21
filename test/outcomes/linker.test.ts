@@ -127,7 +127,7 @@ describe("evaluateBranchLinksShadow", () => {
 
   it("keeps the production linker independent of the branch table", async () => {
     db.exec("DROP TABLE work_item_branch_keys");
-    await expect(linkSessions(db, disabledClient)).resolves.toBeUndefined();
+    await expect(linkSessions(db, disabledClient)).resolves.toMatchObject({ failedReads: 0 });
   });
 
   it("bounds per-session keys and classifies absent, invalid, repeated, and multiple refs", async () => {
@@ -569,6 +569,25 @@ describe("linkSessions — TRAILER", () => {
     } as unknown as Response;
   }
 
+  it("reports swallowed commit and body read failures without raw provider content", async () => {
+    addWorkItem(404);
+    const client = new GithubSyncClient(
+      { ok: true, data: "tok" },
+      async () =>
+        ({
+          ok: false,
+          status: 403,
+          json: async () => ({ error: "secret" }),
+          text: async () => "secret",
+          headers: { get: () => null },
+        }) as unknown as Response,
+    );
+    const summary = await linkSessions(db, client);
+    expect(summary.failedReads).toBeGreaterThan(0);
+    expect(summary.categories["access-ambiguous"]).toBeGreaterThan(0);
+    expect(JSON.stringify(summary)).not.toContain("secret");
+  });
+
   it("links via a Claude-Session trailer in a commit message", async () => {
     const workItemId = addWorkItem(401);
     const fetchFn: import("../../src/outcomes/github/client.js").FetchFn = async (input) => {
@@ -665,7 +684,7 @@ describe("linkSessions — TRAILER", () => {
 
     await expect(
       linkSessions(db, new GithubSyncClient({ ok: true, data: "tok" }, fetchFn)),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ failedReads: 0 });
 
     expect(
       db.prepare("SELECT 1 FROM session_work_links WHERE session_id='sess-a1'").get(),
@@ -685,7 +704,7 @@ describe("linkSessions — TRAILER", () => {
 
     await expect(
       linkSessions(db, new GithubSyncClient({ ok: true, data: "tok" }, fetchFn)),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ failedReads: 0 });
 
     expect(
       db.prepare("SELECT 1 FROM session_work_links WHERE session_id='sess-a1'").get(),

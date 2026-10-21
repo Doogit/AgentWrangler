@@ -305,16 +305,33 @@ function computeP7(db: Db, fromIso: string, toIso: string): PracticeStatus {
   return share === null || share === undefined ? "NO_DATA" : "PASS";
 }
 
+/** W0 statuses persisted by runHistoryWalk, or null when any practice signal is missing. */
+function persistedDetectorStatus(db: Db): Map<string, string> | null {
+  const rows = db.prepare("SELECT detector_id, status FROM detector_status_live").all() as Array<{
+    detector_id: string;
+    status: string;
+  }>;
+  const map = new Map(rows.map((r) => [r.detector_id, r.status]));
+  return REGISTRY.every((e) => !/^D\d+$/.test(e.signal) || map.has(e.signal)) ? map : null;
+}
+
 /**
  * Compute the practice scorecard over [from, to). Detector-backed practices
  * (P3/P4/P6/P8) read the live detector statuses anchored at `to`; the rest read
- * existing aggregates directly.
+ * existing aggregates directly. `persistedStrip` (window ends now) reads the W0
+ * strip the history walk already stored, avoiding a ~5 s full detector evaluation.
  */
-export function getPractices(db: Db, opts: { from: string; to: string }): PracticesResult {
+export function getPractices(
+  db: Db,
+  opts: { from: string; to: string; persistedStrip?: boolean },
+): PracticesResult {
   const { from, to } = opts;
-  const detectorStatus = new Map<string, string>();
-  for (const s of getDetectorStatuses(db, { now: new Date(to) })) {
-    detectorStatus.set(s.detector_id, s.status);
+  let detectorStatus = opts.persistedStrip ? persistedDetectorStatus(db) : null;
+  if (detectorStatus === null) {
+    detectorStatus = new Map<string, string>();
+    for (const s of getDetectorStatuses(db, { now: new Date(to) })) {
+      detectorStatus.set(s.detector_id, s.status);
+    }
   }
 
   const practices = REGISTRY.map((entry): PracticeEntry => {

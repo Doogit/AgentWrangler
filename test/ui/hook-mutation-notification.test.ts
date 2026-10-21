@@ -9,11 +9,11 @@ describe("hook installation status invalidation", () => {
     async (mutate) => {
       const listener = vi.fn();
       window.addEventListener("agentwrangler:hooks-changed", listener);
+      // P1-U6a: the session token is fetched once per page and reused (session-token.ts).
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce(new Response(JSON.stringify({ token: "synthetic-token" })))
         .mockResolvedValueOnce(new Response("conflict", { status: 409 }))
-        .mockResolvedValueOnce(new Response(JSON.stringify({ token: "fresh-token" })))
         .mockResolvedValueOnce(
           new Response(JSON.stringify({ changed: true, settingsPath: "/synthetic/settings.json" })),
         );
@@ -24,10 +24,10 @@ describe("hook installation status invalidation", () => {
         await expect(mutate()).resolves.toMatchObject({ changed: true });
         expect(listener).toHaveBeenCalledTimes(1);
         expect(fetchMock).toHaveBeenNthCalledWith(
-          4,
+          3,
           expect.any(String),
           expect.objectContaining({
-            headers: expect.objectContaining({ "X-AgentWrangler-Token": "fresh-token" }),
+            headers: expect.objectContaining({ "X-AgentWrangler-Token": "synthetic-token" }),
           }),
         );
       } finally {

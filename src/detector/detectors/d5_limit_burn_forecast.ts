@@ -11,9 +11,9 @@
  */
 
 import type { Db } from "../../db/open.js";
-import { capWeightExprSql } from "../../query/cap-weighted.js";
-import { forecastFromDb } from "../../query/forecast.js";
-import { d5Formula } from "../savings.js";
+import { capWeightExprSql, resolveCapReadCoeff } from "../../query/cap-weighted.js";
+import { forecastFromDb, toJulianDay } from "../../query/forecast.js";
+import { d5Estimate } from "../savings.js";
 import type { Detector, DetectorContext, DetectorOutcome, Fired } from "../types.js";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -33,6 +33,20 @@ interface DegradedBurnTrend {
   baselineTokens: number;
   baselineTokensPerDay: number;
   deltaTokensPerDay: number;
+}
+
+function sessionIdsForWindow(db: Db, fromMs: number, toMs: number): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT DISTINCT session_id FROM turns
+          WHERE ts >= ? AND ts < ?
+          ORDER BY session_id LIMIT 20`,
+      )
+      .all(new Date(fromMs).toISOString(), new Date(toMs).toISOString()) as Array<{
+      session_id: string;
+    }>
+  ).map((row) => row.session_id);
 }
 
 function aggregateCapWeightedBurn(
@@ -91,11 +105,252 @@ function directionLabel(direction: DegradedBurnTrend["direction"]): string {
   }
 }
 
+const MS_PER_HOUR = 60 * 60 * 1000;
+const WEEK_MS = 7 * MS_PER_DAY;
+/** A reading older than this is not a basis for a forecast. */
+const SNAPSHOT_MAX_AGE_MS = 48 * MS_PER_HOUR;
+/**
+ * Pace is the change over the last full day before the latest reading (or since the reset when
+ * the week is younger). A shorter gap reads a burst as the day's pace: 13% → 27% in 5h was
+ * projected over 78h to 247% while the day's real pace pointed to about 108%.
+ */
+const PACE_WINDOW_MS = 24 * MS_PER_HOUR;
+/** Too little of the week has passed to read an average pace. */
+const MIN_ELAPSED_FOR_AVERAGE_MS = 6 * MS_PER_HOUR;
+/** Projected % of the weekly limit at the reset: a warning from here, high severity from 100. */
+const WARN_PROJECTED_PCT = 85;
+const EXCEED_PROJECTED_PCT = 100;
+/** Without snapshots the stored token limit is compared with a 7-day burn, not a 1-day one. */
+const LEGACY_WINDOW_DAYS = 7;
+
+interface SnapshotRow {
+  ts: string;
+  resets_at: string | null;
+  used_pct: number | null;
+}
+
+export interface SnapshotForecast {
+  usedPct: number;
+  projectedPct: number;
+  pacePctPerDay: number;
+  /** Hours the pace was read over: 24, or less when the week started under a day ago. */
+  paceWindowHours: number;
+  hoursToReset: number;
+  resetsAtIso: string;
+  weekStartMs: number;
+  /** Null when the limit is already hit or no further use is projected. */
+  hitAtMs: number | null;
+  requiredCutPct: number;
+  severity: "high" | "medium";
+  exceeded: boolean;
+}
+
+/**
+ * Project the weekly limit from the API's own used_pct readings: used now plus pace times the
+ * hours left to the reset. Pace is the change over the 24h before the latest reading (see
+ * PACE_WINDOW_MS), or since the reset when that is nearer. Returns null when there is no usable reading,
+ * and a forecast with `severity` only when the projection reaches the warning line.
+ */
+export function forecastFromSnapshots(
+  db: Db,
+  now: Date,
+): { forecast: SnapshotForecast | null; haveSnapshot: boolean } {
+  const nowMs = now.getTime();
+  const latest = db
+    .prepare(
+      `SELECT ts, resets_at, used_pct FROM limit_snapshots
+        WHERE ts <= ? AND resets_at > ? AND used_pct IS NOT NULL
+        ORDER BY ts DESC LIMIT 1`,
+    )
+    .get(now.toISOString(), now.toISOString()) as SnapshotRow | undefined;
+  if (latest === undefined || latest.resets_at === null || latest.used_pct === null) {
+    return { forecast: null, haveSnapshot: false };
+  }
+  const latestMs = Date.parse(latest.ts);
+  if (nowMs - latestMs > SNAPSHOT_MAX_AGE_MS) return { forecast: null, haveSnapshot: false };
+
+  const resetMs = Date.parse(latest.resets_at);
+  const weekStartMs = resetMs - WEEK_MS;
+  const used = latest.used_pct;
+  const hoursToReset = Math.max(0, (resetMs - latestMs) / MS_PER_HOUR);
+  const weekRows = (
+    db
+      .prepare(
+        `SELECT ts, resets_at, used_pct FROM limit_snapshots
+          WHERE ts >= ? AND ts < ? AND used_pct IS NOT NULL AND resets_at IS NOT NULL
+          ORDER BY ts`,
+      )
+      .all(new Date(weekStartMs).toISOString(), latest.ts) as SnapshotRow[]
+  ).filter((r) => Math.abs(Date.parse(r.resets_at as string) - resetMs) < MS_PER_HOUR);
+
+  if (latestMs - weekStartMs < MIN_ELAPSED_FOR_AVERAGE_MS) {
+    return { forecast: null, haveSnapshot: true };
+  }
+
+  // Used % at the start of the pace window: between the readings around it (the reset counts as
+  // 0%), split by the local cap-weighted burn on each side, or by time when there is none.
+  const anchorMs = Math.max(weekStartMs, latestMs - PACE_WINDOW_MS);
+  let prev = { ms: weekStartMs, pct: 0 };
+  let next = { ms: latestMs, pct: used };
+  for (const r of weekRows) {
+    const ms = Date.parse(r.ts);
+    if (ms <= anchorMs) prev = { ms, pct: r.used_pct as number };
+    else {
+      next = { ms, pct: r.used_pct as number };
+      break;
+    }
+  }
+  let share = 0;
+  if (anchorMs > prev.ms) {
+    const coeff = resolveCapReadCoeff(db);
+    const span = aggregateCapWeightedBurn(db, prev.ms, next.ms, coeff).tokens;
+    share =
+      span > 0
+        ? aggregateCapWeightedBurn(db, prev.ms, anchorMs, coeff).tokens / span
+        : (anchorMs - prev.ms) / (next.ms - prev.ms);
+  }
+  const usedAtAnchor = prev.pct + (next.pct - prev.pct) * share;
+  const paceWindowHours = (latestMs - anchorMs) / MS_PER_HOUR;
+  const pacePerHour = Math.max(0, (used - usedAtAnchor) / paceWindowHours);
+
+  const projectedPct = used + pacePerHour * hoursToReset;
+  const exceeded = used >= EXCEED_PROJECTED_PCT;
+  if (!exceeded && projectedPct < WARN_PROJECTED_PCT) return { forecast: null, haveSnapshot: true };
+
+  const hitAtMs =
+    exceeded || pacePerHour <= 0 || projectedPct < EXCEED_PROJECTED_PCT
+      ? null
+      : latestMs + ((EXCEED_PROJECTED_PCT - used) / pacePerHour) * MS_PER_HOUR;
+  const requiredCutPct =
+    projectedPct > EXCEED_PROJECTED_PCT && !exceeded
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            Math.round((1 - (EXCEED_PROJECTED_PCT - used) / (pacePerHour * hoursToReset)) * 100),
+          ),
+        )
+      : 0;
+  return {
+    haveSnapshot: true,
+    forecast: {
+      usedPct: used,
+      projectedPct,
+      pacePctPerDay: pacePerHour * 24,
+      paceWindowHours,
+      hoursToReset,
+      resetsAtIso: new Date(resetMs).toISOString(),
+      weekStartMs,
+      hitAtMs,
+      requiredCutPct,
+      severity: exceeded || projectedPct >= EXCEED_PROJECTED_PCT ? "high" : "medium",
+      exceeded,
+    },
+  };
+}
+
+function topByCost(
+  db: Db,
+  column: "workspace_id" | "model",
+  fromMs: number,
+  toMs: number,
+): { key: string; share: number } | null {
+  const rows = db
+    .prepare(
+      `SELECT ${column} AS key, COALESCE(SUM(cost_equiv_u), 0) AS u FROM turns
+        WHERE ts >= ? AND ts < ? AND ${column} <> ''
+        GROUP BY ${column} ORDER BY u DESC, ${column} ASC`,
+    )
+    .all(new Date(fromMs).toISOString(), new Date(toMs).toISOString()) as Array<{
+    key: string;
+    u: number;
+  }>;
+  const total = rows.reduce((sum, r) => sum + r.u, 0);
+  const top = rows[0];
+  if (top === undefined || total <= 0) return null;
+  return { key: top.key, share: top.u / total };
+}
+
 export const d5Detector: Detector = {
+  contractVersion: 1,
+  version: "D5@u7-1",
+  scope: "cross-session",
+  inputs: {
+    tables: [
+      "turns",
+      "sessions",
+      "workspaces",
+      "user_config",
+      "pricing_snapshots",
+      "limit_snapshots",
+    ],
+    clock: true,
+  },
   id: "D5",
   name: "LIMIT_BURN_FORECAST",
   evaluate(db: Db, ctx: DetectorContext): DetectorOutcome {
-    const forecast = forecastFromDb(db, { now: ctx.now });
+    const snap = forecastFromSnapshots(db, ctx.now);
+    if (snap.forecast !== null) {
+      const f = snap.forecast;
+      const nowMs = ctx.now.getTime();
+      const topWorkspace = topByCost(db, "workspace_id", f.weekStartMs, nowMs);
+      const topModel = topByCost(db, "model", f.weekStartMs, nowMs);
+      const coeff = resolveCapReadCoeff(db);
+      const fired: Fired = {
+        scopeKey: "D5|global|LIMIT_BURN_FORECAST",
+        scope_workspace_id: null,
+        modeled_savings_u_per_wk: null,
+        modeled_formula_json: { estimate: d5Estimate({}) },
+        payload: {
+          version: 1,
+          template_id: "D5_LIMIT_BURN_WARNING",
+          facts: {
+            forecast_state: f.exceeded ? "EXCEEDED" : "WARNING",
+            session_ids: sessionIdsForWindow(
+              db,
+              nowMs - RECENT_BURN_WINDOW_DAYS * MS_PER_DAY,
+              nowMs,
+            ),
+            tokens_used: aggregateCapWeightedBurn(db, f.weekStartMs, nowMs, coeff).tokens,
+            limit_tokens: null,
+            projected_exhaustion_jd: f.hitAtMs === null ? null : toJulianDay(new Date(f.hitAtMs)),
+            limit_scale_legacy: false,
+            severity: f.severity,
+            used_pct: Math.round(f.usedPct * 10) / 10,
+            projected_pct: Math.round(f.projectedPct),
+            pace_pct_per_day: Math.round(f.pacePctPerDay * 10) / 10,
+            pace_window_hours: Math.round(f.paceWindowHours * 10) / 10,
+            hours_to_reset: Math.round(f.hoursToReset),
+            resets_at: f.resetsAtIso,
+            required_cut_pct: f.requiredCutPct,
+            ...(f.hitAtMs === null
+              ? {}
+              : { projected_limit_hit_at: new Date(f.hitAtMs).toISOString() }),
+            ...(topWorkspace === null
+              ? {}
+              : {
+                  top_workspace_id: topWorkspace.key,
+                  top_workspace_share: Math.round(topWorkspace.share * 100) / 100,
+                }),
+            ...(topModel === null ? {} : { top_model: topModel.key }),
+          },
+        },
+      };
+      return {
+        fired: [fired],
+        status: "ACTIVE",
+        note: `weekly limit projected at ${Math.round(f.projectedPct)}% by the reset (${Math.round(f.usedPct)}% used)`,
+      };
+    }
+    if (snap.haveSnapshot) {
+      return {
+        fired: [],
+        status: "INACTIVE",
+        note: "weekly limit readings project the week ending below the warning line",
+      };
+    }
+
+    const forecast = forecastFromDb(db, { now: ctx.now, windowDays: LEGACY_WINDOW_DAYS });
 
     if (forecast.state === "OFF") {
       const trend = degradedBurnTrend(db, ctx.now, forecast.cap_read_coeff);
@@ -105,29 +360,28 @@ export const d5Detector: Detector = {
 
       const fired: Fired = {
         scopeKey: "D5|global|LIMIT_BURN_FORECAST",
-        category: "LIMIT",
         scope_workspace_id: null,
-        lever: `${CALIBRATION_NUDGE}, then use this burn trend to guide workload.`,
-        target_metric: "burn_trend",
         modeled_savings_u_per_wk: null,
-        modeled_formula: d5Formula(),
-        evidence: {
-          title: `Burn trend ${directionLabel(trend.direction)}: ${CALIBRATION_NUDGE}`,
-          state: "DEGRADED",
-          forecast_state: forecast.state,
-          tokens_used: forecast.tokens_used,
-          limit_tokens: null,
-          projected_exhaustion_jd: null,
-          token_metric: forecast.token_metric,
-          cap_weighted: forecast.cap_weighted,
-          burn_trend: trend.direction,
-          recent_cap_weighted_tokens: trend.recentTokens,
-          recent_cap_weighted_tokens_per_day: trend.recentTokensPerDay,
-          baseline_cap_weighted_tokens: trend.baselineTokens,
-          baseline_cap_weighted_tokens_per_day: trend.baselineTokensPerDay,
-          baseline_window_days: BASELINE_BURN_WINDOW_DAYS,
-          trend_delta_cap_weighted_tokens_per_day: trend.deltaTokensPerDay,
-          calibration_nudge: CALIBRATION_NUDGE,
+        modeled_formula_json: { estimate: d5Estimate({}) },
+        payload: {
+          version: 1,
+          template_id: "D5_LIMIT_BURN_DEGRADED",
+          facts: {
+            forecast_state: forecast.state,
+            session_ids: sessionIdsForWindow(
+              db,
+              ctx.now.getTime() -
+                (RECENT_BURN_WINDOW_DAYS + BASELINE_BURN_WINDOW_DAYS) * MS_PER_DAY,
+              ctx.now.getTime(),
+            ),
+            tokens_used: forecast.tokens_used,
+            burn_trend: trend.direction,
+            recent_cap_weighted_tokens: trend.recentTokens,
+            recent_cap_weighted_tokens_per_day: trend.recentTokensPerDay,
+            baseline_cap_weighted_tokens: trend.baselineTokens,
+            baseline_cap_weighted_tokens_per_day: trend.baselineTokensPerDay,
+            baseline_window_days: BASELINE_BURN_WINDOW_DAYS,
+          },
         },
       };
       return {
@@ -141,28 +395,24 @@ export const d5Detector: Detector = {
       const stateLabel = forecast.state === "EXCEEDED" ? "EXCEEDED" : "warning";
       const fired: Fired = {
         scopeKey: "D5|global|LIMIT_BURN_FORECAST",
-        category: "LIMIT",
         scope_workspace_id: null,
-        lever:
-          "Scope work to the top-burn workspace/sessions before the weekly reset; reduce burn rate.",
-        target_metric: "forecast_margin",
         modeled_savings_u_per_wk: null,
-        modeled_formula: d5Formula(),
-        evidence: {
-          title: `Rate-limit ${stateLabel}: reduce burn before weekly reset`,
-          state: forecast.state,
-          tokens_used: forecast.tokens_used,
-          limit_tokens: forecast.limit_tokens,
-          projected_exhaustion_jd: forecast.projected_exhaustion_jd,
-          token_metric: forecast.token_metric,
-          cap_weighted: true,
-          // Legacy limit-scale honesty flag (review P1): true when the stored
-          // limit was calibrated under the old full-weight meter, so the fired
-          // evidence carries the caveat instead of silently trusting the number.
-          limit_scale_legacy: forecast.limit_scale_legacy,
-          ...(forecast.limit_scale_note !== null
-            ? { limit_scale_note: forecast.limit_scale_note }
-            : {}),
+        modeled_formula_json: { estimate: d5Estimate({}) },
+        payload: {
+          version: 1,
+          template_id: "D5_LIMIT_BURN_WARNING",
+          facts: {
+            forecast_state: forecast.state,
+            session_ids: sessionIdsForWindow(
+              db,
+              ctx.now.getTime() - RECENT_BURN_WINDOW_DAYS * MS_PER_DAY,
+              ctx.now.getTime(),
+            ),
+            tokens_used: forecast.tokens_used,
+            limit_tokens: forecast.limit_tokens,
+            projected_exhaustion_jd: forecast.projected_exhaustion_jd,
+            limit_scale_legacy: forecast.limit_scale_legacy,
+          },
         },
       };
       return { fired: [fired], status: "ACTIVE", note: `burn forecast ${forecast.state}` };

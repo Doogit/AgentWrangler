@@ -47,7 +47,7 @@ describe("parseRemoteUrl", () => {
 });
 
 describe("resolveWorkspaceMappings", () => {
-  it("reports only mappings newly resolved during this call", () => {
+  it("reports only mappings newly resolved during this call", async () => {
     db.prepare(
       `INSERT INTO workspaces
          (workspace_id, project_slug, discovered_cwd, registered_at)
@@ -55,8 +55,8 @@ describe("resolveWorkspaceMappings", () => {
     ).run("workspace-1", "project-1", "C:/repo-1", "2026-08-29T00:00:00Z");
     const readRemote = vi.fn(() => "git@github.com:Owner/Repo.git");
 
-    expect(resolveWorkspaceMappings(db, { readRemote })).toBe(1);
-    expect(resolveWorkspaceMappings(db, { readRemote })).toBe(0);
+    expect(await resolveWorkspaceMappings(db, { readRemote })).toBe(1);
+    expect(await resolveWorkspaceMappings(db, { readRemote })).toBe(0);
 
     db.prepare(
       `INSERT INTO workspaces
@@ -65,10 +65,10 @@ describe("resolveWorkspaceMappings", () => {
     ).run("workspace-2", "project-2", "C:/repo-2", "2026-08-29T00:00:00Z");
     const noRemote = vi.fn(() => null);
 
-    expect(resolveWorkspaceMappings(db, { readRemote: noRemote })).toBe(0);
+    expect(await resolveWorkspaceMappings(db, { readRemote: noRemote })).toBe(0);
   });
 
-  it("fills repo path and GitHub identity from discovered cwd", () => {
+  it("fills repo path and GitHub identity from discovered cwd", async () => {
     db.prepare(
       `INSERT INTO workspaces
          (workspace_id, project_slug, discovered_cwd, registered_at)
@@ -76,7 +76,7 @@ describe("resolveWorkspaceMappings", () => {
     ).run("workspace-1", "project-1", "C:/repo-1", "2026-08-29T00:00:00Z");
     const readRemote = vi.fn(() => "git@github.com:Owner/Repo.git");
 
-    resolveWorkspaceMappings(db, { readRemote });
+    await resolveWorkspaceMappings(db, { readRemote });
 
     expect(
       db
@@ -87,7 +87,7 @@ describe("resolveWorkspaceMappings", () => {
     expect(readRemote).toHaveBeenCalledWith("C:/repo-1");
   });
 
-  it("leaves a manual repo owner untouched", () => {
+  it("leaves a manual repo owner untouched", async () => {
     db.prepare(
       `INSERT INTO workspaces
          (workspace_id, project_slug, repo_path, repo_owner, repo_name, discovered_cwd, registered_at)
@@ -103,7 +103,7 @@ describe("resolveWorkspaceMappings", () => {
     );
     const readRemote = vi.fn(() => "git@github.com:Other/Repo.git");
 
-    resolveWorkspaceMappings(db, { readRemote });
+    await resolveWorkspaceMappings(db, { readRemote });
 
     expect(
       db
@@ -113,7 +113,7 @@ describe("resolveWorkspaceMappings", () => {
     expect(readRemote).not.toHaveBeenCalled();
   });
 
-  it("keeps identity null when the checkout has no remote", () => {
+  it("keeps identity null when the checkout has no remote", async () => {
     db.prepare(
       `INSERT INTO workspaces
          (workspace_id, project_slug, discovered_cwd, registered_at)
@@ -122,8 +122,8 @@ describe("resolveWorkspaceMappings", () => {
     const unresolved = new Set<string>();
     const readRemote = vi.fn(() => null);
 
-    resolveWorkspaceMappings(db, { readRemote, unresolved });
-    resolveWorkspaceMappings(db, { readRemote, unresolved });
+    await resolveWorkspaceMappings(db, { readRemote, unresolved });
+    await resolveWorkspaceMappings(db, { readRemote, unresolved });
 
     expect(
       db
@@ -133,7 +133,7 @@ describe("resolveWorkspaceMappings", () => {
     expect(readRemote).toHaveBeenCalledTimes(1);
   });
 
-  it("skips a workspace after a non-GitHub remote", () => {
+  it("skips a workspace after a non-GitHub remote", async () => {
     db.prepare(
       `INSERT INTO workspaces
          (workspace_id, project_slug, discovered_cwd, registered_at)
@@ -142,8 +142,8 @@ describe("resolveWorkspaceMappings", () => {
     const unresolved = new Set<string>();
     const readRemote = vi.fn(() => "git@gitlab.com:Owner/Repo.git");
 
-    resolveWorkspaceMappings(db, { readRemote, unresolved });
-    resolveWorkspaceMappings(db, { readRemote, unresolved });
+    await resolveWorkspaceMappings(db, { readRemote, unresolved });
+    await resolveWorkspaceMappings(db, { readRemote, unresolved });
 
     expect(
       db
@@ -155,7 +155,7 @@ describe("resolveWorkspaceMappings", () => {
 });
 
 describe("Ingestor discovery mapping callback", () => {
-  it("fires only for new mappings and swallows callback errors", () => {
+  it("fires only for new mappings and swallows callback errors", async () => {
     vi.useFakeTimers();
     const ingestDb = migratedMemDb();
     let handle: { stop(): void } | undefined;
@@ -176,11 +176,11 @@ describe("Ingestor discovery mapping callback", () => {
       });
       handle = ingestor.startTail();
 
-      vi.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(onNewMappings).toHaveBeenCalledOnce();
       expect(onNewMappings).toHaveBeenCalledWith(1);
 
-      vi.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(onNewMappings).toHaveBeenCalledOnce();
 
       handle.stop();
@@ -203,9 +203,59 @@ describe("Ingestor discovery mapping callback", () => {
       });
       handle = throwingIngestor.startTail();
 
-      expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
+      // A throwing callback must not reject the tick (an unhandled throw here fails the test).
+      await vi.advanceTimersByTimeAsync(1000);
       expect(throwingCallback).toHaveBeenCalledOnce();
       expect(throwingCallback).toHaveBeenCalledWith(1);
+    } finally {
+      handle?.stop();
+      ingestDb.close();
+      vi.useRealTimers();
+    }
+  });
+
+  // RB7: a slow git lookup must not hold the discovery tick (it used to spawnSync per workspace).
+  it("does not block the tick on a slow remote lookup and never overlaps lookups", async () => {
+    vi.useFakeTimers();
+    const ingestDb = migratedMemDb();
+    let handle: { stop(): void } | undefined;
+    try {
+      ingestDb
+        .prepare(
+          `INSERT INTO workspaces
+             (workspace_id, project_slug, discovered_cwd, registered_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run("workspace-1", "project-1", "C:/repo-1", "2026-08-29T00:00:00Z");
+      let release: (url: string) => void = () => {};
+      const readRemote = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const onNewMappings = vi.fn();
+      const ingestor = new Ingestor(ingestDb, [], {
+        discoveryIntervalMs: 1000,
+        readRemote,
+        onNewMappings,
+        now: () => new Date("2026-08-29T00:00:00Z"),
+      });
+      handle = ingestor.startTail();
+
+      // Three ticks while the first lookup is still pending: the tick returns, no second lookup.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(readRemote).toHaveBeenCalledOnce();
+      expect(onNewMappings).not.toHaveBeenCalled();
+
+      release("git@github.com:Owner/Repo.git");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onNewMappings).toHaveBeenCalledWith(1);
+      expect(
+        ingestDb
+          .prepare("SELECT repo_owner FROM workspaces WHERE workspace_id=?")
+          .get("workspace-1"),
+      ).toEqual({ repo_owner: "Owner" });
     } finally {
       handle?.stop();
       ingestDb.close();
@@ -269,5 +319,27 @@ describe("backfillDiscoveredCwd", () => {
     expect(cwdOf("proj-c")).toBe("C:/Users/dev/proj-c");
     // Stops after the first successful read — never touches the third file.
     expect(readCwd).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-read a file whose head had no cwd on a later tick", () => {
+    insert("proj-x", null);
+    const readCwd = vi.fn<(filePath: string) => string | null>(() => null);
+    const noCwd = new Set<string>();
+    const files = [
+      { filePath: "x1.jsonl", projectSlug: "proj-x" },
+      { filePath: "x2.jsonl", projectSlug: "proj-x" },
+    ];
+
+    backfillDiscoveredCwd(db, files, readCwd, noCwd);
+    backfillDiscoveredCwd(db, files, readCwd, noCwd);
+    backfillDiscoveredCwd(
+      db,
+      [...files, { filePath: "x3.jsonl", projectSlug: "proj-x" }],
+      readCwd,
+      noCwd,
+    );
+
+    expect(readCwd.mock.calls.map((c) => c[0])).toEqual(["x1.jsonl", "x2.jsonl", "x3.jsonl"]);
+    expect(cwdOf("proj-x")).toBeNull();
   });
 });

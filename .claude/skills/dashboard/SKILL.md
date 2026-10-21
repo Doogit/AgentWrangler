@@ -1,27 +1,58 @@
 ---
 name: dashboard
 description: Launch the AgentWrangler dashboard in one step — guarantees the daemon is running the CURRENT code on disk (rebuilds + restarts it when the running daemon is stale), then opens the browser. Use when the user asks to "launch the dashboard", "open the dashboard", "start the dashboard", "show me the dashboard", or "restart the dashboard".
-allowed-tools: Bash(curl *), Bash(npm run *), Bash(start *), Bash(seq *), Bash(sleep *)
+allowed-tools: Bash(curl *), Bash(git rev-parse *), Bash(npm run *), Bash(node scripts/daemon/restart-detached.mjs*), Bash(start *), Bash(open *), Bash(xdg-open *), Bash(seq *), Bash(sleep *)
 ---
 
 # Launch the AgentWrangler dashboard
 
-Goal: when this finishes, the browser shows a dashboard backed by a daemon running the **current** code on disk — not a stale long-lived daemon.
+Goal: when this finishes, the browser shows a dashboard backed by a daemon running the **current** code on disk, not a stale long-lived daemon.
 
-Port **47821** · URL **http://127.0.0.1:47821** · repo root: the repository root · DB `~/.agentwrangler/db.sqlite`.
+Port **2929** (this skill assumes the default port) · URL **http://127.0.0.1:2929** · run from the repository root · DB `~/.agentwrangler/db.sqlite`.
 
-> **Platform:** the assessment/stop commands below are Windows PowerShell. On macOS/Linux, skip the
-> PowerShell probe and just run `npm run build:ui && npm run daemon` from the repo root (stop any old
-> daemon first with `pkill -f 'tsx.*daemon'` or by freeing port 47821), then open the URL.
+**Do not start the daemon as a background task of a Claude Code session.** `scripts/daemon/restart-detached.mjs`
+starts the daemon as a detached process that no terminal or session owns, logging to
+`~/.agentwrangler/daemon.log`. If a session owns the daemon as a background task, it gets a "failed"
+notification whenever the daemon is replaced. In a normal terminal, `npm run daemon` is fine.
 
-**Key trap (why a plain "is it up?" check is wrong):** the daemon runs via `tsx`, which loads the source **once at boot and never hot-reloads**. A daemon that started before the latest edit serves stale code — old backend routes and an old UI — even though it still answers `200`. So "a daemon is listening" is NOT sufficient; you must check whether it started *after* the newest source change.
+**Why "is it up?" is not enough:** the daemon runs via `tsx`, which loads the source once at boot and never hot-reloads. A daemon that started before your latest edit serves old routes and an old UI, even though it still answers `200`. Check whether it started *after* the newest source change.
 
-## Step 1 — assess daemon state
+**The repo root must be on `main`.** Both this skill and the daemon build and serve whatever the repo root has checked out. If the root is on an old branch, you serve stale code and the freshness check in Step 1 is useless, because that branch's `src` never changes. Live DB data still updates, so it looks like your changes "don't show up".
 
-Run this (PowerShell) from the repo root:
+## Step 0 — confirm the repo root is on `main`
+
+PowerShell (Windows):
 
 ```powershell
-$conn = Get-NetTCPConnection -LocalPort 47821 -State Listen -ErrorAction SilentlyContinue
+$branch = (git rev-parse --abbrev-ref HEAD).Trim()
+if ($branch -ne 'main') {
+  "ABORT: repo root is on '$branch', not 'main'. You would build/serve stale code."
+  "Fix first: 'git checkout main' at the repo root (if main is checked out in a worktree, remove that worktree first)."
+  return
+}
+"root is on main @ $(git rev-parse --short HEAD)"
+```
+
+bash (macOS/Linux):
+
+```bash
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" != "main" ]; then
+  echo "ABORT: repo root is on '$branch', not 'main'. You would build/serve stale code."
+  echo "Fix first: 'git checkout main' at the repo root."
+else
+  echo "root is on main @ $(git rev-parse --short HEAD)"
+fi
+```
+
+Go on only if the root is on `main`.
+
+## Step 1 — check whether the daemon is current
+
+PowerShell (Windows):
+
+```powershell
+$conn = Get-NetTCPConnection -LocalPort 2929 -State Listen -ErrorAction SilentlyContinue
 if (-not $conn) { 'DOWN'; return }
 $p = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
 $newest = (Get-ChildItem -Recurse -File -Path src,package.json -ErrorAction SilentlyContinue |
@@ -30,55 +61,71 @@ if ($p.StartTime -lt $newest) { "STALE pid=$($p.Id) started=$($p.StartTime) newe
 else { "CURRENT pid=$($p.Id)" }
 ```
 
-Branch on the result:
+bash (macOS/Linux):
 
-- **CURRENT** — the running daemon already loaded the latest code. Skip to Step 3 (just open the browser).
-- **STALE** — the running daemon predates a source change. Stop it, then rebuild + relaunch (Step 2):
-  ```powershell
-  Stop-Process -Id <pid> -Force
-  ```
-  Then confirm port 47821 is free before continuing (re-run the `Get-NetTCPConnection` line; expect no output).
-- **DOWN** — nothing is running. Rebuild + launch (Step 2).
-
-## Step 2 — build the UI and start the daemon (for STALE-after-stop or DOWN)
-
-From the repo root:
-
-```
-npm run build:ui
+```bash
+pid=$(lsof -ti tcp:2929 -sTCP:LISTEN | head -1)
+if [ -z "$pid" ]; then echo DOWN; else
+  started=$(date -d "$(ps -o lstart= -p "$pid")" +%s 2>/dev/null || date -j -f "%a %b %e %T %Y" "$(ps -o lstart= -p "$pid")" +%s)
+  newest=$(find src package.json -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1)
+  [ -z "$newest" ] && newest=$(find src package.json -type f -exec stat -f %m {} + | sort -n | tail -1)
+  if [ "$started" -lt "$newest" ]; then echo "STALE pid=$pid"; else echo "CURRENT pid=$pid"; fi
+fi
 ```
 
-Then start the daemon **in the background** (do not block the turn on it):
+- **CURRENT** — the daemon already loaded the latest code. Go to Step 3.
+- **STALE** or **DOWN** — run Step 2. Don't stop the old daemon yourself; the script does it.
+
+## Step 2 — rebuild and restart, detached (for STALE or DOWN)
+
+From the repo root, run in the **foreground**:
 
 ```
-npm run daemon
+node scripts/daemon/restart-detached.mjs
 ```
 
-The daemon binds the port **immediately** and serves a loading page while it back-scans the
-transcript corpus in the background (the scan yields between file batches), so it becomes reachable
-within a second or two. Poll the readiness probe until it answers:
-
-```
-curl -s -m 3 http://127.0.0.1:47821/api/ready -o /dev/null -w "%{http_code}"
-```
-
-Keep polling at ~1 s intervals until the output is `200` (a couple of tries is normal). That means
-the port is bound and the loading page is up — the dashboard is safe to open now; the loading page
-reloads itself to the full UI once `/api/ready` reports `{ ready: true }`. If the port never binds,
-read the daemon's background log, report the error, and stop.
+It builds the UI, stops the old daemon on port 2929, starts the new one detached, and returns once the port answers (boot can take a minute or two on a large database). Exit 0 means it is up; the loading page reloads itself to the full UI once `/api/ready` reports `{ ready: true }`. If another restart is already in progress (`~/.agentwrangler/daemon-restart.lock`), the script waits for it instead of starting another. Exit 1 means it failed: read the tail of `~/.agentwrangler/daemon.log`, report the error, and stop.
 
 ## Step 3 — open the browser
 
-```
-start http://127.0.0.1:47821
-```
+| OS | Command |
+|---|---|
+| Windows | `start http://127.0.0.1:2929` |
+| macOS | `open http://127.0.0.1:2929` |
+| Linux | `xdg-open http://127.0.0.1:2929` |
 
 ## Step 4 — report
 
 Print the URL and which path ran, so the user knows whether the daemon was reused or replaced:
 
 ```
-Dashboard: http://127.0.0.1:47821  — <already current | restarted (was stale) | started (was down)>
+Dashboard: http://127.0.0.1:2929  — <already current | restarted (was stale) | started (was down)>
 ```
 
-> **Never** run `npm run daemon` while a daemon is already listening on 47821 — it fails with `EADDRINUSE` and causes a transient database lock. Only Step 2 starts a daemon, and it is reached only after Step 1 returned DOWN, or STALE and you stopped the old process.
+## Seed mode — demo data instead of your live DB
+
+To try the dashboard on deterministic demo data, or for any manual check that must match the test fixtures, run:
+
+```
+npm run dashboard:seed
+```
+
+This builds the UI, rebuilds the shared seed into `.verify-seed/seed.sqlite` (the same data `npm run verify:app` and the tests use), and starts a separate daemon on port **47822** (`AW_SEED_PORT` overrides, or the next free port) with an empty scan root. It never scans your transcripts and never touches the daemon on 2929 or `~/.agentwrangler/db.sqlite`. It waits for readiness, opens the browser, prints the URL and pid, and leaves the daemon running.
+
+The seed is small (three ingest fixtures), so it shows few or no recommendations. It is good for layout and smoke checks, not for judging how useful the recommendations are.
+
+Use **live mode** (Steps 0–4) when you want your real spend. Don't click recommendation action buttons on a live dashboard during automation.
+
+Stop the seed daemon when done.
+
+PowerShell (Windows):
+
+```powershell
+Get-NetTCPConnection -LocalPort 47822 | %{ Stop-Process -Id $_.OwningProcess -Force }
+```
+
+bash (macOS/Linux):
+
+```bash
+lsof -ti :47822 | xargs kill
+```

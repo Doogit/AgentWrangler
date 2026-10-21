@@ -144,6 +144,18 @@ export interface ResponseMeta {
    * is scoped to (when applicable).
    */
   drilldown_ids: DrilldownIds;
+  /** A-17 (perf plan P3-U4): set only on responses served from a snapshot. */
+  freshness?: SnapshotFreshness;
+}
+
+/** How fresh a snapshot-served response is (A-17, perf plan P3-U4). */
+export interface SnapshotFreshness {
+  /** `recomputing` while a rebuild runs behind the served snapshot. */
+  status: "ready" | "recomputing";
+  /** ISO time the snapshot finished building. */
+  computed_at: string;
+  /** ISO time its build read the DB; writes after this are not in it. */
+  inputs_as_of: string;
 }
 
 // ---------------------------------------------------------------------------

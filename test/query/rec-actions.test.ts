@@ -13,9 +13,11 @@ import {
   adoptRecommendation,
   buildSeededPrompt,
   dismissRecommendation,
+  getRecommendationCard,
   listRecommendations,
 } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const NOW = new Date();
@@ -99,6 +101,47 @@ describe("dismissRecommendation", () => {
   it("throws if rec_id is not found or not PROPOSED", () => {
     expect(() => dismissRecommendation("rec-nonexistent")).toThrow();
   });
+
+  it("fails closed before dismissing a recommendation with a malformed contract", () => {
+    const rec = listRecommendations().data?.active[0];
+    if (rec === undefined) throw new Error("no active rec");
+    db.prepare("UPDATE recommendations SET evidence_json='{}' WHERE rec_id=?").run(rec.rec_id);
+
+    expect(() => dismissRecommendation(rec.rec_id)).toThrow(/contract is not trusted/);
+    expect(db.prepare("SELECT state FROM recommendations WHERE rec_id=?").get(rec.rec_id)).toEqual({
+      state: "PROPOSED",
+    });
+  });
+
+  it("fails closed before lifecycle actions when persisted presentation fields drift", () => {
+    const rec = listRecommendations().data?.active[0];
+    if (rec === undefined) throw new Error("no active rec");
+    const original = {
+      category: rec.category,
+      lever: rec.lever,
+      target_metric: rec.target_metric,
+    };
+    for (const [column, tampered] of [
+      ["category", "LIMIT"],
+      ["lever", "tampered lever"],
+      ["target_metric", "other_metric"],
+    ] as const) {
+      db.prepare(`UPDATE recommendations SET ${column}=? WHERE rec_id=?`).run(tampered, rec.rec_id);
+      expect(() => dismissRecommendation(rec.rec_id)).toThrow(/contract is not trusted/);
+      expect(() => adoptRecommendation(rec.rec_id, undefined, { completedChange: true })).toThrow(
+        /contract is not trusted/,
+      );
+      expect(
+        db.prepare("SELECT state FROM recommendations WHERE rec_id=?").get(rec.rec_id),
+      ).toEqual({
+        state: "PROPOSED",
+      });
+      db.prepare(`UPDATE recommendations SET ${column}=? WHERE rec_id=?`).run(
+        original[column],
+        rec.rec_id,
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -134,6 +177,50 @@ describe("adoptRecommendation", () => {
     expect(after?.adopted.find((r) => r.rec_id === rec.rec_id)).toBeDefined();
   });
 
+  it("records the primary option when option_id is omitted", () => {
+    const rec = listRecommendations().data?.active[0];
+    if (!rec?.actions) throw new Error("no actionable rec");
+
+    adoptRecommendation(rec.rec_id, undefined, { completedChange: true });
+
+    expect(
+      db.prepare("SELECT action_revision FROM effect_cycles WHERE rec_id=?").get(rec.rec_id),
+    ).toEqual({ action_revision: rec.actions.primary.option_id });
+  });
+
+  it("records a selected alternative option", () => {
+    // D2 offers one change; the always-loaded-file card still offers alternatives.
+    seedValidatedRecommendation(db, { recId: "rec-d1-alternative" });
+    const rec = getRecommendationCard("rec-d1-alternative", true);
+    const alternative = rec?.actions?.alternatives[0];
+    if (!rec || !alternative) throw new Error("no alternative action");
+
+    adoptRecommendation(rec.rec_id, undefined, {
+      completedChange: true,
+      optionId: alternative.option_id,
+    });
+
+    expect(
+      db.prepare("SELECT action_revision FROM effect_cycles WHERE rec_id=?").get(rec.rec_id),
+    ).toEqual({ action_revision: alternative.option_id });
+  });
+
+  it("rejects an unavailable option before writing adoption or a cycle", () => {
+    const rec = listRecommendations().data?.active[0];
+    if (!rec) throw new Error("no active rec");
+
+    expect(() =>
+      adoptRecommendation(rec.rec_id, undefined, {
+        completedChange: true,
+        optionId: "not-an-offered-option",
+      }),
+    ).toThrow(/option_id/);
+    expect(db.prepare("SELECT state FROM recommendations WHERE rec_id=?").get(rec.rec_id)).toEqual({
+      state: "PROPOSED",
+    });
+    expect(db.prepare("SELECT * FROM effect_cycles WHERE rec_id=?").all(rec.rec_id)).toEqual([]);
+  });
+
   it("throws if rec_id is not found or not PROPOSED", () => {
     expect(() => adoptRecommendation("rec-nonexistent")).toThrow();
   });
@@ -144,30 +231,29 @@ describe("adoptRecommendation", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildSeededPrompt", () => {
-  it("includes detector_id and lever in the prompt", () => {
+  it("includes the structural detector id but excludes the free-form lever", () => {
     const view = listRecommendations().data;
     const rec = view?.active[0];
     if (rec === undefined) throw new Error("no active rec");
 
     const prompt = buildSeededPrompt(rec);
     expect(prompt).toContain(rec.detector_id);
-    expect(prompt).toContain(rec.lever);
+    expect(prompt).not.toContain(rec.lever);
     // DR5: the raw category enum (CONTEXT/LIMIT/CACHE…) is intentionally no longer
     // emitted in the seeded prompt (blog taxonomy forbids it as user-facing copy).
     expect(prompt).not.toContain(`"category"`);
   });
 
-  it("includes evidence_pack_hash (provenance) instead of raw evidence keys (SEC-101 hardened)", () => {
+  it("renders allow-listed aggregates instead of a reconstructable evidence payload", () => {
     const view = listRecommendations().data;
     const rec = view?.active[0];
     if (rec === undefined) throw new Error("no active rec");
 
     const prompt = buildSeededPrompt(rec);
-    // Hardened format: evidence is not emitted raw; only a SHA-256 hash of it appears.
-    expect(prompt).toContain("evidence_pack_hash");
-    // The hash must be a 64-char hex string (SHA-256).
-    const match = prompt.match(/"evidence_pack_hash":\s*"([0-9a-f]{64})"/);
-    expect(match).not.toBeNull();
+    expect(prompt).toContain("AGGREGATES:");
+    expect(prompt).toContain("Average context:");
+    expect(prompt).not.toContain("evidence_pack_hash");
+    expect(prompt).not.toContain("raw_context_average_tokens_per_turn");
   });
 
   it("does not contain SQL keywords or file paths (no content leakage)", () => {
@@ -183,14 +269,14 @@ describe("buildSeededPrompt", () => {
     expect(prompt).not.toContain("/fake/action-");
   });
 
-  it("emits null modeled_savings_u_per_wk in payload for warning-class recs", () => {
+  it("omits modeled savings when a warning-class recommendation has no value", () => {
     const view = listRecommendations().data;
     const rec = view?.active[0];
     if (rec === undefined) throw new Error("no active rec");
 
-    // Hardened format: savings represented as null in the JSON payload (not a text sentence).
     const noSavingsRec = { ...rec, modeled_savings_u_per_wk: null };
     const prompt = buildSeededPrompt(noSavingsRec);
-    expect(prompt).toContain('"modeled_savings_u_per_wk": null');
+    expect(prompt).not.toContain("Modeled savings:");
+    expect(prompt).not.toContain("modeled_savings_u_per_wk");
   });
 });

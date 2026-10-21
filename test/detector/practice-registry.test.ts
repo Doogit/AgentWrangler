@@ -256,7 +256,7 @@ describe("P6 detector wiring", () => {
 
   it("ATTENTION when the D4 model-mismatch detector fires in-window", () => {
     mkSession("s-opus");
-    // 5 high-context (≥50k) low-output (≤500) Opus turns in the trailing-7d window.
+    // 5 high-context (≥50k) low-output (≤500) Opus subagent turns in the trailing-7d window.
     for (let i = 0; i < 5; i++) {
       insTurn({
         session: "s-opus",
@@ -264,6 +264,7 @@ describe("P6 detector wiring", () => {
         model: "claude-opus-5",
         input: 60_000,
         output: 100,
+        sidechain: true,
       });
     }
     expect(statusOf("P6")).toBe("ATTENTION");

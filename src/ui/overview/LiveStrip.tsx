@@ -13,6 +13,7 @@
 
 import { useEffect, useState } from "react";
 import type { LiveSessionRow } from "../../query/api/overview";
+import { useStatusPoller } from "../api/status-poller";
 import { type WorkspaceLabelInput, workspaceLabel } from "../lib/workspace-label";
 import Chip from "../shell/Chip";
 import EmptyState from "../shell/EmptyState";
@@ -76,14 +77,19 @@ export default function LiveStrip({
 }: LiveStripProps) {
   const count = sessions.length;
   const [now, setNow] = useState(() => Date.now());
-  const freshness = formatFreshness(lastFetchedAt, now);
+  // P2-U5: the rows refetch only when the `live` scope moves, so a later status poll that saw it
+  // unchanged also confirms them.
+  const { fetchedAt: statusCheckedAt } = useStatusPoller();
+  const confirmedAt =
+    lastFetchedAt === undefined ? undefined : Math.max(lastFetchedAt, statusCheckedAt ?? 0);
+  const freshness = formatFreshness(confirmedAt, now);
 
   useEffect(() => {
-    if (lastFetchedAt === undefined) return;
+    if (confirmedAt === undefined) return;
     setNow(Date.now());
     const id = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(id);
-  }, [lastFetchedAt]);
+  }, [confirmedAt]);
 
   return (
     <div className="live-strip-wrap">

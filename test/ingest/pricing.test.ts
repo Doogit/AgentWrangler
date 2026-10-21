@@ -8,7 +8,15 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/db/open.js";
-import { PricingSnapshotStore, seedListPrices } from "../../src/ingest/pricing.js";
+import {
+  KNOWN_MODELS,
+  KNOWN_MODELS_CHECKED,
+  LIST_PRICES,
+  PricingSnapshotStore,
+  modelTier,
+  noteUnconfirmedModels,
+  seedListPrices,
+} from "../../src/ingest/pricing.js";
 import { migratedMemDb } from "./dbutil.js";
 
 let db: Db;
@@ -28,13 +36,46 @@ const zero = {
   cacheWriteOther: 0,
 };
 
+describe("KNOWN_MODELS", () => {
+  it("every entry's tier equals modelTier(id) and has a list price", () => {
+    for (const [id, tier] of Object.entries(KNOWN_MODELS)) {
+      expect(modelTier(id), id).toBe(tier);
+      expect(LIST_PRICES[tier], id).toBeDefined();
+    }
+    expect(Object.keys(KNOWN_MODELS)).toHaveLength(16); // F24: + claude-haiku-5-5
+    expect(KNOWN_MODELS_CHECKED).toBe("2026-10-14");
+  });
+});
+
+describe("noteUnconfirmedModels", () => {
+  const rows = () =>
+    db.prepare("SELECT key, value FROM user_config WHERE key LIKE 'unconfirmed_model:%'").all();
+
+  it("records unknown ids once, skips known / empty / synthetic", () => {
+    noteUnconfirmedModels(
+      db,
+      ["claude-opus-5-5", "claude-opus-9", "claude-opus-9", "<synthetic>", "", null, "gpt-x"],
+      NOW,
+    );
+    noteUnconfirmedModels(db, ["claude-opus-9"], "2026-07-01T00:00:00.000Z");
+    expect(rows()).toEqual([
+      {
+        key: "unconfirmed_model:claude-opus-9",
+        value: JSON.stringify({ tier: "opus", first_seen: NOW }),
+      },
+      { key: "unconfirmed_model:gpt-x", value: JSON.stringify({ tier: null, first_seen: NOW }) },
+    ]);
+  });
+});
+
 describe("seedListPrices", () => {
   it("seeds one snapshot per tier and is idempotent", () => {
-    // 6 tiers: opus, sonnet-5, sonnet-4, haiku, fable-5, fable-5-1 (BM0).
-    expect(seedListPrices(db, NOW)).toBe(6);
+    // 10 tiers: opus, opus-5-5, sonnet-5, sonnet-5-5, sonnet-4, haiku, haiku-5-5,
+    // haiku-5-5-long, fable-5, fable-5-1 (BM0 + PRICE-O55 + F24).
+    expect(seedListPrices(db, NOW)).toBe(10);
     expect(seedListPrices(db, NOW)).toBe(0); // re-seed inserts nothing
     const n = (db.prepare("SELECT COUNT(*) AS n FROM pricing_snapshots").get() as { n: number }).n;
-    expect(n).toBe(6);
+    expect(n).toBe(10);
   });
 });
 
@@ -98,6 +139,94 @@ describe("PricingSnapshotStore.price", () => {
     expect(p48.costU).toBe(10000);
     expect(p5.snapshotId).toBe("list-opus-v2");
     expect(p48.snapshotId).toBe("list-opus-v2");
+  });
+
+  it("PRICE-O55: prices an opus-5-5 turn at the official $4/$20 rate with a $0.20 cache read", () => {
+    const store = new PricingSnapshotStore(db, NOW);
+    // Anthropic list price for claude-opus-5-5 ($/MTok): input 4, output 20, cache read 0.2,
+    // 5m write 5, 1h write 8. 1000×4 + 200×20 + 10000×0.2 + 1000×5 + 1000×8 = 23000.
+    const p = store.price("claude-opus-5-5", {
+      ...zero,
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 10000,
+      cacheWrite5m: 1000,
+      cacheWrite1h: 1000,
+    });
+    expect(p.costU).toBe(23000);
+    expect(p.snapshotId).toBe("list-opus-5-5-v2");
+  });
+
+  // F24 oracle: platform.claude.com/docs/en/about-claude/pricing, fetched 2026-10-14 ($/MTok).
+  it("F24: prices a sonnet-5-5 cache read at $0.10 (0.05× of $2), on its own tier", () => {
+    const store = new PricingSnapshotStore(db, NOW);
+    // 1000×2 + 200×10 + 10000×0.10 + 1000×2.5 + 1000×4 = 2000+2000+1000+2500+4000 = 11500.
+    const p = store.price("claude-sonnet-5-5", {
+      ...zero,
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 10000,
+      cacheWrite5m: 1000,
+      cacheWrite1h: 1000,
+    });
+    expect(p.costU).toBe(11500);
+    expect(p.snapshotId).toBe("list-sonnet-5-5-v2");
+  });
+
+  it("F24 regression: sonnet-5 keeps its $0.20 cache read", () => {
+    const store = new PricingSnapshotStore(db, NOW);
+    // Same tokens: 2000+2000+10000×0.20+2500+4000 = 12500.
+    const p = store.price("claude-sonnet-5", {
+      ...zero,
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 10000,
+      cacheWrite5m: 1000,
+      cacheWrite1h: 1000,
+    });
+    expect(p.costU).toBe(12500);
+    expect(p.snapshotId).toBe("list-sonnet-5-v2");
+  });
+
+  it("F24: haiku-5-5 at exactly 100,000 prompt tokens is the ≤100k tier", () => {
+    const store = new PricingSnapshotStore(db, NOW);
+    // Prompt = 10000 in + 80000 read + 5000 5m + 3000 1h + 2000 other = 100,000.
+    // 10000×0.10 + 1000×0.50 + 80000×0.01 + (5000+2000)×0.125 + 3000×0.20
+    //   = 1000 + 500 + 800 + 875 + 600 = 3775.
+    const p = store.price("claude-haiku-5-5", {
+      inputTokens: 10000,
+      outputTokens: 1000,
+      cacheReadTokens: 80000,
+      cacheWrite5m: 5000,
+      cacheWrite1h: 3000,
+      cacheWriteOther: 2000,
+    });
+    expect(p.costU).toBe(3775);
+    expect(p.snapshotId).toBe("list-haiku-5-5-v2");
+  });
+
+  it("F24: haiku-5-5 at 100,001 prompt tokens is the >100k tier (whole request)", () => {
+    const store = new PricingSnapshotStore(db, NOW);
+    // Prompt = 10002 + 79999 + 5000 + 3000 + 2000 = 100,001. Every token at the higher price:
+    // 10002×0.50 + 1000×2.50 + 79999×0.05 + 7000×0.625 + 3000×1
+    //   = 5001 + 2500 + 3999.95 + 4375 + 3000 = 18875.95 → 18876.
+    const p = store.price("claude-haiku-5-5", {
+      inputTokens: 10002,
+      outputTokens: 1000,
+      cacheReadTokens: 79999,
+      cacheWrite5m: 5000,
+      cacheWrite1h: 3000,
+      cacheWriteOther: 2000,
+    });
+    expect(p.costU).toBe(18876);
+    expect(p.snapshotId).toBe("list-haiku-5-5-long-v2");
+  });
+
+  it("F24: haiku-4-5 stays on the $1/$5 haiku tier", () => {
+    const store = new PricingSnapshotStore(db, NOW);
+    const p = store.price("claude-haiku-4-5", { ...zero, inputTokens: 200_000, outputTokens: 10 });
+    expect(p.costU).toBe(200_050);
+    expect(p.snapshotId).toBe("list-haiku-v2");
   });
 
   it("prices the 5m and 1h cache-write splits at distinct rates", () => {

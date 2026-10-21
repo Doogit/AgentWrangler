@@ -1,0 +1,16 @@
+{
+  "catalog_items": [
+    {
+      "item_id": "skill:d10-unused-skill",
+      "kind": "skill",
+      "name": "d10-unused-skill",
+      "plugin": null,
+      "usage_key": "d10-unused-skill",
+      "tokens": 999,
+      "bytes": 3996,
+      "size_basis": "chars4-v1",
+      "source": "synthetic",
+      "probed_at": "2026-12-20T09:00:00.000Z"
+    }
+  ]
+}

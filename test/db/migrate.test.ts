@@ -34,6 +34,21 @@ const V2_TABLES = [
   "effect_guardrail_results",
   "effect_rollback_operations",
   "effect_mutation_keys",
+  "hre_capability_profiles",
+  "hre_capability_observations",
+  "hre_handler_history",
+  "hre_composition_snapshots",
+  "hre_findings",
+  "hre_recommendations",
+  "hre_recommendation_revisions",
+  "hre_ceu_pools",
+  "hre_recommendation_findings",
+  "hre_recommendation_lifecycle_events",
+  "hre_artifact_revisions",
+  "hre_measurement_methods",
+  "hre_artifact_applications",
+  "hre_effect_cycle_links",
+  "hre_intervention_locks",
   "apply_jobs",
   "tool_event_metadata",
   "analysis_runs",
@@ -93,7 +108,7 @@ describe("runMigrations", () => {
       expect(rows.length).toBe(applied.length);
       // The first migration must be 001_observe.
       expect(rows[0]?.version).toBe("001_observe");
-      expect(rows.at(-1)?.version).toBe("021_recommendation_feedback");
+      expect(rows.at(-1)?.version).toBe("053_turns_grade_cover");
     } finally {
       db.close();
     }
@@ -168,6 +183,38 @@ describe("runMigrations", () => {
         "019_work_records",
         "020_local_command_retention",
         "021_recommendation_feedback",
+        "022_classifier_boundaries",
+        "023_privacy_contract",
+        "024_finding_contract_v2",
+        "025_tool_error_classifier",
+        "026_recommendation_contract_guards",
+        "027_handler_recommendation_storage",
+        "028_tool_event_content",
+        "029_subagent_meta",
+        "030_detector_week_results",
+        "031_detector_status_live",
+        "032_session_title",
+        "033_compaction_positions",
+        "034_ingest_metric_events_session_position",
+        "035_rec_lifecycle",
+        "036_rec_lifecycle_actions",
+        "037_subagent_meta_session_index",
+        "038_turns_agent_id",
+        "039_unrestrict_app_content",
+        "040_ledger_daily",
+        "041_perf_indexes",
+        "042_limit_snapshots",
+        "043_tool_error_labels_v2",
+        "044_c6_edit_string_hashes",
+        "045_catalog_items",
+        "046_detector_contract_v2",
+        "047_ingest_metric_events_event_ts",
+        "048_ingest_offset_identity",
+        "049_setup_grade_snapshots",
+        "050_setup_grade_indexes",
+        "051_judge_verdicts",
+        "052_classifier_version_2",
+        "053_turns_grade_cover",
       ]);
       const row = db
         .prepare(
@@ -215,12 +262,173 @@ describe("runMigrations", () => {
         "019_work_records",
         "020_local_command_retention",
         "021_recommendation_feedback",
+        "022_classifier_boundaries",
+        "023_privacy_contract",
+        "024_finding_contract_v2",
+        "025_tool_error_classifier",
+        "026_recommendation_contract_guards",
+        "027_handler_recommendation_storage",
+        "028_tool_event_content",
+        "029_subagent_meta",
+        "030_detector_week_results",
+        "031_detector_status_live",
+        "032_session_title",
+        "033_compaction_positions",
+        "034_ingest_metric_events_session_position",
+        "035_rec_lifecycle",
+        "036_rec_lifecycle_actions",
+        "037_subagent_meta_session_index",
+        "038_turns_agent_id",
+        "039_unrestrict_app_content",
+        "040_ledger_daily",
+        "041_perf_indexes",
+        "042_limit_snapshots",
+        "043_tool_error_labels_v2",
+        "044_c6_edit_string_hashes",
+        "045_catalog_items",
+        "046_detector_contract_v2",
+        "047_ingest_metric_events_event_ts",
+        "048_ingest_offset_identity",
+        "049_setup_grade_snapshots",
+        "050_setup_grade_indexes",
+        "051_judge_verdicts",
+        "052_classifier_version_2",
+        "053_turns_grade_cover",
       ]);
       expect(db.prepare("SELECT * FROM recommendation_effects").all()).toEqual(legacy);
-      expect(db.prepare("SELECT * FROM recommendations").all()).toEqual(recommendations);
+      expect(db.prepare("SELECT * FROM recommendations").all()).toEqual(
+        recommendations.map((row) => ({
+          ...(row as Record<string, unknown>),
+          contract_version: null,
+          template_id: null,
+          contract_status: "LEGACY_UNVERIFIED",
+          rule_id: null,
+        })),
+      );
       expect(db.prepare("SELECT * FROM effect_cycles").all()).toEqual([]);
       expect(db.pragma("foreign_key_check")).toEqual([]);
       expect(runMigrations(db)).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("quarantines invalid persisted contract tuples while installing the guards", () => {
+    const db = openDb(dbPath);
+    try {
+      runMigrations(db, "025_tool_error_classifier");
+      const insert = db.prepare(`INSERT INTO recommendations
+        (rec_id,provenance,detector_id,category,lever,modeled_formula_json,evidence_json,
+         target_metric,state,created_at,contract_version,template_id,contract_status,rule_id)
+        VALUES(?, 'RULE', 'D1', 'CONTEXT', 'fixture', '{}', '{}',
+               'avg_context_per_turn', 'PROPOSED', '2026-01-01', ?, ?, ?, ?)`);
+      insert.run("bad-v1", 2, "D1_CONTEXT_ALWAYS_LOADED", "V1_VALIDATED", null);
+      insert.run("bad-v2", 2, "D1_CONTEXT_ALWAYS_LOADED", "V2_VALIDATED", "D1");
+
+      expect(runMigrations(db)).toEqual([
+        "026_recommendation_contract_guards",
+        "027_handler_recommendation_storage",
+        "028_tool_event_content",
+        "029_subagent_meta",
+        "030_detector_week_results",
+        "031_detector_status_live",
+        "032_session_title",
+        "033_compaction_positions",
+        "034_ingest_metric_events_session_position",
+        "035_rec_lifecycle",
+        "036_rec_lifecycle_actions",
+        "037_subagent_meta_session_index",
+        "038_turns_agent_id",
+        "039_unrestrict_app_content",
+        "040_ledger_daily",
+        "041_perf_indexes",
+        "042_limit_snapshots",
+        "043_tool_error_labels_v2",
+        "044_c6_edit_string_hashes",
+        "045_catalog_items",
+        "046_detector_contract_v2",
+        "047_ingest_metric_events_event_ts",
+        "048_ingest_offset_identity",
+        "049_setup_grade_snapshots",
+        "050_setup_grade_indexes",
+        "051_judge_verdicts",
+        "052_classifier_version_2",
+        "053_turns_grade_cover",
+      ]);
+      expect(
+        db
+          .prepare(
+            `SELECT rec_id,contract_version,template_id,contract_status,rule_id
+               FROM recommendations ORDER BY rec_id`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          rec_id: "bad-v1",
+          contract_version: null,
+          template_id: null,
+          contract_status: "LEGACY_UNVERIFIED",
+          rule_id: null,
+        },
+        {
+          rec_id: "bad-v2",
+          contract_version: null,
+          template_id: null,
+          contract_status: "LEGACY_UNVERIFIED",
+          rule_id: null,
+        },
+      ]);
+      expect(db.pragma("foreign_key_check")).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("admits RETIRED without losing rows or contract tuple guards", () => {
+    const db = openDb(dbPath);
+    try {
+      runMigrations(db, "034_ingest_metric_events_session_position");
+      db.prepare(
+        `INSERT INTO recommendations
+           (rec_id, provenance, detector_id, category, lever, modeled_formula_json,
+            evidence_json, target_metric, state, created_at, contract_version, rule_id,
+            contract_status)
+         VALUES ('retire-fixture', 'RULE', 'D9', 'TOOLING', 'fixture', '{}', '{}',
+                 'fixture_metric', 'PROPOSED', '2026-01-01', 2, 'D9', 'V2_VALIDATED')`,
+      ).run();
+      expect(runMigrations(db)).toEqual([
+        "035_rec_lifecycle",
+        "036_rec_lifecycle_actions",
+        "037_subagent_meta_session_index",
+        "038_turns_agent_id",
+        "039_unrestrict_app_content",
+        "040_ledger_daily",
+        "041_perf_indexes",
+        "042_limit_snapshots",
+        "043_tool_error_labels_v2",
+        "044_c6_edit_string_hashes",
+        "045_catalog_items",
+        "046_detector_contract_v2",
+        "047_ingest_metric_events_event_ts",
+        "048_ingest_offset_identity",
+        "049_setup_grade_snapshots",
+        "050_setup_grade_indexes",
+        "051_judge_verdicts",
+        "052_classifier_version_2",
+        "053_turns_grade_cover",
+      ]);
+      db.prepare("UPDATE recommendations SET state='RETIRED' WHERE rec_id='retire-fixture'").run();
+      expect(
+        db
+          .prepare(
+            "SELECT state, contract_status, rule_id FROM recommendations WHERE rec_id='retire-fixture'",
+          )
+          .get(),
+      ).toEqual({ state: "RETIRED", contract_status: "V2_VALIDATED", rule_id: "D9" });
+      expect(() =>
+        db.prepare("UPDATE recommendations SET rule_id=NULL WHERE rec_id='retire-fixture'").run(),
+      ).toThrow("invalid recommendation contract tuple");
+      expect(db.pragma("foreign_key_check")).toEqual([]);
     } finally {
       db.close();
     }
@@ -375,6 +583,39 @@ describe("runMigrations", () => {
       expect(turnPlan.some((row) => row.detail.includes("idx_turns_ts_provisional_session"))).toBe(
         true,
       );
+
+      const boundaryPlan = db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT boundary_kind FROM ingest_metric_events
+            WHERE session_id = ? AND event_position < ?
+            ORDER BY event_position DESC LIMIT 1`,
+        )
+        .all("synthetic-session", 12) as Array<{ detail: string }>;
+      expect(
+        boundaryPlan.some((row) =>
+          row.detail.includes(
+            "SEARCH ingest_metric_events USING INDEX idx_ingest_metric_events_session_position",
+          ),
+        ),
+      ).toBe(true);
+      expect(boundaryPlan.some((row) => row.detail.startsWith("SCAN"))).toBe(false);
+
+      // P2-U8 W0 signature: the window's ingest_metric_events rows by event_ts.
+      const w0Plan = db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT group_concat(quote(event_id), char(10) ORDER BY rowid) AS s
+             FROM ingest_metric_events WHERE event_ts >= ? AND event_ts < ?`,
+        )
+        .all("2026-01-01", "2026-01-08") as Array<{ detail: string }>;
+      expect(
+        w0Plan.some((row) =>
+          row.detail.includes(
+            "SEARCH ingest_metric_events USING INDEX idx_ingest_metric_events_event_ts",
+          ),
+        ),
+      ).toBe(true);
     } finally {
       db.close();
     }

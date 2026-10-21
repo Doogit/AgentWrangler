@@ -12,10 +12,9 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CacheEfficiency, FlavorDecomposition } from "../../src/query/api/spend-flavor";
+import type { FlavorDecomposition } from "../../src/query/api/spend-flavor";
 import type { CacheWriteTrend } from "../../src/query/api/trends";
 import type { ApiResponse } from "../../src/query/envelope";
-import CacheEfficiencyKPI from "../../src/ui/overview/CacheEfficiencyKPI";
 import CacheWriteSpikesChart, {
   buildCacheWriteChartRows,
 } from "../../src/ui/overview/CacheWriteSpikesChart";
@@ -119,32 +118,6 @@ function mockFlavorData(
     ...overrides,
   };
   return { data, meta: baseMeta() };
-}
-
-function mockCacheEffData(reuse_band: CacheEfficiency["reuse_band"]): ApiResponse<CacheEfficiency> {
-  const counts: Record<
-    CacheEfficiency["reuse_band"],
-    { reads: number; creations: number; turns: number }
-  > = {
-    NO_DATA: { reads: 0, creations: 0, turns: 0 },
-    NO_DENOMINATOR: { reads: 14_000_000, creations: 0, turns: 287 },
-    WRITE_HEAVY: { reads: 840_000, creations: 2_800_000, turns: 287 },
-    MIXED_REUSE: { reads: 5_600_000, creations: 2_800_000, turns: 287 },
-    REUSE_DOMINANT: { reads: 14_000_000, creations: 2_800_000, turns: 287 },
-  };
-  const { reads, creations, turns } = counts[reuse_band];
-  const cacheTotal = reads + creations;
-  const data: CacheEfficiency = {
-    ratio: cacheTotal > 0 ? reads / cacheTotal : null,
-    cache_read_tokens: reads,
-    cache_creation_tokens: creations,
-    reuse_band,
-    cap_weighted_tokens: creations + reads * 0.1,
-    coeff_used: 0.1,
-    coeff_unverified: true,
-    turns,
-  };
-  return { data, meta: { ...baseMeta(), n: 1 } };
 }
 
 function mockCacheWriteData(spikeSet: string[] = []): ApiResponse<CacheWriteTrend> {
@@ -264,56 +237,6 @@ describe("T12 — UNVERIFIED badge visibility by mode", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T13 — CacheEfficiencyKPI renders reuse bands without health labels
-// ---------------------------------------------------------------------------
-
-describe("T13 — CacheEfficiencyKPI renders reuse bands", () => {
-  it("WRITE_HEAVY renders its raw-share diagnostic", () => {
-    const { container } = render(
-      <CacheEfficiencyKPI state={{ status: "ok", value: mockCacheEffData("WRITE_HEAVY") }} />,
-    );
-    expect(container.textContent).toMatch(/WRITE HEAVY/);
-    expect(container.textContent).toMatch(/0\.3×/);
-    expect(container.textContent).toMatch(/23\.1%/);
-    expect(container.textContent).toMatch(/diagnostic only · not a health signal/);
-  });
-
-  it("zero cache creation renders NO DENOMINATOR without inventing a ratio", () => {
-    const { container } = render(
-      <CacheEfficiencyKPI state={{ status: "ok", value: mockCacheEffData("NO_DENOMINATOR") }} />,
-    );
-    expect(container.textContent).toMatch(/— NO DENOMINATOR/);
-    expect(container.textContent).not.toMatch(/REUSE DOMINANT/);
-  });
-
-  it("WRITE_HEAVY uses amber color on kpi-value", () => {
-    const { container } = render(
-      <CacheEfficiencyKPI state={{ status: "ok", value: mockCacheEffData("WRITE_HEAVY") }} />,
-    );
-    const val = container.querySelector(".kpi-value");
-    expect(val).not.toBeNull();
-    expect(val?.getAttribute("style")).toMatch(/amber/);
-  });
-
-  it("REUSE_DOMINANT renders green color", () => {
-    const { container } = render(
-      <CacheEfficiencyKPI state={{ status: "ok", value: mockCacheEffData("REUSE_DOMINANT") }} />,
-    );
-    const val = container.querySelector(".kpi-value");
-    expect(val?.getAttribute("style")).toMatch(/green/);
-  });
-
-  it("shows selected-window cap draw with its coefficient caveat", () => {
-    const { container } = render(
-      <CacheEfficiencyKPI state={{ status: "ok", value: mockCacheEffData("REUSE_DOMINANT") }} />,
-    );
-    expect(container.textContent).toMatch(/Cap-weighted draw: 4\.2M/);
-    expect(container.textContent).toMatch(/coefficient 0\.1× unverified/);
-    expect(container.textContent).toMatch(/TTL 5m\/1h volatile/);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // T14 — CacheWriteSpikesChart: spike_buckets present → spike annotation text
 // ---------------------------------------------------------------------------
 
@@ -377,18 +300,6 @@ describe("T15 — Loading, error, and null data states", () => {
       <FlavorDecompositionChart
         state={{ status: "ok", value: { data: null, meta: baseMeta() } }}
       />,
-    );
-    expect(container.textContent).toMatch(/N\/A/);
-  });
-
-  it("CacheEfficiencyKPI loading → aria-busy skeleton", () => {
-    const { container } = render(<CacheEfficiencyKPI state={{ status: "loading" }} />);
-    expect(container.querySelector("[aria-busy='true']")).not.toBeNull();
-  });
-
-  it("CacheEfficiencyKPI error → N/A state (no crash)", () => {
-    const { container } = render(
-      <CacheEfficiencyKPI state={{ status: "error", message: "ECONNREFUSED" }} />,
     );
     expect(container.textContent).toMatch(/N\/A/);
   });

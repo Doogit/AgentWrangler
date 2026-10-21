@@ -126,6 +126,20 @@ describe("getSessionSpendPercentile", () => {
       window_days: 90,
     });
   });
+
+  it("ranks an early session against the workspace's latest 90 days, not only its predecessors", () => {
+    insWs("ws-early");
+    insSess("early", "ws-early", 13, "2027-05-01T00:00:00.000Z");
+    for (let cost = 1; cost <= 24; cost += 1) {
+      insSess(`later-${cost}`, "ws-early", cost);
+    }
+
+    expect(getSessionSpendPercentile(db, "early")).toEqual({
+      percentile: 14 / 25,
+      n: 25,
+      window_days: 90,
+    });
+  });
 });
 
 // --- Per-week self-percentiles --------------------------------------------

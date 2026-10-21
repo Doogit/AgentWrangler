@@ -1,11 +1,9 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { EsfObservationCohort } from "../../query/api/esf-observations";
-import type { SessionSummary, WindowFilter } from "../../query/api/overview";
-import { fetchEsfObservations, fetchSessionEsfObservations } from "../api/esf-client";
+import type { WindowFilter } from "../../query/api/overview";
+import { fetchEsfObservations } from "../api/esf-client";
 import { shortId } from "../lib/short-id";
 import StateChip from "../shell/StateChip";
-
-import { WorkEvidence } from "./WorkEvidence";
 
 type LoadState =
   | { status: "loading" }
@@ -276,42 +274,37 @@ export function ObservationEvidence({
     };
   }, [workspaceId, from, to, preset, retry]);
   return (
-    <section
-      className="card"
-      data-testid="esf-observation-evidence"
-      style={{ marginBottom: 13, padding: 14, minHeight: 142 }}
-    >
+    <section className="sec" data-testid="esf-observation-evidence">
       {title !== null && (
-        <div className="section-head">
+        <div className="sec-h">
           <h2>{title}</h2>
         </div>
       )}
-      {state.status === "loading" && (
-        <div aria-busy="true" style={{ minHeight: 84 }}>
-          Loading observations…
-        </div>
-      )}
-      {state.status === "error" && (
-        <div role="alert">
-          Observation request failed — {state.message}{" "}
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => setRetry((value) => value + 1)}
-          >
-            Retry
-          </button>
-        </div>
-      )}
-      {state.status === "ok" && state.cohort === null && (
-        <div>No eligible observations in this window.</div>
-      )}
-      {state.status === "ok" && state.cohort !== null && (
-        <>
+      <div className="card card-padded" style={{ minHeight: 142 }}>
+        {state.status === "loading" && (
+          <div aria-busy="true" style={{ minHeight: 84 }}>
+            Loading observations…
+          </div>
+        )}
+        {state.status === "error" && (
+          <div role="alert">
+            Observation request failed — {state.message}{" "}
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setRetry((value) => value + 1)}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {state.status === "ok" && state.cohort === null && (
+          <div>No eligible observations in this window.</div>
+        )}
+        {state.status === "ok" && state.cohort !== null && (
           <CohortSummary cohort={state.cohort} prior={state.prior} launcher={launcher} />
-          <WorkEvidence workspaceId={workspaceId} from={state.cohort.from} to={state.cohort.to} />
-        </>
-      )}
+        )}
+      </div>
     </section>
   );
 }
@@ -404,123 +397,5 @@ function CohortSummary({
       </p>
       <DetailDisclosure cohort={cohort} launcher={launcher} />
     </>
-  );
-}
-
-export function SessionObservedEvidence({ session }: { session: SessionSummary }) {
-  const [state, setState] = useState<LoadState>({ status: "loading" });
-  const [retry, setRetry] = useState(0);
-  const launcher = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    void retry;
-    let active = true;
-    setState({ status: "loading" });
-    void fetchSessionEsfObservations(session.session_id)
-      .then((response) => {
-        if (active) setState({ status: "ok", cohort: response.data, prior: null });
-      })
-      .catch((error: unknown) => {
-        if (active) setState({ status: "error", message: String(error) });
-      });
-    return () => {
-      active = false;
-    };
-  }, [session.session_id, retry]);
-  const cohort = state.status === "ok" ? state.cohort : null;
-  const recovered = cohort?.observed_test_recovery.recovered_session_ids.includes(
-    session.session_id,
-  );
-  const hasFailure = cohort?.observed_test_recovery.affected_session_ids.includes(
-    session.session_id,
-  );
-  return (
-    <section
-      className="card"
-      data-testid="esf-session-observed-evidence"
-      style={{ marginBottom: 13, padding: 14 }}
-    >
-      <div className="section-head">
-        <h2>Observed evidence</h2>
-      </div>
-      <p>
-        {session.session_id} · {session.state}
-      </p>
-      {state.status === "loading" && <p aria-busy="true">Loading session observations…</p>}
-      {state.status === "error" && (
-        <p role="alert">
-          Session observation request failed — {state.message}{" "}
-          <button type="button" onClick={() => setRetry((value) => value + 1)}>
-            Retry
-          </button>
-        </p>
-      )}
-      {state.status === "ok" && cohort === null && <p>Session evidence unavailable.</p>}
-      {cohort !== null && cohort.resource.selected_session_count === 0 && (
-        <p>No eligible observations in this session.</p>
-      )}
-      {cohort !== null && cohort.resource.selected_session_count > 0 && (
-        <>
-          <div>
-            <DateRange
-              lead="This complete session includes data"
-              from={cohort.from}
-              to={cohort.to}
-            />
-          </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-              gap: 12,
-            }}
-          >
-            <div>
-              <strong>Resource</strong>
-              <div>
-                {money(cohort.resource.priced_cost_u)} priced; {cohort.resource.unpriced_turn_count}{" "}
-                unpriced turns
-              </div>
-              <small>
-                {cohort.resource.priced_turn_count} priced turns; unpriced cost is unknown.
-              </small>
-            </div>
-            <div>
-              <strong>Operational sequence</strong>
-              <div>
-                {session.state === "LIVE" ? (
-                  "LIVE — excluded from reconciled observation cohort"
-                ) : recovered ? (
-                  <a href="#session-context-chart">
-                    repeated test failures, then an observed later pass
-                  </a>
-                ) : hasFailure ? (
-                  <a href="#session-context-chart">repeated test failures observed</a>
-                ) : (
-                  "no repeated test-failure sequence observed"
-                )}
-              </div>
-            </div>
-          </div>
-          <p>
-            {session.state === "LIVE"
-              ? "LIVE — excluded from reconciled activity cohort."
-              : cohort.no_commit_activity.session_ids.includes(session.session_id)
-                ? "Qualifying Bash/edit activity without an observed commit."
-                : "Outside the no-commit activity cohort."}{" "}
-            Interrupt rate unavailable (not collected). This observation does not infer task success
-            or a matching recommendation.
-          </p>
-          <DetailDisclosure cohort={cohort} launcher={launcher} />
-        </>
-      )}
-      {cohort !== null && (
-        <WorkEvidence
-          workspaceId={session.workspace_id}
-          sessionId={session.session_id}
-          from={cohort.from}
-          to={cohort.to}
-        />
-      )}
-    </section>
   );
 }

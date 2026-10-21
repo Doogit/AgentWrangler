@@ -71,14 +71,20 @@ describe("UA11 fixture matrix", () => {
           ],
     );
     expect(efficiencyHeadroom.opportunities).toEqual(modeledRecommendations);
-    expect(efficiencyHeadroom.headroom_u_per_wk).toBe(
-      modeledRecommendations.reduce(
-        (sum, recommendation) => sum + recommendation.modeled_savings_u_per_wk,
-        0,
-      ),
+    // P1c / P3.L L6: headroom is ledger-owned billed spend, not Σ modeled savings — and (L6)
+    // it is the WHOLE spend lane, not only claims of these open recs, so it can be nonzero
+    // even while every open opportunity here stays unclaimed.
+    expect(efficiencyHeadroom.headroom_u_per_wk).toBeGreaterThan(0);
+    expect(efficiencyHeadroom.headroom_u_per_wk).toBeLessThanOrEqual(
+      efficiencyHeadroom.actual_u_per_wk,
     );
+    expect(efficiencyHeadroom.unclaimed_rec_count).toBe(modeledRecommendations.length);
     expect(efficiencyHeadroom.open_rec_count).toBe(modeledRecommendations.length);
-    expect(efficiencyHeadroom.headroom_pct).toBeNull();
+    // L6: headroom/actual is now a safe combined percentage (net of overlaps).
+    expect(efficiencyHeadroom.headroom_pct).toBeCloseTo(
+      (efficiencyHeadroom.headroom_u_per_wk / efficiencyHeadroom.actual_u_per_wk) * 100,
+      6,
+    );
   });
 
   // The 30d fixture decomposition runs >5 s synchronously; Vitest 4 enforces the

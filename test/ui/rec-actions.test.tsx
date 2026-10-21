@@ -30,7 +30,10 @@ import {
 } from "../../src/ui/api/fixtures";
 import { setExperimentalActions } from "../../src/ui/hooks/useExperimentalActions";
 import ImpactLedger from "../../src/ui/recommendations/ImpactLedger";
-import RecCard, { __resetHookInstallCache } from "../../src/ui/recommendations/RecCard";
+import RecCard, {
+  __resetHookInstallCache,
+  HookInstallButton,
+} from "../../src/ui/recommendations/RecCard";
 import RecommendationsPage from "../../src/ui/recommendations/RecommendationsPage";
 import { makeEffectCycle as effectCycle } from "./effect-cycle-fixture";
 
@@ -67,7 +70,21 @@ function makeRec(overrides: Partial<RecommendationCard> = {}): RecommendationCar
     category: "SESSION",
     scope_workspace_id: null,
     lever: "Use /clear between unrelated tasks",
+    actions: {
+      primary: {
+        option_id: "primary",
+        kind: "HABIT",
+        summary: "Use /clear between unrelated tasks",
+        detail: [],
+        copy_text: "Recommendation: rec-test-1. Use /clear between unrelated tasks.",
+        file_ref: null,
+        target_metric: "sessions_over_threshold",
+      },
+      alternatives: [],
+    },
+    action_validation: { primary: { ok: true }, alternatives: {} },
     modeled_savings_u_per_wk: 59_400,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: {
       model: "D2_LONG_CONTEXT_CACHE_READ_V1",
@@ -90,6 +107,7 @@ function makeRec(overrides: Partial<RecommendationCard> = {}): RecommendationCar
     // ESF2 fixtures opt into tracking explicitly. Missing capability remains
     // a conservative manual state and is covered below.
     effect_capability: { mode: "TRACKABLE", reason: null },
+    actionability_ok: true,
     ...overrides,
   };
 }
@@ -127,13 +145,14 @@ describe("RecCard — action buttons", () => {
       const grid = card.querySelector(".rec-collapsed-row");
       expect(grid).not.toBeNull();
       const description = grid?.querySelector(".rec-description");
-      expect(description?.parentElement).toBe(grid);
+      expect(description?.parentElement?.classList.contains("rec-card-head-copy")).toBe(true);
       const chipRow = grid?.querySelector(".rec-chip-row");
-      expect(chipRow?.parentElement).toBe(grid);
+      expect(chipRow?.parentElement?.classList.contains("rec-card-head-copy")).toBe(true);
       expect(grid?.querySelector(".rec-description-container")).toBeNull();
       expect(
         grid?.querySelectorAll(".rec-confidence-tier, .rec-category-chip, .rec-scope-badge"),
-      ).toHaveLength(3);
+      ).toHaveLength(2);
+      expect(grid?.querySelector(".rec-confidence-tier")).toBeNull();
       expect(grid?.querySelector(".rec-actions")?.children).toHaveLength(2);
     }
   });
@@ -179,15 +198,14 @@ describe("RecCard — action buttons", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
     const { getByRole } = render(<RecCard rec={makeRec()} />);
-    expect(() => getByRole("button", { name: "Track this change" })).toThrow();
-    fireEvent.click(getByRole("button", { name: "Show guided prompt" }));
-    fireEvent.click(getByRole("button", { name: "Copy prompt" }));
+    expect(getByRole("button", { name: "Track" })).toBeTruthy();
+    fireEvent.click(getByRole("button", { name: "Copy instruction" }));
     await act(async () => {
       await Promise.resolve();
     });
     expect(getByRole("button", { name: "I completed the change" })).toBeTruthy();
     fireEvent.click(getByRole("button", { name: "I completed the change" }));
-    fireEvent.click(getByRole("button", { name: "Track this change" }));
+    fireEvent.click(getByRole("button", { name: "Track" }));
     expect(mockFetch).toHaveBeenCalledTimes(0);
     expect(getByRole("button", { name: "Undo" })).toBeDefined();
     expect(getByRole("button", { name: "Undo" }).parentElement?.textContent).toContain(
@@ -211,15 +229,15 @@ describe("RecCard — action buttons", () => {
     expect((getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("does not offer tracking until there is action evidence", () => {
-    const { queryByRole } = render(<RecCard rec={makeRec()} />);
-    expect(queryByRole("button", { name: "Track this change" })).toBeNull();
+  it("offers tracking with a manual attestation gate", () => {
+    const { getByRole } = render(<RecCard rec={makeRec()} />);
+    expect((getByRole("button", { name: "Track" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("keeps recommendations without an ESF capability manual and does not show a countdown", () => {
     const { effect_capability: _capability, ...rec } = makeRec();
     const { queryByRole, getByText } = render(<RecCard rec={rec} />);
-    expect(queryByRole("button", { name: "Track this change" })).toBeNull();
+    expect((queryByRole("button", { name: "Track" }) as HTMLButtonElement).disabled).toBe(true);
     expect(getByText(/Measurement availability is unknown/)).toBeDefined();
   });
 
@@ -438,12 +456,12 @@ describe("RecCard — action buttons", () => {
     await waitFor(() => expect(written.length).toBe(1));
     const prompt = written[0] ?? "";
     expect(prompt).toContain("D2");
-    expect(prompt).toContain("Use /clear between unrelated tasks");
+    expect(prompt).not.toContain("Use /clear between unrelated tasks");
     // Evidence provenance hash present (not raw evidence keys — SEC-101 hardened)
-    expect(prompt).toContain("evidence_pack_hash");
+    expect(prompt).not.toContain("evidence_pack_hash");
     // Data is inside <data>…</data> delimiters
-    expect(prompt).toContain("<data>");
-    expect(prompt).toContain("</data>");
+    expect(prompt).toContain("<quoted-evidence>");
+    expect(prompt).toContain("[ADD_TASK_BOUNDARIES]");
     // No SQL
     expect(prompt).not.toMatch(/\bSELECT\b/i);
     expect(prompt).not.toMatch(/\bINSERT INTO\b/i);
@@ -643,6 +661,72 @@ describe("RecCard — ESF2 lifecycle evidence and controls", () => {
     expect(view.queryByRole("button", { name: "Stop measurement" })).toBeNull();
   });
 
+  it("keeps a measuring card short: IDs and history stay behind collapsed toggles", async () => {
+    const current = effectCycle({ cycleId: "cycle-frozen-abc123" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: async () => ({
+            writer_enabled: true,
+            cycles: [current],
+            legacy: [],
+            next_cycle_cursor: null,
+            next_legacy_cursor: null,
+          }),
+        }),
+      ),
+    );
+    const basePrimary = makeRec().actions?.primary;
+    if (basePrimary === undefined) throw new Error("Expected a primary action fixture");
+    const primary = {
+      ...basePrimary,
+      detail: ["Largest sections: Workflow (~3,000 tokens)"],
+      copy_text: "# Trim the prefix\n\n## Steps\n1. Read the file.",
+    };
+    const alternative = {
+      ...primary,
+      option_id: "alt-1",
+      summary: "Move situational sections into skills.",
+      copy_text: "Move situational sections into skills.",
+    };
+    const view = render(
+      <RecCard
+        rec={makeRec({
+          state: "ADOPTED",
+          effect_cycle: current,
+          actions: { primary, alternatives: [alternative] },
+          action_validation: { primary: { ok: true }, alternatives: { "alt-1": { ok: true } } },
+        })}
+      />,
+    );
+    await waitFor(() => expect(view.queryByText("Loading measurement history…")).toBeNull());
+    expect(view.container.querySelectorAll('[data-testid="effect-evidence"]')).toHaveLength(1);
+    const collapsed = (element: Element) => element.closest("details:not([open])") !== null;
+    const idHolders = [...view.container.querySelectorAll("p, span, li")].filter((element) =>
+      element.textContent?.includes("cycle-frozen-abc123"),
+    );
+    expect(idHolders.length).toBeGreaterThan(0);
+    expect(idHolders.every(collapsed)).toBe(true);
+    for (const name of ["Undo adopt", "Stop measurement"])
+      expect(collapsed(view.getByRole("button", { name }))).toBe(false);
+    expect(collapsed(view.container.querySelector(".rec-confidence-tier") as Element)).toBe(false);
+    expect(view.getAllByRole("button", { name: "Copy prompt" })).toHaveLength(2);
+    const fixes = view.container.querySelector(".rec-measuring-fixes") as HTMLElement;
+    expect(fixes.querySelector("summary")?.textContent).toBe("Recommended Action");
+    // The box shows exactly what Copy prompt copies, not the shorter detail lines.
+    const previews = [...fixes.querySelectorAll(".rec-copy-preview")].map((pre) => pre.textContent);
+    expect(previews).toEqual([primary.copy_text, alternative.copy_text]);
+    expect(fixes.textContent).not.toContain("Largest sections: Workflow (~3,000 tokens)");
+    expect(fixes.textContent).not.toContain(primary.summary);
+    expect(view.container.querySelector(".rec-actions-hint")).toBeNull();
+    // "Measurement details" covers Evaluation, so no Evaluation button is shown (the More menu
+    // that held it became plain buttons in layout review 2).
+    expect(within(view.container).queryByRole("button", { name: "Evaluation" })).toBeNull();
+    expect(view.container.querySelector(".rec-measurement-details")).not.toBeNull();
+  });
+
   it("keeps frozen lifecycle controls available after current source drift without allowing retrack", async () => {
     const stopped = effectCycle({ state: "STOPPED" });
     const mockFetch = vi.fn((input: RequestInfo | URL) =>
@@ -663,10 +747,10 @@ describe("RecCard — ESF2 lifecycle evidence and controls", () => {
     );
     expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(true);
     expect(view.getByRole("button", { name: "I reverted the change" })).toBeTruthy();
-    expect(view.queryByRole("button", { name: "Track another change" })).toBeNull();
+    expect((view.getByRole("button", { name: "Track" }) as HTMLButtonElement).disabled).toBe(true);
     view.rerender(<RecCard rec={{ ...rec, effect_cycle: effectCycle({ state: "FINALIZED" }) }} />);
     expect(view.getByRole("button", { name: "Close attribution" })).toBeTruthy();
-    expect(view.queryByRole("button", { name: "Track another change" })).toBeNull();
+    expect((view.getByRole("button", { name: "Track" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("keeps unsupported versions and disabled writers read-only, including rollback", () => {
@@ -750,7 +834,7 @@ describe("RecCard — ESF2 lifecycle evidence and controls", () => {
     const view = render(
       <RecCard rec={makeRec({ effect_cycle: effectCycle({ state: "STOPPED" }) })} />,
     );
-    fireEvent.click(view.getByRole("button", { name: "Track another change" }));
+    fireEvent.click(view.getByRole("button", { name: "Track" }));
     expect(view.getByText(/starts a new measurement cycle/)).toBeDefined();
     expect(
       (view.getByRole("button", { name: "Confirm retrack" }) as HTMLButtonElement).disabled,
@@ -766,7 +850,7 @@ describe("RecCard — ESF2 lifecycle evidence and controls", () => {
         })}
       />,
     );
-    expect(view.queryByRole("button", { name: "Track another change" })).toBeNull();
+    expect((view.getByRole("button", { name: "Track" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
@@ -805,7 +889,7 @@ describe("RecCard — progressive disclosure", () => {
     expect(container.textContent ?? "").toContain("Use /clear between unrelated tasks");
     // Modeled $/wk is demoted OUT of the collapsed view (INT-5) — it appears only in the
     // expanded Expected-impact block.
-    expect(container.textContent ?? "").not.toContain("$0.06/wk");
+    expect(container.querySelector(".rec-savings-meter")?.textContent).toContain("$0.06/wk");
 
     // Formula detail NOT visible when collapsed.
     expect(container.textContent ?? "").not.toContain("reduction_fraction");
@@ -959,11 +1043,10 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     // Switch to fake timers for the deferred-commit window
     vi.useFakeTimers();
 
-    const guidedToggle = container.querySelector<HTMLButtonElement>(".rec-guided-toggle");
-    if (!guidedToggle) throw new Error("guided prompt toggle not found");
-    fireEvent.click(guidedToggle);
-    const copyPrompt = container.querySelector<HTMLButtonElement>(".rec-prompt-artifact button");
-    if (!copyPrompt) throw new Error("copy prompt button not found");
+    const copyPrompt = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".rec-card-head-actions button"),
+    ).find((button) => button.textContent === "Copy instruction");
+    if (!copyPrompt) throw new Error("action copy button not found");
     fireEvent.click(copyPrompt);
     await act(async () => {
       await Promise.resolve();
@@ -975,7 +1058,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     if (!completionButton) throw new Error("completion attestation not found");
     fireEvent.click(completionButton);
     const adoptBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
-      (button) => button.textContent === "Track this change",
+      (button) => button.textContent === "Track",
     );
     if (!adoptBtn) throw new Error("adopt button not found");
     fireEvent.click(adoptBtn);
@@ -1050,13 +1133,10 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     const page = render(<RecommendationsPage />);
     await waitFor(() => expect(page.container.querySelector(".rec-card")).not.toBeNull());
     vi.useFakeTimers();
-    const guidedToggle = page.container.querySelector<HTMLButtonElement>(".rec-guided-toggle");
-    if (!guidedToggle) throw new Error("guided prompt toggle not found");
-    fireEvent.click(guidedToggle);
-    const copyPrompt = page.container.querySelector<HTMLButtonElement>(
-      ".rec-prompt-artifact button",
-    );
-    if (!copyPrompt) throw new Error("copy prompt button not found");
+    const copyPrompt = Array.from(
+      page.container.querySelectorAll<HTMLButtonElement>(".rec-card-head-actions button"),
+    ).find((button) => button.textContent === "Copy instruction");
+    if (!copyPrompt) throw new Error("action copy button not found");
     fireEvent.click(copyPrompt);
     await act(async () => {
       await Promise.resolve();
@@ -1068,7 +1148,7 @@ describe("RecommendationsPage — dismiss/adopt integration", () => {
     fireEvent.click(completeButton);
     const trackButton = Array.from(
       page.container.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent === "Track this change");
+    ).find((button) => button.textContent === "Track");
     if (!trackButton) throw new Error("track change button not found");
     fireEvent.click(trackButton);
     await act(async () => {
@@ -1190,14 +1270,19 @@ function makeGroup(overrides: Partial<RecommendationGroup> = {}): Recommendation
 }
 
 describe("RecCard — RV4 primary-action routing", () => {
-  it("copy-route card (D1) renders exactly one Copy prompt action", () => {
+  it("copy-route card (D1) renders exactly one action Copy", () => {
     const { getAllByRole } = render(<RecCard rec={makeCopyRec()} />);
-    expect(getAllByRole("button", { name: "Copy prompt" })).toHaveLength(1);
+    expect(getAllByRole("button", { name: "Copy instruction" })).toHaveLength(1);
   });
 
-  it("collapsed copy-route group keeps only its representative preview action", () => {
-    const { getAllByRole } = render(<RecCard group={makeGroup()} rank={1} />);
-    expect(getAllByRole("button", { name: "Copy prompt" })).toHaveLength(1);
+  it("collapsed group leaves copy actions with its members", () => {
+    const { container } = render(<RecCard group={makeGroup()} rank={1} />);
+    expect(container.querySelector(".rec-group-header .rec-decision-actions")).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll(".rec-group-members button")).some(
+        (button) => button.textContent === "Copy instruction",
+      ),
+    ).toBe(true);
   });
 
   it("keeps grouped D1 copy, attestation and tracking owned by the selected member", async () => {
@@ -1223,18 +1308,22 @@ describe("RecCard — RV4 primary-action routing", () => {
           }),
     );
     vi.stubGlobal("fetch", mockFetch);
-    const recs = ["first", "second"].map((name) => ({
-      ...makeCopyRec(),
-      rec_id: `rec-${name}`,
-      file_ref: `C:/synthetic/${name}/CLAUDE.md`,
-      effect_capability: { mode: "TRACKABLE" as const, reason: null },
-    }));
-    const view = render(<RecCard group={makeGroup({ recs })} rank={1} />);
-    // The representative preview must grant no member evidence.
-    fireEvent.click(view.getAllByRole("button", { name: "Copy prompt" })[0] as HTMLElement);
-    await act(async () => {
-      await Promise.resolve();
+    const recs = ["first", "second"].map((name) => {
+      const rec = makeCopyRec();
+      if (!rec.actions) throw new Error("missing fixture actions");
+      return {
+        ...rec,
+        rec_id: `rec-${name}`,
+        file_ref: `C:/synthetic/${name}/CLAUDE.md`,
+        effect_capability: { mode: "TRACKABLE" as const, reason: null },
+        actions: {
+          ...rec.actions,
+          primary: { ...rec.actions.primary, copy_text: `Copy for rec-${name}` },
+        },
+      };
     });
+    const view = render(<RecCard group={makeGroup({ recs })} rank={1} />);
+    // Each member owns its copy evidence.
     for (const toggle of view.getAllByRole("button", { name: /Show details/ })) {
       fireEvent.click(toggle);
     }
@@ -1243,19 +1332,21 @@ describe("RecCard — RV4 primary-action routing", () => {
     const first = within(rows[0] as HTMLElement);
     const second = within(rows[1] as HTMLElement);
     expect(view.queryByRole("button", { name: "I completed the change" })).toBeNull();
-    expect(view.queryByRole("button", { name: "Track this change" })).toBeNull();
-    expect(first.getByRole("button", { name: "Copy prompt" })).toBeDefined();
-    fireEvent.click(second.getByRole("button", { name: "Copy prompt" }));
+    expect(first.getByRole("button", { name: "Track" })).toBeDefined();
+    expect(second.getByRole("button", { name: "Track" })).toBeDefined();
+    expect(first.getByRole("button", { name: "Copy instruction" })).toBeDefined();
+    fireEvent.click(second.getByRole("button", { name: "Copy instruction" }));
     await act(async () => {
       await Promise.resolve();
     });
-    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("Copy for rec-second");
+    expect(navigator.clipboard.writeText).not.toHaveBeenLastCalledWith(
       expect.stringContaining("C:/synthetic/second/CLAUDE.md"),
     );
-    expect(second.queryByRole("button", { name: "Track this change" })).toBeNull();
+    expect(second.getByRole("button", { name: "Track" })).toBeDefined();
     fireEvent.click(second.getByRole("button", { name: "I completed the change" }));
     expect(second.getByText(/Tracking records a baseline/)).toBeDefined();
-    fireEvent.click(second.getByRole("button", { name: "Track this change" }));
+    fireEvent.click(second.getByRole("button", { name: "Track" }));
     expect(mockFetch).not.toHaveBeenCalled();
     await act(async () => {
       vi.advanceTimersByTime(5_000);
@@ -1268,8 +1359,8 @@ describe("RecCard — RV4 primary-action routing", () => {
       expect.objectContaining({ body: expect.stringContaining('"rec_id":"rec-second"') }),
     );
     expect(first.queryByRole("button", { name: "I completed the change" })).toBeNull();
-    expect(first.queryByRole("button", { name: "Track this change" })).toBeNull();
-    expect(first.getByRole("button", { name: "Copy prompt" })).toBeDefined();
+    expect(first.getByRole("button", { name: "Track" })).toBeDefined();
+    expect(first.getByRole("button", { name: "Copy instruction" })).toBeDefined();
   });
 
   it("no card renders the removed 'Copy Claude Code prompt' action", () => {
@@ -1277,46 +1368,41 @@ describe("RecCard — RV4 primary-action routing", () => {
     expect(queryByRole("button", { name: "Copy Claude Code prompt" })).toBeNull();
   });
 
-  it("behavioral card (D2) leads with Install hook and collapses the guided prompt", async () => {
+  it("behavioral card (D2) withholds unvalidated hook install but retains validated copy", () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
-    const { container, getByRole, findAllByRole, queryByRole } = render(
+    const { container, getByRole, queryByRole } = render(
       <RecCard rec={makeRec({ detector_id: "D2" })} />,
     );
 
-    const installButtons = await findAllByRole("button", { name: "Install hook" });
-    expect(installButtons).toHaveLength(1);
-    expect(installButtons[0]?.closest(".rec-primary-action")).not.toBeNull();
-    expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
-
-    const guidedPrompt = getByRole("button", { name: "Show guided prompt" });
-    expect(guidedPrompt.closest(".rec-primary-action")).not.toBeNull();
-    expect(container.querySelector(".rec-actions-menu .rec-guided-toggle")).toBeNull();
-    fireEvent.click(guidedPrompt);
-    expect(getByRole("button", { name: "Copy prompt" })).toBeDefined();
+    expect(queryByRole("button", { name: "Install hook" })).toBeNull();
+    expect(container.querySelector(".rec-primary-action")).toBeNull();
+    expect(queryByRole("button", { name: "Show guided prompt" })).toBeNull();
+    expect(container.querySelector(".rec-guided-toggle")).toBeNull();
+    expect(getByRole("button", { name: "Copy instruction" })).toBeDefined();
   });
 
-  it("behavioral card (D8) also leads with Install hook", async () => {
+  it("behavioral card (D8) also withholds unvalidated hook install", () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
-    const { findByRole } = render(
+    const { queryByRole } = render(
       <RecCard rec={makeRec({ detector_id: "D8", category: "CACHE" })} />,
     );
-    expect(await findByRole("button", { name: "Install hook" })).toBeDefined();
+    expect(queryByRole("button", { name: "Install hook" })).toBeNull();
   });
 
   it("reflects an already-installed hook as a disabled Installed pill", async () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(true));
-    const { findByRole } = render(<RecCard rec={makeRec({ detector_id: "D2" })} />);
+    const { findByRole } = render(<HookInstallButton />);
     const btn = (await findByRole("button", { name: "Installed ✓" })) as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
   });
 
   it("rechecks hook state on return, focus and settings changes", async () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(true));
-    const first = render(<RecCard rec={makeRec()} />);
+    const first = render(<HookInstallButton />);
     await first.findByRole("button", { name: "Installed ✓" });
     first.unmount();
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
-    const next = render(<RecCard rec={makeRec()} />);
+    const next = render(<HookInstallButton />);
     await next.findByRole("button", { name: "Install hook" });
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(true));
     fireEvent(window, new Event("focus"));
@@ -1328,7 +1414,7 @@ describe("RecCard — RV4 primary-action routing", () => {
 
   it("does not treat failed status reads as not installed and permits retry", async () => {
     vi.mocked(client.fetchHookConfig).mockRejectedValueOnce(new Error("status offline"));
-    const result = render(<RecCard rec={makeRec()} />);
+    const result = render(<HookInstallButton />);
     expect((await result.findByRole("alert")).textContent).toContain("status offline");
     expect(result.queryByRole("button", { name: "Install hook" })).toBeNull();
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
@@ -1345,8 +1431,8 @@ describe("RecCard — RV4 primary-action routing", () => {
     );
     const result = render(
       <>
-        <RecCard rec={makeRec()} />
-        <RecCard rec={makeRec({ rec_id: "second-hook-card" })} />
+        <HookInstallButton />
+        <HookInstallButton />
       </>,
     );
     await waitFor(() => expect(client.fetchHookConfig).toHaveBeenCalledTimes(1));
@@ -1373,7 +1459,7 @@ describe("RecCard — RV4 primary-action routing", () => {
         rejectInstall = reject;
       }),
     );
-    const result = render(<RecCard rec={makeRec()} />);
+    const result = render(<HookInstallButton />);
     fireEvent.click(await result.findByRole("button", { name: "Install hook" }));
     expect(result.getByRole("button", { name: "Installing…" }).hasAttribute("disabled")).toBe(true);
     expect(result.queryByRole("button", { name: "Installed ✓" })).toBeNull();
@@ -1387,15 +1473,15 @@ describe("RecCard — RV4 primary-action routing", () => {
     await result.findByRole("button", { name: "Installed ✓" });
   });
 
-  it("behavioral group (D2) leads with Install hook", async () => {
+  it("behavioral group (D2) withholds unvalidated hook install", () => {
     vi.mocked(client.fetchHookConfig).mockResolvedValue(hookConfigResponse(false));
     const group = makeGroup({
       detector_id: "D2",
       label: "Session hygiene",
       recs: [makeRec({ detector_id: "D2" })],
     });
-    const { findByRole, queryByRole } = render(<RecCard group={group} rank={1} />);
-    expect(await findByRole("button", { name: "Install hook" })).toBeDefined();
+    const { queryByRole } = render(<RecCard group={group} rank={1} />);
+    expect(queryByRole("button", { name: "Install hook" })).toBeNull();
     expect(queryByRole("button", { name: "Copy prompt" })).toBeNull();
   });
 

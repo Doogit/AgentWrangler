@@ -13,7 +13,10 @@ import {
   rollbackApplyJob,
   startApplyJob,
 } from "../../src/apply/jobs.js";
+import { displayPath } from "../../src/query/api/rec-actions/families/context.js";
+import { getRecommendationCard } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const gate = vi.hoisted(() => ({ enabled: true }));
@@ -33,20 +36,25 @@ function insertRec(
   recId: string,
   opts: { scope?: string | null; fileRef?: string | null } = {},
 ): void {
-  const evidence: Record<string, unknown> = {
-    component: "CLAUDE_MD",
-    file_ref: opts.fileRef === undefined ? fileRef : opts.fileRef,
-    steps: [{ kind: "trim", target: "CLAUDE_MD", max_lines: 80 }],
-  };
-  db.prepare(
-    `INSERT INTO recommendations
-       (rec_id, provenance, detector_id, category, scope_workspace_id, lever,
-        modeled_savings_u_per_wk, modeled_formula_json, evidence_json,
-        target_metric, state, created_at, dismissed_until)
-     VALUES (?, 'RULE', 'D1', 'CONTEXT', ?, 'Trim workspace CLAUDE.md', 1000,
-       '{"model":"D1","inputs":{}}', ?, 'avg_context_per_turn',
-       'PROPOSED', '2026-08-25T00:00:00.000Z', NULL)`,
-  ).run(recId, opts.scope === undefined ? "ws-alpha" : opts.scope, JSON.stringify(evidence));
+  const scope = opts.scope === undefined ? "ws-alpha" : opts.scope;
+  const isD1 = opts.fileRef !== null;
+  const probeId = `apply-probe-${recId}`;
+  if (isD1 && scope !== null) {
+    db.prepare(`INSERT INTO context_inventory
+      (probe_id, workspace_id, probed_at, component, file_ref, file_hash, tokens, attribution_version)
+      VALUES (?, ?, ?, 'CLAUDE_MD', ?, 'synthetic-hash', 10000, 'chars4-v1')`).run(
+      probeId,
+      scope,
+      new Date().toISOString(),
+      opts.fileRef ?? fileRef,
+    );
+  }
+  seedValidatedRecommendation(db, {
+    recId,
+    templateId: isD1 ? "D1_CONTEXT_ALWAYS_LOADED" : "D2_LONG_FULL_CONTEXT",
+    scope,
+    ...(isD1 ? { facts: { probe_id: probeId, attribution_method: "CHARS4_ESTIMATE" } } : {}),
+  });
 }
 
 async function waitForStatus(
@@ -67,7 +75,7 @@ beforeEach(() => {
   setQueryDb(db);
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-apply-test-"));
   workspaceCwd = path.join(tmpDir, "workspace");
-  fileRef = path.join(workspaceCwd, ".claude", "CLAUDE.md");
+  fileRef = path.join(workspaceCwd, "CLAUDE.md");
   fs.mkdirSync(path.dirname(fileRef), { recursive: true });
   fs.writeFileSync(fileRef, "original\n", "utf-8");
   stubPath = path.resolve("test/apply/stubs/claude-stub.cjs");
@@ -92,6 +100,7 @@ describe("apply jobs", () => {
   it("sanitizes Claude Code nesting variables before spawning", async () => {
     const previousClaudeDecode = process.env.CLAUDECODE;
     const previousEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT;
+    const previousApiKey = process.env.ANTHROPIC_API_KEY;
     let capturedEnv: NodeJS.ProcessEnv | undefined;
 
     class FakeApplyChild extends EventEmitter {
@@ -103,6 +112,7 @@ describe("apply jobs", () => {
 
     process.env.CLAUDECODE = "1";
     process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-daemon";
     try {
       configureApplyJobsForTests({
         tmpRoot: path.join(tmpDir, "jobs"),
@@ -135,7 +145,11 @@ describe("apply jobs", () => {
         Object.keys(capturedEnv ?? {}).filter((key) => key.startsWith("CLAUDE_CODE_")),
       ).toEqual([]);
       expect(capturedEnv?.PATH ?? capturedEnv?.Path).toBeDefined();
+      // D2: the child bills the user's subscription, never the daemon's API key.
+      expect(capturedEnv).not.toHaveProperty("ANTHROPIC_API_KEY");
     } finally {
+      if (previousApiKey === undefined) Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+      else process.env.ANTHROPIC_API_KEY = previousApiKey;
       if (previousClaudeDecode === undefined) Reflect.deleteProperty(process.env, "CLAUDECODE");
       else process.env.CLAUDECODE = previousClaudeDecode;
       if (previousEntrypoint === undefined)
@@ -179,14 +193,30 @@ describe("apply jobs", () => {
     expect(() => startApplyJob("rec-no-file", workspaceCwd)).toThrow(/file_ref absent/);
   });
 
+  it("uses the exact inventory probe and withholds apply when its identity changes", () => {
+    insertRec("rec-probe-identity");
+    expect(getRecommendationCard("rec-probe-identity")?.file_ref).toBe(fileRef);
+    expect(getRecommendationCard("rec-probe-identity")?.actions?.primary.copy_text).toContain(
+      displayPath(fileRef),
+    );
+    db.prepare("UPDATE context_inventory SET component = 'MEMORY' WHERE probe_id = ?").run(
+      "apply-probe-rec-probe-identity",
+    );
+    expect(getRecommendationCard("rec-probe-identity")?.file_ref).toBeNull();
+    expect(() => startApplyJob("rec-probe-identity", workspaceCwd)).toThrow(/file_ref absent/);
+  });
+
   it("rejects global-scope recommendations", () => {
     insertRec("rec-global", { scope: null });
     expect(() => startApplyJob("rec-global", workspaceCwd)).toThrow(/global-file recs/);
   });
 
-  it("rejects traversal before spawn", () => {
+  it("hides legacy traversal input before apply", () => {
     insertRec("rec-traversal", { fileRef: "../outside.md" });
-    expect(() => startApplyJob("rec-traversal", workspaceCwd)).toThrow(/inside workspace_cwd/);
+    db.prepare(
+      "UPDATE recommendations SET contract_version=NULL, template_id=NULL, contract_status='LEGACY_UNVERIFIED' WHERE rec_id='rec-traversal'",
+    ).run();
+    expect(() => startApplyJob("rec-traversal", workspaceCwd)).toThrow(/not found/);
   });
 
   it("keeps a completed dry-run exclusive until it is confirmed or resolved", async () => {

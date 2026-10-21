@@ -29,6 +29,7 @@ function recommendation(
     scope_workspace_id: null,
     lever: "Take the recommended action.",
     modeled_savings_u_per_wk,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: {
       model: "test",
@@ -62,11 +63,17 @@ function responseWithActiveRecommendations(): ApiResponse<RecommendationsView> {
       limit_warnings: [],
       adopted: [],
       dismissed: [],
+      history: [],
       detectors: [
         { detector_id: "D2", name: "SESSION_LONG_FULL_CONTEXT", status: "ACTIVE", note: "active" },
         { detector_id: "D8", name: "CACHE_WRITE_CHURN", status: "ACTIVE", note: "active" },
         { detector_id: "D4", name: "MODEL_MISMATCH", status: "BLOCKED", note: "blocked" },
       ],
+      rank_warnings: [],
+      overflow_count: 0,
+      excluded: [],
+      ranking_goal: "PRESERVE_QUALITY",
+      packet_identity_hash: "fixture-packet-hash",
     },
     meta: {
       n: active.length,
@@ -98,8 +105,10 @@ describe("RecommendationsPage below-the-line summary", () => {
     expect(header?.textContent).toContain("3 active recommendations");
     // Most findings line
     expect(header?.textContent).toContain("Most findings:");
-    // Non-additive honesty note
-    expect(header?.textContent).toContain("Estimates can overlap; do not add them together.");
+    // L6: figures are net of overlaps, so they add up
+    expect(header?.textContent).toContain(
+      "Dollar figures are net of overlaps: each token is counted once, so they add up.",
+    );
     // Trio counts present
     expect(header?.querySelector(".recs-summary-trio")).not.toBeNull();
     // No dollar figure in the header (INT-5)

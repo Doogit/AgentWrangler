@@ -34,9 +34,16 @@ export function getSessionSpendPercentile(db: Db, sessionId: string): SessionSpe
     return { percentile: null, n: 0, window_days: WINDOW_DAYS };
   }
 
-  const windowStart = new Date(
-    Date.parse(target.last_turn_at) - WINDOW_DAYS * DAY_MS,
-  ).toISOString();
+  // The peer window is the workspace's latest 90 days, so an older session is ranked
+  // against the same recent history as a new one instead of the little that preceded it.
+  const { window_end: windowEnd } = db
+    .prepare(
+      `SELECT MAX(last_turn_at) AS window_end
+         FROM sessions
+        WHERE workspace_id = ? AND cost_equiv_u IS NOT NULL`,
+    )
+    .get(target.workspace_id) as { window_end: string };
+  const windowStart = new Date(Date.parse(windowEnd) - WINDOW_DAYS * DAY_MS).toISOString();
   const population = db
     .prepare(
       `SELECT COUNT(*) AS population_count,
@@ -47,12 +54,7 @@ export function getSessionSpendPercentile(db: Db, sessionId: string): SessionSpe
           AND last_turn_at <= ?
           AND cost_equiv_u IS NOT NULL`,
     )
-    .get(
-      target.cost_equiv_u,
-      target.workspace_id,
-      windowStart,
-      target.last_turn_at,
-    ) as PopulationRow;
+    .get(target.cost_equiv_u, target.workspace_id, windowStart, windowEnd) as PopulationRow;
 
   if (population.population_count < 20) {
     return { percentile: null, n: population.population_count, window_days: WINDOW_DAYS };

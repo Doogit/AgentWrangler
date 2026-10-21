@@ -72,7 +72,10 @@ describe("R4a cost-per-success cells on WorkspaceDetailPage", () => {
   it("surfaces the coverage cap as a gated claim from linkage_coverage_pct", async () => {
     render(<WorkspaceDetailPage workspaceId={WS} onBack={() => {}} />);
 
-    const card = await screen.findByTestId("r4a-cost-per-success");
+    // The outer card is present while loading; anchor on data rendered only
+    // after the cost-per-success request resolves.
+    await screen.findByTestId("r4a-cost-per-merged-pr");
+    const card = screen.getByTestId("r4a-cost-per-success");
     // Coverage-dependent claim is gated on the real coverage number (43%), not asserted blindly.
     expect(card.textContent).toContain("Only 43% of in-window sessions are linked to a PR");
     // The four caveats are carried in the copy.

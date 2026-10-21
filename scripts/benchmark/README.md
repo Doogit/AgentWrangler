@@ -15,7 +15,6 @@ One Chromium run on Windows, 1440 x 1000, production assets over local HTTP with
 | sessions | 845869 | 182367 | 245/176 | 101/85 |
 | workspaces | 845869 | 182228 | 235/145 | 84/79 |
 | settings | 845869 | 209490 | 204/150 | 102/75 |
-| briefs | 845869 | 199124 | 194/163 | 76/67 |
 | glossary | 845869 | 173709 | 201/153 | 114/66 |
 | sessions/session-demo | 845869 | 593407 | 259/189 | 164/127 |
 | workspaces/ws-alpha | 845869 | 193070 | 310/161 | 78/72 |

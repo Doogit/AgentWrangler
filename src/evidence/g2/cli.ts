@@ -184,16 +184,15 @@ The evidence leaves your machine. No rationale text is written to disk (SEC-101)
   }
   let judge = deps.judge;
   if (judge === undefined) {
-    // Prefer a raw Anthropic API key (separate rate-limit pool) over the shared
-    // Claude Code subscription OAuth token. SEC-101: log the source, never the key.
+    // An Anthropic API key is required (OAUTH-1: never the Claude Code OAuth
+    // token). SEC-101: log the source, never the key.
     const keyResult = await readAnthropicApiKey();
-    if (keyResult.ok) {
-      writeOut(`[judge-g2] auth: api-key (${keyResult.source})`);
-      judge = claudeJudgeClient({ apiKey: keyResult.data });
-    } else {
-      writeOut(`[judge-g2] auth: oauth (subscription; no API key: ${keyResult.reason})`);
-      judge = claudeJudgeClient();
+    if (!keyResult.ok) {
+      writeErr(`[judge-g2] An Anthropic API key is required (${keyResult.reason}).`);
+      return 1;
     }
+    writeOut(`[judge-g2] auth: api-key (${keyResult.source})`);
+    judge = claudeJudgeClient({ apiKey: keyResult.data });
   }
 
   const result = await runG2JudgePipeline(

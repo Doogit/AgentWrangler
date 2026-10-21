@@ -8,15 +8,18 @@
  *  - only complete lines (terminated by \n) are emitted; a partial trailing line
  *    waits for the next pass (offset is not advanced past it);
  *  - truncation (fileSize < storedOffset) ⇒ reset to 0 + re-scan;
- *  - rotation (head-hash mismatch) ⇒ reset to 0 + re-scan;
+ *  - rotation (head-hash or tail-hash mismatch) ⇒ reset to 0 + re-scan;
  *  - re-scans are made safe by message_id dedupe downstream (idempotent).
  */
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import type { Db } from "../db/open.js";
+import { prep } from "../db/stmt-cache.js";
+import { PARSER_VERSION } from "./types.js";
 
 const HEAD_BYTES = 256; // bytes hashed for rotation detection
+const TAIL_BYTES = 4096; // bytes before the watermark hashed for file identity (P3-U7)
 // 1 MiB keeps a chunk's synchronous transaction well under the <=250 ms
 // dashboard-responsiveness target (measured ~80 ms per chunk at this size)
 // while adding no measurable throughput cost vs larger chunks.
@@ -27,6 +30,8 @@ export interface Offset {
   offset: number;
   headHash: string | null;
   fileVersion: FileVersion | null;
+  /** P3-U7: hash of the TAIL_BYTES before `offset`; null on pre-048 rows. */
+  tailHash?: string | null;
 }
 
 export interface FileVersion {
@@ -49,6 +54,12 @@ export type TailEvent = null | "TRUNCATION" | "ROTATION" | "OVERSIZED_LINE";
 
 export interface TailChunkResult extends TailResult {
   hasMore: boolean;
+  /**
+   * P2-U4a: absolute byte offset just past each kept line's `\n` (parallel to
+   * `lines`), so a time-sliced caller can commit a mid-chunk offset. Present
+   * whenever `lines` is non-empty.
+   */
+  lineEnds?: number[];
 }
 
 export function fileVersion(stat: fs.Stats): FileVersion {
@@ -69,6 +80,22 @@ export function sameFileVersion(a: FileVersion, b: FileVersion): boolean {
     a.mtimeMs === b.mtimeMs &&
     a.ctimeMs === b.ctimeMs
   );
+}
+
+/**
+ * True when `b` is the same physical file as `a` (same device + inode) that has
+ * only grown. Transcripts are append-only, so a strict size increase on a stable
+ * inode means the previously-consumed prefix `[0, a.size)` is byte-identical and
+ * safe to enrich in place. A rotation (new inode) or a same-size rewrite fails
+ * this check and is left to normal replay (M2).
+ *
+ * Unlike `sameFileVersion`, mtimeMs/ctimeMs are intentionally NOT compared: a
+ * file that has grown necessarily has a newer mtime/ctime, so checking them would
+ * always return false and defeat append detection. Do not "complete" this to
+ * match `sameFileVersion`.
+ */
+export function appendOnlyGrowth(a: FileVersion, b: FileVersion): boolean {
+  return a.dev === b.dev && a.ino === b.ino && b.size > a.size;
 }
 
 /** SHA-256 of the first n bytes of a file (or fewer if the file is shorter). */
@@ -97,6 +124,26 @@ export function headHash(filePath: string): string {
     const n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0);
     const hex = crypto.createHash("sha256").update(buf.subarray(0, n)).digest("hex");
     return `${n}:${hex}`;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * P3-U7: SHA-256 of the up-to-TAIL_BYTES bytes before `offset`, or null when
+ * the file is unreadable or shorter than `offset`.
+ */
+export function tailHashAt(filePath: string, offset: number): string | null {
+  const start = Math.max(0, offset - TAIL_BYTES);
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const buf = Buffer.alloc(offset - start);
+    const n = fs.readSync(fd, buf, 0, buf.length, start);
+    if (n !== buf.length) return null;
+    return crypto.createHash("sha256").update(buf).digest("hex");
+  } catch {
+    return null;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -157,6 +204,15 @@ export function tailFileChunk(
     storedVersion !== null &&
     storedVersion.size === version.size &&
     (storedVersion.mtimeMs !== version.mtimeMs || storedVersion.ctimeMs !== version.ctimeMs);
+  // P3-U7: bytes before the watermark rewritten in place (same inode and head,
+  // file grown). Checked last so it costs a read only when nothing else fired.
+  const storedTail = stored?.tailHash ?? null;
+  // An unreadable tail (a transient lock) is unknown, not changed.
+  const tailChanged = () => {
+    if (storedTail === null || storedOffset <= 0) return false;
+    const current = tailHashAt(filePath, storedOffset);
+    return current !== null && current !== storedTail;
+  };
 
   if (storedOffset > fileSize) {
     // Size regression always means truncation, regardless of head change.
@@ -164,7 +220,7 @@ export function tailFileChunk(
     storedOffset = 0;
     wasReset = true;
     storedHead = curHead;
-  } else if (identityChanged || equalSizeTimestampChanged || headChanged) {
+  } else if (identityChanged || equalSizeTimestampChanged || headChanged || tailChanged()) {
     event = "ROTATION";
     storedOffset = 0;
     wasReset = true;
@@ -258,9 +314,19 @@ export function tailFileChunk(
   const completeStr = buf.subarray(0, lastNl).toString("utf8");
   const newOffset = storedOffset + lastNl + 1;
   const lines = completeStr.split("\n").filter((l) => l.length > 0);
+  // `\n` never occurs inside a UTF-8 multibyte sequence, and a segment is
+  // non-empty in bytes iff it is non-empty as a string, so this matches `lines`.
+  const lineEnds: number[] = [];
+  let segStart = 0;
+  for (let i = 0; i <= lastNl; i++) {
+    if (buf[i] !== 0x0a) continue;
+    if (i > segStart) lineEnds.push(storedOffset + i + 1);
+    segStart = i + 1;
+  }
 
   return {
     lines,
+    lineEnds,
     newOffset,
     newHeadHash: curHead,
     event,
@@ -330,15 +396,15 @@ interface OffsetRow {
   file_ino: string | null;
   file_mtime_ms: number | null;
   file_ctime_ms: number | null;
+  tail_hash: string | null;
 }
 
 /** Read the persisted offset for a file, or null if never tailed. */
 export function loadOffset(db: Db, filePath: string): Offset | null {
-  const row = db
-    .prepare(
-      "SELECT byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms FROM ingest_offsets WHERE file_path = ?",
-    )
-    .get(filePath) as OffsetRow | undefined;
+  const row = prep(
+    db,
+    "SELECT byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms, tail_hash FROM ingest_offsets WHERE file_path = ?",
+  ).get(filePath) as OffsetRow | undefined;
   if (row === undefined) return null;
   const hasVersion =
     row.file_size !== null &&
@@ -358,6 +424,7 @@ export function loadOffset(db: Db, filePath: string): Offset | null {
           ctimeMs: row.file_ctime_ms as number,
         }
       : null,
+    tailHash: row.tail_hash,
   };
 }
 
@@ -369,9 +436,10 @@ export function saveOffset(
   headHash: string,
   version: FileVersion,
 ): void {
-  db.prepare(
-    `INSERT INTO ingest_offsets (file_path, byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?)
+  prep(
+    db,
+    `INSERT INTO ingest_offsets (file_path, byte_offset, file_hash_head, file_size, file_dev, file_ino, file_mtime_ms, file_ctime_ms, tail_hash, parser_version, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(file_path) DO UPDATE SET
        byte_offset = excluded.byte_offset,
        file_hash_head = excluded.file_hash_head,
@@ -380,6 +448,8 @@ export function saveOffset(
        file_ino = excluded.file_ino,
        file_mtime_ms = excluded.file_mtime_ms,
        file_ctime_ms = excluded.file_ctime_ms,
+       tail_hash = excluded.tail_hash,
+       parser_version = excluded.parser_version,
        updated_at = excluded.updated_at`,
   ).run(
     filePath,
@@ -390,6 +460,54 @@ export function saveOffset(
     version.ino,
     version.mtimeMs,
     version.ctimeMs,
+    tailHashAt(filePath, offset),
+    PARSER_VERSION,
     new Date().toISOString(),
   );
+}
+
+/** P3-U7: count a truncation or rotation of an already-tracked file. */
+export function countReset(db: Db, filePath: string): void {
+  prep(db, "UPDATE ingest_offsets SET reset_count = reset_count + 1 WHERE file_path = ?").run(
+    filePath,
+  );
+}
+
+/** P3-U7: fill a pre-048 row's tail hash so the file can later be matched by content. */
+export function backfillTailHash(db: Db, filePath: string, offset: number): void {
+  const hash = tailHashAt(filePath, offset);
+  if (hash === null) return;
+  prep(db, "UPDATE ingest_offsets SET tail_hash = ? WHERE file_path = ?").run(hash, filePath);
+}
+
+/**
+ * P3-U7: the tracked file whose consumed prefix this untracked file repeats —
+ * same head hash, same tail hash at that row's watermark — i.e. the same
+ * transcript copied or renamed to a new path. Only rows with a stored tail hash
+ * qualify: hashing a donor's current bytes could match bytes never ingested.
+ * Null when none match.
+ */
+export function findSameContent(
+  db: Db,
+  filePath: string,
+  size: number,
+): { filePath: string; offset: number } | null {
+  if (size === 0) return null;
+  const rows = prep(
+    db,
+    `SELECT file_path, byte_offset, tail_hash FROM ingest_offsets
+     WHERE file_hash_head = ? AND byte_offset > 0 AND byte_offset <= ? AND file_path <> ?
+       AND tail_hash IS NOT NULL
+     ORDER BY byte_offset DESC LIMIT 8`,
+  ).all(headHash(filePath), size, filePath) as {
+    file_path: string;
+    byte_offset: number;
+    tail_hash: string;
+  }[];
+  for (const row of rows) {
+    if (tailHashAt(filePath, row.byte_offset) === row.tail_hash) {
+      return { filePath: row.file_path, offset: row.byte_offset };
+    }
+  }
+  return null;
 }

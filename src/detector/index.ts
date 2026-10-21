@@ -12,7 +12,14 @@ import type { LiveDetectorStatus } from "./engine.js";
 
 export type { LiveDetectorStatus } from "./engine.js";
 export type { ModeledFormula } from "./types.js";
-export { buildContext } from "./engine.js";
+export { buildContext, historyWeeks, runHistoryWalk } from "./engine.js";
+export type {
+  HistoryWalkOptions,
+  HistoryWalkResult,
+  HistoryWeek,
+  HistoryWeekListener,
+  HistoryWeekProgress,
+} from "./engine.js";
 
 export interface RunDetectorsOptions {
   /** Injected evaluation instant. Defaults to new Date() ONLY when unset (never on the ingest path). */

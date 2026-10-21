@@ -2,6 +2,11 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecommendationCard, RecommendationGroup } from "../../src/query/api/recommendations";
 import RecCard from "../../src/ui/recommendations/RecCard";
+import {
+  generateFrictionRuleSnippet,
+  generateModelDefaultSnippet,
+  generateSettingsDisableBlock,
+} from "../../src/ui/recommendations/prompt-templates";
 
 const writeText = vi.fn().mockResolvedValue(undefined);
 
@@ -20,6 +25,7 @@ function makeRec(overrides: Partial<RecommendationCard> = {}): RecommendationCar
     scope_workspace_id: null,
     lever: "Use a session boundary between unrelated tasks",
     modeled_savings_u_per_wk: 59_400,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: {
       model: "D2_LONG_CONTEXT_CACHE_READ_V1",
@@ -47,22 +53,48 @@ function generatedSnippetTextarea(container: HTMLElement): HTMLTextAreaElement {
   return textarea;
 }
 
-describe("RecCard generated snippets", () => {
-  it("renders and copies a D10 settings snippet alongside the prompt artifact", async () => {
-    const rec = makeRec({
-      detector_id: "D10",
-      category: "TOOLING",
-      evidence: {
-        catalog_tokens: 12_000,
-        catalog_target_tokens: 4_000,
-        delta_context_tokens: 8_000,
+function withValidatedSnippet(
+  rec: RecommendationCard,
+  generate: (rec: RecommendationCard) => { text: string } | null,
+): RecommendationCard {
+  const snippet = generate(rec);
+  if (!snippet) throw new Error("expected a generated snippet");
+  return {
+    ...rec,
+    actions: {
+      primary: {
+        option_id: "primary",
+        kind: "CONFIG",
+        summary: "Review the setting",
+        detail: [],
+        copy_text: snippet.text,
+        file_ref: null,
       },
-    });
+      alternatives: [],
+    },
+    action_validation: { primary: { ok: true }, alternatives: {} },
+  };
+}
+
+describe("RecCard generated snippets", () => {
+  it("renders and copies a D10 settings snippet without a prompt artifact", async () => {
+    const rec = withValidatedSnippet(
+      makeRec({
+        detector_id: "D10",
+        category: "TOOLING",
+        evidence: {
+          catalog_tokens: 12_000,
+          catalog_target_tokens: 4_000,
+          delta_context_tokens: 8_000,
+        },
+      }),
+      generateSettingsDisableBlock,
+    );
     const { container, getByRole } = render(<RecCard rec={rec} />);
 
     expect(container.querySelector(".rec-generated-snippet")).not.toBeNull();
     expect(generatedSnippetTextarea(container).value).toContain('"enableToolSearch": true');
-    expect(container.querySelector(".rec-prompt-artifact")).not.toBeNull();
+    expect(container.querySelector(".rec-prompt-artifact:not(.rec-generated-snippet)")).toBeNull();
 
     fireEvent.click(getByRole("button", { name: "Copy snippet" }));
 
@@ -71,27 +103,45 @@ describe("RecCard generated snippets", () => {
   });
 
   it("renders the D4 default-model snippet with the cap caveat", () => {
-    const rec = makeRec({
-      detector_id: "D4",
-      category: "MODEL",
-      evidence: {
-        mismatch_turns_per_week: 3,
-        total_opus_turns_per_week: 12,
-        mismatch_fraction: 0.25,
-      },
-    });
+    const rec = withValidatedSnippet(
+      makeRec({
+        detector_id: "D4",
+        category: "MODEL",
+        evidence: {
+          mismatch_turns_per_week: 3,
+          total_opus_turns_per_week: 12,
+          mismatch_fraction: 0.25,
+        },
+      }),
+      generateModelDefaultSnippet,
+    );
     const { container } = render(<RecCard rec={rec} />);
 
     const text = generatedSnippetTextarea(container).value;
     expect(text).toContain('"model": "sonnet"');
     expect(text).toContain("cap is binding");
-    expect(container.querySelector(".rec-prompt-artifact")).not.toBeNull();
+    expect(container.querySelector(".rec-prompt-artifact:not(.rec-generated-snippet)")).toBeNull();
+  });
+
+  it("suppresses the investigation copy-prompt for a friction lane that ships a rule snippet", () => {
+    // C3 (edit-before-read) is a Phase 2.5 lane: its rule snippet IS the §6 surface,
+    // so the identifier-withholding investigation prompt must be suppressed.
+    const rec = withValidatedSnippet(
+      makeRec({
+        detector_id: "C3",
+        category: "TOOLING",
+        evidence: { metrics: { ERROR_COUNT: { kind: "COUNT", value: 7 } } },
+      }),
+      generateFrictionRuleSnippet,
+    );
+    const { container } = render(<RecCard rec={rec} />);
+
+    expect(container.querySelector(".rec-generated-snippet")).not.toBeNull();
+    expect(container.querySelector(".rec-prompt-artifact:not(.rec-generated-snippet)")).toBeNull();
   });
 
   it("omits generated snippets for detectors without a supported snippet", () => {
-    // D6 has no generated-config snippet (post-RI8: D2/D8 carry the autocompact
-    // snippet, D4 the model/routing snippets, D10 the settings snippet). D6 is a
-    // copy-route rec, so its prompt artifact renders directly (no toggle).
+    // D6 has no generated-config snippet; no prompt artifact is synthesized.
     const rec = makeRec({
       detector_id: "D6",
       category: "TOOLING",
@@ -100,15 +150,18 @@ describe("RecCard generated snippets", () => {
     const { container } = render(<RecCard rec={rec} />);
 
     expect(container.querySelector(".rec-generated-snippet")).toBeNull();
-    expect(container.querySelector(".rec-prompt-artifact")).not.toBeNull();
+    expect(container.querySelector(".rec-prompt-artifact:not(.rec-generated-snippet)")).toBeNull();
   });
 
   it("uses the representative recommendation for grouped cards", () => {
-    const rec = makeRec({
-      detector_id: "D10",
-      category: "TOOLING",
-      evidence: { catalog_tokens: 12_000 },
-    });
+    const rec = withValidatedSnippet(
+      makeRec({
+        detector_id: "D10",
+        category: "TOOLING",
+        evidence: { catalog_tokens: 12_000 },
+      }),
+      generateSettingsDisableBlock,
+    );
     const group: RecommendationGroup = {
       detector_id: "D10",
       label: "Tool catalog",

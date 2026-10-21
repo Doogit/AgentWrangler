@@ -8,10 +8,11 @@
  *   - WorkspaceTable: spend column shows real USD (not N/A)
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EsfObservationCohort } from "../../src/query/api/esf-observations";
 import type { LiveSessionRow, WorkspaceSummary } from "../../src/query/api/overview";
+import type { LimitRow } from "../../src/query/limits/types";
+import type { DaemonStatus } from "../../src/ui/api/client";
 import * as client from "../../src/ui/api/client";
 import {
   mockBurnStatus,
@@ -21,6 +22,8 @@ import {
   mockHeadroomTrend,
   mockHookConfigResponse,
   mockHotSessions,
+  mockLimits,
+  mockLinkageRate,
   mockLiveSessions,
   mockRecommendations,
   mockSuccessRate,
@@ -34,16 +37,29 @@ import CacheWriteSpikesChart, {
 } from "../../src/ui/overview/CacheWriteSpikesChart";
 import LiveStrip from "../../src/ui/overview/LiveStrip";
 import OverviewPage from "../../src/ui/overview/OverviewPage";
+import { isQuantified } from "../../src/ui/overview/TopRecommendations";
+import UsageLimitsCard from "../../src/ui/overview/UsageLimitsCard";
 import VerdictBand from "../../src/ui/overview/VerdictBand";
 import WorkspaceTable from "../../src/ui/overview/WorkspaceTable";
-import { buildPromptArtifact } from "../../src/ui/recommendations/prompt-templates";
+import {
+  fetchCacheWriteTrend,
+  fetchFlavorDecomposition,
+  fetchGlobalOverview,
+  fetchLiveSessions,
+  serveOverviewViewFromLegacyMocks,
+} from "./overview/overview-view-from-legacy";
 
 vi.mock("../../src/ui/api/client");
-vi.mock("../../src/ui/api/esf-client", () => ({
-  fetchEsfObservations: vi.fn().mockResolvedValue({ data: null }),
-}));
+beforeEach(serveOverviewViewFromLegacyMocks);
 
-import { fetchEsfObservations } from "../../src/ui/api/esf-client";
+const OK_STATUS: DaemonStatus = {
+  sessions: 574,
+  files_seen: 600,
+  files_parsed: 600,
+  scan_state: "complete",
+  lines_quarantined: 0,
+  invalid_scan_root_count: 0,
+};
 
 const writeText = vi.fn().mockResolvedValue(undefined);
 let clipboardDescriptor: PropertyDescriptor | undefined;
@@ -69,86 +85,342 @@ beforeEach(() => {
   vi.mocked(client.fetchHookConfig).mockResolvedValue(mockHookConfigResponse(false));
   vi.mocked(client.fetchHotSessions).mockResolvedValue(mockHotSessions());
   vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
-  vi.mocked(client.fetchFlavorDecomposition).mockResolvedValue(
-    mockFlavorDecomposition({ preset: "7d" }),
-  );
-  vi.mocked(client.fetchCacheWriteTrend).mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
+  fetchFlavorDecomposition.mockResolvedValue(mockFlavorDecomposition({ preset: "7d" }));
+  fetchCacheWriteTrend.mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
   vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
-  vi.mocked(fetchEsfObservations).mockResolvedValue({ data: null } as never);
+  vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
+  vi.mocked(client.fetchLinkageRate).mockResolvedValue(mockLinkageRate());
+  vi.mocked(client.fetchStatus).mockResolvedValue(OK_STATUS);
+  vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({
+    configured: false,
+    source: "none",
+  } as never);
 });
 
 // ---------------------------------------------------------------------------
 // Helper: set all client methods to resolve with fixture data
 // ---------------------------------------------------------------------------
 function setupSuccess() {
-  vi.mocked(client.fetchGlobalOverview).mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
   vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
-  vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
+  fetchLiveSessions.mockResolvedValue(mockLiveSessions());
 }
 
-function promptRecommendation() {
-  const recommendations = mockRecommendations();
-  if (recommendations.data === null) throw new Error("expected recommendation fixture data");
-  const recommendation = recommendations.data.active[0];
-  if (recommendation === undefined) throw new Error("expected an active recommendation");
-  return recommendation;
-}
-
-describe("VerdictBand prompt drawer", () => {
-  it("keeps the prompt collapsed until the drawer is opened, then closes it again", () => {
-    const { container } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={promptRecommendation()}
-      />,
+// Overview integration: ranked recommendations, weekly sessions, and dashboard links.
+describe("OverviewPage integration", () => {
+  it("renders the three new sections and preserves ranked recommendation order", async () => {
+    setupSuccess();
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected fixture data");
+    response.data.active.reverse();
+    // Top-3 eligibility: the first rec with a modeled savings figure is rank 1.
+    const first = response.data.active.find(isQuantified);
+    if (first === undefined) throw new Error("expected an active recommendation");
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    render(<OverviewPage />);
+    await screen.findByRole("link", { name: "Top Usage Recommendations" });
+    await screen.findByRole("link", { name: "Most expensive sessions this week" });
+    await screen.findByRole("heading", { name: "Across the dashboard" });
+    expect(screen.queryByText("What to do next")).toBeNull();
+    expect(screen.getByTestId("overview-decision").querySelector("h3")?.textContent).toBe(
+      first.title ?? first.lever,
     );
-
-    expect(container.querySelector("textarea.verdict-prompt, pre")).toBeNull();
-    expect(screen.getByText("Paste this into Claude Code")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Show fix prompt" }));
-    expect(screen.getByLabelText("Fix prompt")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Hide fix prompt" }));
-    expect(container.querySelector("textarea.verdict-prompt, pre")).toBeNull();
+    // P1-U4: the weekly sessions and KPIs arrive in the one 7d page request.
+    expect(client.fetchOverviewView).toHaveBeenCalledWith("7d", expect.anything());
   });
 
-  it("copies the fix prompt without opening the drawer", () => {
-    const recommendation = promptRecommendation();
-    const artifact = buildPromptArtifact(recommendation);
-    if (artifact === null) throw new Error("expected a prompt artifact");
-    const { container } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={recommendation}
-      />,
-    );
+  it("counts window sessions and derives every live indicator from the one /api/live poll", async () => {
+    setupSuccess();
+    const overview = mockGlobalOverview({ preset: "7d" });
+    if (overview.data === null) throw new Error("expected overview fixture");
+    overview.data.subagent_spend = {
+      total_cost_u: 1_000_000,
+      sidechain_cost_u: 250_000,
+      share: 0.25,
+      sessions_with_sidechain_spend: 70,
+      sessions_in_window: 83,
+      haiku_sidechain_turns: 0,
+      by_model_family: [],
+    };
+    fetchGlobalOverview.mockResolvedValue(overview);
+    const workspaces = mockWorkspaces({ preset: "7d" });
+    const liveWorkspace = workspaces.data?.items[0];
+    if (liveWorkspace === undefined) throw new Error("expected workspace fixture");
+    const live = mockLiveSessions();
+    if (live.data === null) throw new Error("expected live fixture");
+    live.data.items = [
+      {
+        session_id: "live-1",
+        workspace_id: liveWorkspace.workspace_id,
+        project_slug: liveWorkspace.project_slug,
+        repo_path: null,
+        repo_owner: null,
+        repo_name: null,
+        running_usd_u: 1_000_000,
+        current_context_tokens: 50_000,
+        model: "claude-opus-4-8",
+        started_at: new Date().toISOString(),
+      },
+    ];
+    fetchLiveSessions.mockResolvedValue(live);
+    render(<OverviewPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy fix prompt" }));
-    expect(writeText).toHaveBeenCalledWith(artifact.text);
-    expect(container.querySelector("textarea.verdict-prompt, pre")).toBeNull();
+    const tile = await waitFor(() => {
+      const el = document.querySelector("[data-metric='sessions.count']");
+      if (el === null) throw new Error("sessions tile not rendered");
+      return el;
+    });
+    // Window count (83), not /api/status all-time sessions (574).
+    expect(tile.textContent).toContain("83");
+    expect(tile.textContent).not.toContain("574");
+    await waitFor(() =>
+      expect(screen.getByTestId("overview-live-chip").textContent).toBe("● 1 live"),
+    );
+    // Task 9: the Sessions tile carries no live chip; the header and LiveStrip own live.
+    expect(tile.textContent).not.toContain("live");
+    // Workspaces payload says has_live=false everywhere; the live poll wins.
+    const workspacesSection = screen
+      .getByRole("heading", { name: "Workspaces" })
+      .closest("section");
+    expect(workspacesSection?.querySelectorAll(".chip.live")).toHaveLength(1);
   });
 
-  it("keeps the suggested next step in the right-aligned grid cell", () => {
-    const { container } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={promptRecommendation()}
-      />,
-    );
+  it("shows a recommendations link when active is empty", async () => {
+    setupSuccess();
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected fixture data");
+    response.data.active = [];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    render(<OverviewPage />);
+    expect(
+      (await screen.findByRole("link", { name: "No active recommendations" })).getAttribute("href"),
+    ).toBe("#/recommendations");
+  });
 
-    const nextStep = container.querySelector(".verdict-band-next-step");
-    expect(nextStep?.closest(".verdict-band-grid")).toBeTruthy();
-    expect(nextStep?.classList.contains("verdict-band-next-step")).toBe(true);
+  it("links to all recommendations and shows no SCREAMING_SNAKE enum in visible copy", async () => {
+    setupSuccess();
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected fixture data");
+    const count = response.data.active.length;
+    const groups = response.data.active_groups.length;
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    render(<OverviewPage />);
+    const all = await screen.findByRole("link", {
+      name: `All ${count} recommendations (${groups} groups) →`,
+    });
+    expect(all.getAttribute("href")).toBe("#/recommendations");
+    const section = screen.getByTestId("overview-decision");
+    const visible = [...section.querySelectorAll("h3, p, span, a, button")]
+      .filter((el) => el.closest("details:not([open])") === null)
+      .map((el) => el.textContent ?? "")
+      .join(" ");
+    expect(visible).not.toMatch(/\b[A-Z]+_[A-Z_]+\b/);
+  });
+});
+// §1 Usage-limits hero — exclusive states + full connected render.
+describe("UsageLimitsCard", () => {
+  it("connected: renders one meter row per model row with the Exact chip and pace phrasing", async () => {
+    vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
+    const { container } = render(<UsageLimitsCard />);
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='limit-row-session']")).not.toBeNull();
+    });
+    expect(container.querySelector("[data-testid='limit-row-weekly']")).not.toBeNull();
+    expect(container.querySelectorAll(".meter-row").length).toBe(3);
+    expect(screen.getByTestId("usage-limits-card").classList.contains("card-padded")).toBe(true);
+    const text = container.textContent ?? "";
+    expect(text).toContain("Exact · claude.ai");
+    expect(text).toContain("ahead of pace"); // session row is ahead
+    expect(text).toContain("On pace"); // weekly row on pace
+    expect(container.querySelector("a[href='#/sessions?live=1']")?.textContent).toContain("3 live");
+    expect(text).toContain("Our estimate 37%");
+    expect(container.querySelector("a[href='#/settings?section=calibration']")).not.toBeNull();
+  });
+
+  it("OV-8: utilization thresholds color bar, % and status; pace escalates but never mutes", async () => {
+    const model = mockLimits();
+    const [session, weekly, perModel] = model.rows as [LimitRow, LimitRow, LimitRow];
+    vi.mocked(client.fetchLimits).mockResolvedValue({
+      ...model,
+      rows: [
+        // 85% used, on pace → amber from utilization alone
+        { ...session, usedPct: 85, pacePct: 90, paceState: "on" },
+        // 96% used, on pace → rose from utilization alone
+        { ...weekly, usedPct: 96, pacePct: 97, paceState: "on" },
+        // 20% used but over pace → rose from pace escalation
+        { ...perModel, paceState: "over" },
+      ],
+    });
+    const { container } = render(<UsageLimitsCard />);
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='limit-row-session']")).not.toBeNull();
+    });
+    const row = (id: string) =>
+      container.querySelector<HTMLElement>(`[data-testid='limit-row-${id}']`);
+    expect(row("session")?.dataset.severity).toBe("warn");
+    expect(row("session")?.querySelector(".fill")?.className).toBe("fill amber");
+    expect(row("session")?.querySelector(".meter-pct")?.classList.contains("warn-t")).toBe(true);
+    expect(row("weekly")?.dataset.severity).toBe("bad");
+    expect(row("weekly")?.querySelector(".fill")?.className).toBe("fill rose");
+    expect(row("weekly")?.querySelector(".rate .bad")?.textContent).toContain("On pace");
+    expect(row("weekly:fable")?.dataset.severity).toBe("bad");
+    expect(container.querySelector(".meter-grid")?.children.length).toBe(3);
+  });
+
+  it("signed-out: labels local history and omits utilization without a denominator", async () => {
+    const model = mockLimits();
+    vi.mocked(client.fetchLimits).mockResolvedValue({
+      ...model,
+      state: "signed-out",
+      rows: [],
+      localHistory: {
+        ...model.localHistory,
+        weeklyLimitTokens: null,
+        weeklyUtilizationPct: null,
+        projectedExhaustionAt: null,
+        forecastState: "OFF",
+      },
+    });
+    const { container } = render(<UsageLimitsCard />);
+    await screen.findByText(/connect usage tracking/);
+    expect(container.querySelectorAll(".meter-row").length).toBe(0);
+    const fallback = screen.getByTestId("local-usage-fallback");
+    expect(fallback.textContent).toContain("Modeled local history");
+    expect(fallback.textContent).toContain("Last 5 hours");
+    expect(fallback.textContent).toContain("Rolling 7 days");
+    expect(fallback.textContent).toContain("Burn rate");
+    expect(fallback.textContent).not.toMatch(/% of (?:the )?weekly limit/i);
+    expect(fallback.querySelector("[role='progressbar']")).toBeNull();
+  });
+
+  it("degraded state shows calibrated local utilization and forecast when available", async () => {
+    const model = mockLimits();
+    vi.mocked(client.fetchLimits).mockResolvedValue({
+      ...model,
+      state: "error",
+      rows: [],
+      localHistory: {
+        ...model.localHistory,
+        sevenDayTokens: 2_500_000,
+        weeklyLimitTokens: 10_000_000,
+        weeklyUtilizationPct: 25,
+        projectedExhaustionAt: "2026-09-19T12:00:00.000Z",
+        forecastState: "OK",
+      },
+    });
+    render(<UsageLimitsCard />);
+    const fallback = await screen.findByTestId("local-usage-fallback");
+    expect(fallback.textContent).toContain("25% of configured weekly limit");
+    expect(fallback.textContent).toContain("Projected limit");
+  });
+
+  it("rate-limited: shows the retry message and greys last-good rows", async () => {
+    const model = mockLimits();
+    vi.mocked(client.fetchLimits).mockResolvedValue({
+      ...model,
+      state: "rate-limited",
+      stale: true,
+      retryInSec: 240,
+    });
+    const { container } = render(<UsageLimitsCard />);
+    await screen.findByText(/rate-limited the usage API/);
+    const row = container.querySelector<HTMLElement>("[data-testid='limit-row-session']");
+    expect(row?.style.opacity).toBe("0.6");
+    // REL-FIX bug 4: stale bars are grey whatever their severity.
+    expect(screen.getByTestId("limit-fill-session").className).toBe("fill stale");
+    expect(screen.getByTestId("limit-fill-weekly").className).toBe("fill stale");
+  });
+
+  // REL-FIX bug 4: the header names the real source and its age in every state.
+  describe("header source line", () => {
+    const asOf = new Date(Date.now() - 16 * 60_000).toISOString();
+    const desc = () => screen.getByTestId("usage-limits-card").querySelector(".desc")?.textContent;
+    const title = () => screen.getByRole("heading", { level: 2 }).textContent ?? "";
+
+    it("connected via the API: Exact chip, API source, refresh age", async () => {
+      vi.mocked(client.fetchLimits).mockResolvedValue({ ...mockLimits(), asOf, source: "api" });
+      render(<UsageLimitsCard />);
+      await screen.findByTestId("limit-row-session");
+      expect(title()).toContain("Exact · claude.ai");
+      expect(desc()).toContain("from claude.ai usage API · refreshed 16m ago");
+    });
+
+    it("statusline: names the statusline and its age, no claude.ai chip", async () => {
+      vi.mocked(client.fetchLimits).mockResolvedValue({
+        ...mockLimits(),
+        asOf,
+        source: "statusline",
+      });
+      render(<UsageLimitsCard />);
+      await screen.findByTestId("limit-row-session");
+      expect(title()).not.toContain("claude.ai");
+      expect(desc()).toContain("from your Claude Code statusline · updated 16m ago");
+    });
+
+    it("rate-limited with last-good rows: Stale chip, last reading age, never 'refreshed'", async () => {
+      vi.mocked(client.fetchLimits).mockResolvedValue({
+        ...mockLimits(),
+        state: "rate-limited",
+        stale: true,
+        retryInSec: 240,
+        asOf,
+      });
+      render(<UsageLimitsCard />);
+      await screen.findByText(/rate-limited the usage API/);
+      expect(title()).not.toContain("Exact");
+      expect(title()).toContain("Stale · claude.ai");
+      expect(desc()).toContain("last claude.ai reading 16m ago · usage API rate-limited");
+      expect(desc()).not.toContain("refreshed");
+      expect(desc()).not.toContain("from claude.ai usage API");
+    });
+
+    it("rate-limited with no rows: local fallback is named, no claude.ai claim", async () => {
+      vi.mocked(client.fetchLimits).mockResolvedValue({
+        ...mockLimits(),
+        state: "rate-limited",
+        stale: true,
+        retryInSec: 240,
+        rows: [],
+        asOf,
+      });
+      render(<UsageLimitsCard />);
+      await screen.findByTestId("local-usage-fallback");
+      expect(title()).not.toContain("claude.ai");
+      expect(desc()).toContain("modeled from local history");
+      expect(desc()).not.toContain("refreshed");
+    });
+  });
+
+  it("REL-FIX bug 3: a stored limit far below this week's usage is flagged, not shown as a %", async () => {
+    // The live-DB shape: limit_tokens 120,281 (calibrated mid-backfill) vs ~406M cap-weighted this week.
+    const model = mockLimits();
+    vi.mocked(client.fetchLimits).mockResolvedValue({
+      ...model,
+      state: "error",
+      rows: [],
+      localHistory: {
+        ...model.localHistory,
+        sevenDayTokens: 406_126_000,
+        weeklyLimitTokens: 120_281,
+        weeklyUtilizationPct: 337_649,
+        projectedExhaustionAt: null,
+        forecastState: "EXCEEDED",
+      },
+    });
+    render(<UsageLimitsCard />);
+    const fallback = await screen.findByTestId("local-usage-fallback");
+    expect(fallback.textContent).not.toMatch(/\d% of configured weekly limit/);
+    const flag = screen.getByTestId("local-limit-implausible");
+    expect(flag.textContent).toContain("Configured weekly limit (120K)");
+    expect(flag.textContent).toContain("looks wrong");
+    expect(flag.querySelector("a")?.getAttribute("href")).toBe("#/settings?section=calibration");
+  });
+
+  it("error: renders a Retry button and no meters", async () => {
+    const model = mockLimits();
+    vi.mocked(client.fetchLimits).mockResolvedValue({ ...model, state: "error", rows: [] });
+    render(<UsageLimitsCard />);
+    await screen.findByRole("button", { name: "Retry" });
   });
 });
 
@@ -158,123 +430,178 @@ describe("VerdictBand prompt drawer", () => {
 
 describe("OverviewPage — three distinct states", () => {
   it("shows aria-busy skeleton while loading (state 1: loading)", () => {
-    // Never-resolving promises keep the component in loading state
-    vi.mocked(client.fetchGlobalOverview).mockReturnValue(new Promise(() => {}));
+    fetchGlobalOverview.mockReturnValue(new Promise(() => {}));
     vi.mocked(client.fetchWorkspaces).mockReturnValue(new Promise(() => {}));
-    vi.mocked(client.fetchLiveSessions).mockReturnValue(new Promise(() => {}));
+    fetchLiveSessions.mockReturnValue(new Promise(() => {}));
 
     const { container } = render(<OverviewPage />);
 
-    // Loading skeleton must have aria-busy (distinct from error and empty)
     expect(container.querySelector("[aria-busy='true']")).not.toBeNull();
-    // Error banner must NOT be present
     expect(container.querySelector(".banner-error")).toBeNull();
   });
 
   it("shows error banner when daemon is unreachable (state 2: error)", async () => {
-    vi.mocked(client.fetchGlobalOverview).mockRejectedValue(new Error("ECONNREFUSED"));
-    vi.mocked(client.fetchWorkspaces).mockRejectedValue(new Error("ECONNREFUSED"));
-    vi.mocked(client.fetchLiveSessions).mockRejectedValue(new Error("ECONNREFUSED"));
+    // P1-U4: the page is one request; an unreachable daemon fails it (after the query's one retry).
+    vi.mocked(client.fetchOverviewView).mockRejectedValue(new Error("ECONNREFUSED"));
 
     const { container } = render(<OverviewPage />);
 
-    // Error banner uses role="alert" — semantically distinct from skeleton and empty
-    await waitFor(() => {
-      expect(container.querySelector(".banner-error")).not.toBeNull();
-    });
-    // aria-busy skeleton must NOT be present once error is shown
-    expect(
-      container.querySelector("[aria-busy='true'][aria-label='Loading overview data']"),
-    ).toBeNull();
+    await waitFor(
+      () => {
+        expect(container.querySelector(".banner-error")).not.toBeNull();
+      },
+      { timeout: 4_000 },
+    );
   });
 
-  it("shows real data on success (state 3: ok) — not skeleton, not error", async () => {
+  it("shows real data on success (state 3: ok) — spend-equivalent in exactly one home", async () => {
     setupSuccess();
 
     const { container } = render(<OverviewPage />);
 
-    // The verdict trend and spend card share the UA11 $3,100 selected window.
+    // The spend-equivalent KPI shows the UA11 $3,100 selected window.
     await waitFor(() => {
-      const matches = container.querySelectorAll("*");
-      const found = Array.from(matches).some((el) => el.textContent?.includes("$3,100"));
+      const found = Array.from(container.querySelectorAll("*")).some((el) =>
+        el.textContent?.includes("$3,100"),
+      );
       expect(found).toBe(true);
     });
-    // No error banner
     expect(container.querySelector(".banner-error")).toBeNull();
-    // No loading skeleton for overview data
-    expect(container.querySelector("[aria-label='Loading overview data']")).toBeNull();
+    // Guide §0.7: spend-equivalent renders in exactly one place.
+    expect(container.querySelectorAll("[data-metric='spend.equiv']").length).toBe(1);
   });
 
-  it("renders Context / Turn values from context_per_turn rather than model_mix", async () => {
-    const overview = mockGlobalOverview({ preset: "7d" });
-    if (overview.data === null) throw new Error("overview fixture must contain data");
-    overview.data = {
-      ...overview.data,
-      context_per_turn: [
-        {
-          model: "claude-context-model",
-          n: 7,
-          avg_context_per_turn: 82_341,
-          avg_output_per_turn: 1_234,
-          usd_per_turn: null,
-        },
-      ],
-      model_mix: [{ model: "claude-model-mix-only", turns: 7 }],
-    };
-    vi.mocked(client.fetchGlobalOverview).mockResolvedValue(overview);
-    vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
-    vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
-
+  it("renders the context-per-turn table, price-ordered, with a per-model sessions link", async () => {
+    setupSuccess();
     const { container } = render(<OverviewPage />);
 
     await waitFor(() => {
       const section = container.querySelector("[data-testid='context-per-turn-section']");
-      expect(section?.textContent).toContain("Context-model");
-      expect(section?.textContent).toContain("82.3K");
-      expect(section?.textContent).toContain("ctx");
-      expect(section?.textContent).toContain("1.2K out");
-      expect(section?.textContent).not.toContain("Model mix only");
-      expect(section?.querySelector(".chip-obs-proxy")).not.toBeNull();
-      expect(section?.querySelector("[role='progressbar']")?.getAttribute("aria-label")).toContain(
-        "1.5%",
+      expect(section).not.toBeNull();
+      expect(section?.textContent).toContain("Fable-5");
+    });
+    const section = container.querySelector("[data-testid='context-per-turn-section']");
+    // Fixture has 4 models; most-expensive tier (Fable-5) renders first.
+    const rows = section?.querySelectorAll("tbody tr") ?? [];
+    expect(rows.length).toBe(4);
+    expect(rows[0]?.textContent).toContain("Fable-5");
+    expect(section?.querySelector("table")?.parentElement?.classList.contains("table-wrap")).toBe(
+      true,
+    );
+    expect(section?.querySelector("a[href='#/sessions?model=claude-fable-5']")).not.toBeNull();
+  });
+
+  it("does not round a non-zero output share down to 0.0% and names both operands", async () => {
+    const response = mockGlobalOverview({ preset: "7d" });
+    if (response.data === null) throw new Error("expected overview fixture data");
+    response.data.context_per_turn = [
+      {
+        model: "claude-fable-5",
+        n: 2,
+        avg_context_per_turn: 250_000,
+        avg_output_per_turn: 50,
+        usd_per_turn: 1,
+      },
+    ];
+    fetchGlobalOverview.mockResolvedValue(response);
+    vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
+    fetchLiveSessions.mockResolvedValue(mockLiveSessions());
+
+    const { container } = render(<OverviewPage />);
+    expect((await screen.findAllByText("<0.1%")).length).toBeGreaterThan(0);
+    expect(container.textContent).not.toContain("0.0%");
+    // The output-share KPI tile was removed (OV-3); the context-per-turn table still names both operands.
+    expect(container.textContent).toContain("50 output / 250.0K context");
+  });
+
+  it("shows empty / N/A state when the window has no spend (state 3b: ok but no data)", async () => {
+    // P1-U4: the daemon's kpis section is never null (getGlobalOverview always builds `data`);
+    // an empty window is cost 0. A null section is now a validation error, not "empty".
+    const overview = mockGlobalOverview({ preset: "7d" });
+    if (overview.data === null) throw new Error("expected overview fixture");
+    fetchGlobalOverview.mockResolvedValue({
+      ...overview,
+      data: { ...overview.data, cost_equiv_u: 0 },
+    });
+    vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
+    fetchLiveSessions.mockResolvedValue(mockLiveSessions());
+
+    const { container } = render(<OverviewPage />);
+
+    await waitFor(() => {
+      const banners = Array.from(container.querySelectorAll(".banner-info"));
+      expect(banners.some((b) => /No metrics for this window/.test(b.textContent ?? ""))).toBe(
+        true,
       );
     });
   });
+});
 
-  it("renders a context-per-turn cell for every model — no top-3 cap", async () => {
+// §3 KPI strip · §5 tokens · §6 spend-by-day · §8 data notes
+describe("OverviewPage — v2 sections", () => {
+  it("renders the four KPI tiles with subagent spend and the setup grade", async () => {
     setupSuccess();
-
     const { container } = render(<OverviewPage />);
-
-    // Fixture context_per_turn has 4 models (Fable, Opus, Sonnet, Haiku) — all render.
     await waitFor(() => {
-      expect(container.querySelectorAll("[data-testid='context-per-turn-cell']").length).toBe(4);
+      expect(container.querySelector("[data-metric='spend.equiv']")).not.toBeNull();
     });
-    // Most-expensive tier renders first (price-ordered, not usage-ordered).
-    const cells = container.querySelectorAll("[data-testid='context-per-turn-cell']");
-    expect(cells[0]?.textContent).toContain("Fable-5");
+    const text = container.textContent ?? "";
+    expect(text).toContain("Spend-equivalent");
+    expect(text).toContain("Sessions");
+    expect(text).toContain("Subagent spend");
+    expect(text).toContain("Rate my setup");
+    expect(text).not.toContain("Cache rebuilds");
+    expect(text).not.toContain("Output share of context");
+    expect(text).not.toContain("Detector output not available");
   });
 
-  it("shows empty / N/A state when data is null (state 3b: ok but no data)", async () => {
-    vi.mocked(client.fetchGlobalOverview).mockResolvedValue({
-      data: null,
-      meta: mockGlobalOverview({ preset: "7d" }).meta,
-    });
-    vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
-    vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
-
+  it("renders Where-your-tokens-go with a basis toggle and per-basis weights", async () => {
+    setupSuccess();
     const { container } = render(<OverviewPage />);
-
-    await waitFor(() => {
-      // Empty banner is shown (not error, not skeleton). Scope past the
-      // page-top caveat banner (also .banner-info) to the empty-state one.
-      const banners = Array.from(container.querySelectorAll(".banner-info"));
-      expect(banners.some((b) => /No spend data/.test(b.textContent ?? ""))).toBe(true);
-    });
-    // Skeleton must not be visible
+    await screen.findByRole("heading", { name: /Where your tokens go/ });
+    const buttons = Array.from(container.querySelectorAll(".seg button")).map((b) => b.textContent);
+    expect(buttons).toEqual(expect.arrayContaining(["Raw tokens", "List price $", "Cap-weighted"]));
+    const tokensSection = screen
+      .getByRole("heading", { name: /Where your tokens go/ })
+      .closest("section");
     expect(
-      container.querySelector("[aria-busy='true'][aria-label='Loading overview data']"),
-    ).toBeNull();
+      tokensSection?.querySelector("table")?.parentElement?.classList.contains("table-wrap"),
+    ).toBe(true);
+    // Published list-price output multiplier is 5×; cap weights carry an unverified chip.
+    expect(container.textContent ?? "").toContain("5×");
+    expect(container.querySelector(".chip.unv")).not.toBeNull();
+  });
+
+  it("renders Spend by day with three tabs", async () => {
+    setupSuccess();
+    render(<OverviewPage />);
+    await screen.findByRole("heading", { name: /Spend by day/ });
+    expect(screen.getByRole("button", { name: "Cache writes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cap-weighted tokens" })).toBeTruthy();
+  });
+
+  it("renders Data notes with the TTL warning and cache-read caveat, once", async () => {
+    setupSuccess();
+    const { container } = render(<OverviewPage />);
+    await waitFor(() => {
+      expect(container.querySelector("#data-notes")).not.toBeNull();
+    });
+    const notes = container.querySelector("#data-notes");
+    const text = notes?.textContent ?? "";
+    expect(text).toContain("Cache TTL unknown");
+    expect(text).toContain("Spend-equivalent");
+    expect(text).toContain("Provisional turns");
+    // TTL warning appears once on the whole page (guide §6.3).
+    const ttlHits = (container.textContent ?? "").match(/Cache TTL unknown/g) ?? [];
+    expect(ttlHits.length).toBe(1);
+  });
+
+  it("links the Workspaces section title and shows the teaser table", async () => {
+    setupSuccess();
+    render(<OverviewPage />);
+    const heading = await screen.findByRole("link", { name: "Workspaces" });
+    expect(heading.getAttribute("href")).toBe("#/workspaces");
+    expect(await screen.findByTestId("all-workspaces-link")).toBeTruthy();
   });
 });
 
@@ -634,168 +961,41 @@ describe("OverviewPage WorkspaceTable", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CacheEfficiencyKPI — raw reuse band + separate forecast context
+// Section headings — the v2 section order (spec section-order table)
 // ---------------------------------------------------------------------------
 
-describe("CacheEfficiencyKPI", () => {
-  it("renders the reuse band, raw-share warning, and selected-window cap draw", async () => {
+describe("OverviewPage — section headings", () => {
+  it("renders the v2 sentence-case section headings in order", async () => {
     setupSuccess();
     const { container } = render(<OverviewPage />);
 
     await waitFor(() => {
-      const text = container.textContent ?? "";
-      expect(text).toMatch(/87\.9%/);
-      expect(text).toMatch(/7\.3×/);
-      expect(text).toMatch(/REUSE DOMINANT/);
-      expect(text).toMatch(/diagnostic only · not a health signal/);
-      expect(text).toMatch(/Cap-weighted draw: 1\.3B/);
-      expect(text).toMatch(/coefficient 0\.1× unverified/);
-    });
-
-    expect(container.textContent ?? "").toMatch(/REUSE EFFICIENCY/);
-  });
-
-  it("retains the cache TTL volatility caveat when creations are present", async () => {
-    setupSuccess();
-    const { container } = render(<OverviewPage />);
-
-    await waitFor(() => {
-      expect(container.textContent ?? "").toMatch(/TTL 5m\/1h volatile/);
-    });
-  });
-
-  it("keeps Burn Forecast as separate limit-relative context", async () => {
-    setupSuccess();
-    const { container } = render(<OverviewPage />);
-
-    await waitFor(() => {
-      const text = container.textContent ?? "";
-      expect(text).toMatch(
-        /Separate limit-relative context: Burn Forecast is trailing 1-day and provisional-inclusive/,
+      // Section headings carry a trailing InfoTip glyph / chip; match on the label prefix.
+      const headings = Array.from(container.querySelectorAll("h2")).map((h) =>
+        (h.textContent ?? "").trim(),
       );
-      expect(text).toMatch(/BURN FORECAST/);
+      for (const label of [
+        "Usage limits",
+        "Top Usage Recommendations",
+        "This period",
+        "Most expensive sessions this week",
+        "Context per turn by model",
+        "Where your tokens go",
+        "Spend by day",
+        "Workspaces",
+        "Data notes",
+        "Across the dashboard",
+      ]) {
+        expect(headings.some((h) => h.startsWith(label))).toBe(true);
+      }
+      // Retired letterspaced-caps Overview labels are gone.
+      expect(headings.some((h) => h === "SUMMARY" || h === "Summary")).toBe(false);
     });
   });
 });
 
 // ---------------------------------------------------------------------------
-// FlavorDecomposition — section heading + myth note (verbatim)
-// ---------------------------------------------------------------------------
-
-describe("FlavorDecomposition", () => {
-  it("renders the Overview section headings", async () => {
-    setupSuccess();
-    const { container } = render(<OverviewPage />);
-
-    await waitFor(() => {
-      const headings = Array.from(container.querySelectorAll("h2"));
-      const headingText = headings.map((h) => h.textContent);
-      expect(headingText).toEqual(
-        expect.arrayContaining([
-          "Summary",
-          "Needs attention",
-          "Where your tokens go",
-          "Workspaces",
-          "Data notes",
-          "Spend vs your limit",
-        ]),
-      );
-    });
-  });
-
-  it("renders the verbatim myth note from taxonomy §4 Section 1.2", async () => {
-    setupSuccess();
-    const { container } = render(<OverviewPage />);
-
-    await waitFor(() => {
-      const text = container.textContent ?? "";
-      expect(text).toMatch(/Trimming a cached prompt saves ~10× less than you think\./);
-      expect(text).toMatch(/Cache misses are where the real savings are\./);
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Overview data notes — bottom placement and evidence disclosure
-// ---------------------------------------------------------------------------
-
-describe("Overview data notes", () => {
-  it("renders Data notes last and lets the evidence control close itself again", async () => {
-    setupSuccess();
-    const cohort: EsfObservationCohort = {
-      cohort_definition_version: "esf-cohort-1",
-      workspace_id: null,
-      from: "2026-08-17T00:00:00.000Z",
-      to: "2026-08-24T00:00:00.000Z",
-      resource: {
-        selected_session_count: 2,
-        priced_cost_u: 1000000,
-        priced_turn_count: 2,
-        unpriced_turn_count: 0,
-        unpriced_session_count: 0,
-        reconciled_priced_session_count: 2,
-        live_priced_session_count: 0,
-      },
-      no_commit_activity: { session_ids: [], session_count: 0, live_session_excluded_count: 0 },
-      observed_test_recovery: {
-        method_version: "esf-observed-test-recovery-1",
-        affected_session_ids: [],
-        recovered_session_ids: [],
-        eligible_reconciled_qualifying_tool_session_count: 0,
-      },
-      allocation_sessions: [],
-      watermark: {
-        version: "esf-cohort-watermark-1",
-        source_fingerprint: "fixture",
-        selected_turn_count: 2,
-        selected_session_count: 2,
-        nonprovisional_turn_count: 2,
-        latest_selected_turn_at: "2026-08-24T00:00:00.000Z",
-        cost_claim_counts: [],
-        parser_version_counts: [],
-      },
-    };
-    vi.mocked(fetchEsfObservations).mockResolvedValue({ data: cohort } as never);
-
-    const { container } = render(<OverviewPage />);
-
-    await waitFor(() => {
-      const headings = Array.from(container.querySelectorAll("h2"));
-      expect(headings[headings.length - 1]?.textContent).toBe("Data notes");
-    });
-
-    const dataNotes = container.querySelector<HTMLDetailsElement>(
-      "[data-testid='overview-data-notes']",
-    );
-    expect(dataNotes).not.toBeNull();
-    const summary = dataNotes?.querySelector("summary");
-    if (summary === null || summary === undefined) throw new Error("Expected Data notes summary");
-    fireEvent.click(summary);
-    const selector = screen.getByRole("combobox", { name: "Observation workspace" });
-    expect(dataNotes?.contains(selector)).toBe(true);
-    const selectedWorkspace = selector.querySelectorAll("option")[1]?.value;
-    expect(selectedWorkspace).toBeTruthy();
-    fireEvent.change(selector, { target: { value: selectedWorkspace } });
-    await waitFor(() =>
-      expect(fetchEsfObservations).toHaveBeenLastCalledWith(
-        selectedWorkspace,
-        expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
-      ),
-    );
-
-    const disclosure = await screen.findByRole("button", { name: "View evidence and limits" });
-    fireEvent.click(disclosure);
-    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("heading", { name: "Evidence and limits" })).toBeTruthy();
-
-    fireEvent.click(disclosure);
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("heading", { name: "Evidence and limits" })).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// CacheWriteSpikesChart — section heading
+// CacheWriteSpikesChart — standalone unit (component retained, moved off Overview)
 // ---------------------------------------------------------------------------
 
 describe("CacheWriteSpikesChart", () => {
@@ -805,8 +1005,6 @@ describe("CacheWriteSpikesChart", () => {
         state={{ status: "ok", value: mockCacheWriteTrend({ preset: "7d" }) }}
       />,
     );
-    // Data-present branch (not the empty banner): the LIST_EQUIV claim chip and the
-    // TTL volatility caveat only render when buckets exist and the chart is drawn.
     expect(container.querySelector(".chip-list-equiv")).not.toBeNull();
     expect(container.textContent ?? "").toMatch(/TTL 5m\/1h volatile/);
     expect(container.textContent ?? "").toMatch(/Cache writes over time/);
@@ -815,15 +1013,39 @@ describe("CacheWriteSpikesChart", () => {
   it("keeps the spike-threshold label inside the plot area", () => {
     expect(SPIKE_THRESHOLD_LABEL_POSITION).toBe("insideTopLeft");
   });
+});
 
-  it("renders the section heading when spike data is present", async () => {
-    setupSuccess();
-    const { container } = render(<OverviewPage />);
+// ---------------------------------------------------------------------------
+// VerdictBand — UIC-3a/O4 headline stability
+// ---------------------------------------------------------------------------
 
-    await waitFor(() => {
-      const headings = Array.from(container.querySelectorAll("h2"));
-      const found = headings.some((h) => h.textContent?.includes("Cache writes over time"));
-      expect(found).toBe(true);
-    });
+describe("VerdictBand — headline does not flip while loading (O4)", () => {
+  const trend = mockTrends({ preset: "7d" }).data;
+  const priorTrend = mockTrends({ preset: "7d" }).data;
+
+  it("withholds the delta and shows a loading trend placeholder while loading", () => {
+    const { container } = render(
+      <VerdictBand preset="7d" trend={trend} priorTrend={null} isLoading={true} />,
+    );
+    // No premature delta badge to flip from once the prior window resolves.
+    expect(container.querySelector(".window-delta")).toBeNull();
+    expect(container.textContent ?? "").not.toContain("Prior window unavailable");
+    expect(container.textContent ?? "").toContain("Loading trend");
+  });
+
+  it("shows the resolved delta once both windows have loaded", () => {
+    const { container } = render(
+      <VerdictBand preset="7d" trend={trend} priorTrend={priorTrend} isLoading={false} />,
+    );
+    const delta = container.querySelector(".window-delta");
+    expect(delta).not.toBeNull();
+    expect(container.textContent ?? "").not.toContain("Loading trend");
+  });
+
+  it("still shows a terminal 'Prior window unavailable' when the prior window is genuinely absent", () => {
+    const { container } = render(
+      <VerdictBand preset="7d" trend={trend} priorTrend={null} isLoading={false} />,
+    );
+    expect(container.textContent ?? "").toContain("Prior window unavailable");
   });
 });
