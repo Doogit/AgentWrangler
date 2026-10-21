@@ -1,7 +1,7 @@
 # ADR-110: Phase-1 Gate — GO with conditions
 
 **Status:** Accepted · **Date:** 2026-08-21 · **Reconciled:** 2026-08-26
-**Decision:** **GO for Phase 1a, with named conditions.** `src/` opens. Session 10 / ADR-106 and COND-4 have passed; Session 9 / COND-1 and outcome-linkage COND-3 remain evidence-gated. Wave 2 preparation is approved only within the exact envelope recorded in `docs/plans/spec-evidence-campaigns.md`.
+**Decision:** **GO for Phase 1a, with named conditions.** `src/` opens. Session 10 / ADR-106 and COND-4 have passed; Session 9 / COND-1 and outcome-linkage COND-3 remain evidence-gated. Wave 2 preparation is approved only within the exact envelope recorded in `docs/plans/Archive/spec-evidence-campaigns.md`.
 
 ## Context
 

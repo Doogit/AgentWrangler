@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-01-03T08:00:25.000Z","sessionId":"d12-positive-s0","message":{"id":"sub_d12-positive-s0_0","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":300,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"isSidechain":true}
+{"type":"assistant","timestamp":"2026-01-03T08:00:30.000Z","sessionId":"d12-positive-s0","message":{"id":"sub_d12-positive-s0_1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":5000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"isSidechain":true}

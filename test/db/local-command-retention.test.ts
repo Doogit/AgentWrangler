@@ -1,7 +1,7 @@
 /**
  * test/db/local-command-retention.test.ts — SEC-4 migration 020.
  *
- * Spec: docs/plans/spec-local-command-retention.md §"Persistence invariant and
+ * Spec: docs/plans/Archive/spec-local-command-retention.md §"Persistence invariant and
  * legacy migration" — synthetic acceptance matrix rows 7–13 (legacy sanitation,
  * namespace precision, write guards, old-writer UPSERT incompatibility,
  * migration fault atomicity). All strings are invented; DBs are in-memory.
@@ -96,12 +96,53 @@ describe("020 local command retention", () => {
       ).n;
 
       const applied = runMigrations(db);
-      expect(applied).toEqual(["020_local_command_retention", "021_recommendation_feedback"]);
+      expect(applied).toEqual([
+        "020_local_command_retention",
+        "021_recommendation_feedback",
+        "022_classifier_boundaries",
+        "023_privacy_contract",
+        "024_finding_contract_v2",
+        "025_tool_error_classifier",
+        "026_recommendation_contract_guards",
+        "027_handler_recommendation_storage",
+        "028_tool_event_content",
+        "029_subagent_meta",
+        "030_detector_week_results",
+        "031_detector_status_live",
+        "032_session_title",
+        "033_compaction_positions",
+        "034_ingest_metric_events_session_position",
+        "035_rec_lifecycle",
+        "036_rec_lifecycle_actions",
+        "037_subagent_meta_session_index",
+        "038_turns_agent_id",
+        "039_unrestrict_app_content",
+        "040_ledger_daily",
+        "041_perf_indexes",
+        "042_limit_snapshots",
+        "043_tool_error_labels_v2",
+        "044_c6_edit_string_hashes",
+        "045_catalog_items",
+        "046_detector_contract_v2",
+        "047_ingest_metric_events_event_ts",
+        "048_ingest_offset_identity",
+        "049_setup_grade_snapshots",
+        "050_setup_grade_indexes",
+        "051_judge_verdicts",
+        "052_classifier_version_2",
+        "053_turns_grade_cover",
+      ]);
 
       const sanitized = new Set([mId("b1"), mId("b2"), mId("b3"), mId("b4"), mId("b5"), mId("b6")]);
-      const expected = before.map((row) =>
-        sanitized.has(row.event_id as string) ? { ...row, input_hash: null } : row,
-      );
+      const expected = before.map((row) => ({
+        ...row,
+        ...(sanitized.has(row.event_id as string) ? { input_hash: null } : {}),
+        tool_error_class: null,
+        tool_error_classifier_version: null,
+        bash_command_family: null,
+        interrupt_kind: null,
+        interrupt_classifier_version: null,
+      }));
       const after = db.prepare("SELECT * FROM tool_events ORDER BY event_id").all() as Array<
         Record<string, unknown>
       >;
@@ -116,7 +157,7 @@ describe("020 local command retention", () => {
       expect(invalidMRowCount(db)).toBe(0);
     });
 
-    it("leaves rows outside namespace M untouched, including a genuine tool named local_command", () => {
+    it("preserves non-shell rows outside namespace M and clears shell input hashes", () => {
       const sha256 = "3".repeat(64);
       // Genuine tool-use event named local_command with an ordinary tool-use ID.
       db.prepare(
@@ -135,7 +176,7 @@ describe("020 local command retention", () => {
       runMigrations(db);
 
       expect(getHash(db, "toolu_synthetic_01")).toBe(sha256);
-      expect(getHash(db, "bash-evt-1")).toBe("4".repeat(64));
+      expect(getHash(db, "bash-evt-1")).toBeNull();
       expect(getHash(db, "cmd-ABCDEF0123456789ABCD")).toBe("raw-but-outside-namespace");
       expect(getHash(db, "cmd-abc")).toBe("raw-short-id");
     });
@@ -150,9 +191,47 @@ describe("020 local command retention", () => {
     });
   });
 
-  describe("write guards (schema change)", () => {
+  describe("039 removes the in-app content guards (ADR-112 amendment)", () => {
     beforeEach(() => {
       runMigrations(db);
+    });
+
+    it("persists raw local-command values and shell input hashes", () => {
+      insertMarker(db, mId("g1"), "/deploy --synthetic");
+      expect(getHash(db, mId("g1"))).toBe("/deploy --synthetic");
+      db.prepare(
+        `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash)
+         VALUES ('bash-free', 'sess-1', '2026-01-02T00:02:00.000Z', 'Bash', ?)`,
+      ).run("4".repeat(64));
+      expect(getHash(db, "bash-free")).toBe("4".repeat(64));
+    });
+  });
+
+  // Guards as they stood from 020 until 039 dropped them.
+  describe("write guards (schema change, 020–038)", () => {
+    beforeEach(() => {
+      runMigrations(db, "038_turns_agent_id");
+    });
+
+    it("rejects command-derived hashes for shell tool inserts and updates", () => {
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash)
+             VALUES ('bash-guard', 'sess-1', '2026-01-02T00:02:00.000Z', 'Bash', ?)`,
+          )
+          .run("4".repeat(64)),
+      ).toThrow(/shell command input hashes are forbidden/);
+
+      db.prepare(
+        `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash)
+         VALUES ('read-guard', 'sess-1', '2026-01-02T00:03:00.000Z', 'Read', ?)`,
+      ).run("5".repeat(64));
+      expect(() =>
+        db
+          .prepare("UPDATE tool_events SET tool_name='PowerShell' WHERE event_id='read-guard'")
+          .run(),
+      ).toThrow(/shell command input hashes are forbidden/);
     });
 
     it("aborts an old-writer plain INSERT of a raw value and persists nothing", () => {
@@ -222,7 +301,7 @@ describe("020 local command retention", () => {
       const sha256 = "5".repeat(64);
       db.prepare(
         `INSERT INTO tool_events (event_id, session_id, ts, tool_name, input_hash)
-         VALUES ('toolu_synthetic_02', 'sess-1', '2026-01-02T00:03:00.000Z', 'Bash', ?)`,
+         VALUES ('toolu_synthetic_02', 'sess-1', '2026-01-02T00:03:00.000Z', 'Read', ?)`,
       ).run(sha256);
       expect(() =>
         db
@@ -268,6 +347,38 @@ describe("020 local command retention", () => {
       expect(runMigrations(db)).toEqual([
         "020_local_command_retention",
         "021_recommendation_feedback",
+        "022_classifier_boundaries",
+        "023_privacy_contract",
+        "024_finding_contract_v2",
+        "025_tool_error_classifier",
+        "026_recommendation_contract_guards",
+        "027_handler_recommendation_storage",
+        "028_tool_event_content",
+        "029_subagent_meta",
+        "030_detector_week_results",
+        "031_detector_status_live",
+        "032_session_title",
+        "033_compaction_positions",
+        "034_ingest_metric_events_session_position",
+        "035_rec_lifecycle",
+        "036_rec_lifecycle_actions",
+        "037_subagent_meta_session_index",
+        "038_turns_agent_id",
+        "039_unrestrict_app_content",
+        "040_ledger_daily",
+        "041_perf_indexes",
+        "042_limit_snapshots",
+        "043_tool_error_labels_v2",
+        "044_c6_edit_string_hashes",
+        "045_catalog_items",
+        "046_detector_contract_v2",
+        "047_ingest_metric_events_event_ts",
+        "048_ingest_offset_identity",
+        "049_setup_grade_snapshots",
+        "050_setup_grade_indexes",
+        "051_judge_verdicts",
+        "052_classifier_version_2",
+        "053_turns_grade_cover",
       ]);
       expect(getHash(db, mId("cc1"))).toBeNull();
       expect(invalidMRowCount(db)).toBe(0);

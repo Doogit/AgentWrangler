@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "../db/open.js";
-import { EFFECT_HANDLERS, directionFor, findHandler } from "./registry.js";
+import { GUARD_SHAPES } from "../query/api/rec-actions/trigger.js";
+import { FROZEN_EFFECT_METHODS, directionFor, findFrozenHandler, findHandler } from "./registry.js";
 import { isOpaqueEffectIdentity } from "./scope-identity.js";
 import {
-  cycleFromRow,
   getCycle,
   getRollbackByKey,
   hasOverlappingSupportedCycle,
@@ -69,6 +69,52 @@ function iso(value: string, field: string): string {
   return new Date(ms).toISOString();
 }
 
+const C9_DENIAL_CLASSES = new Set(["HOOK_BLOCK", "DENY_RULE", "USER_REJECTED"]);
+/** Classified guard shapes; OTHER is unclassified and never counted. */
+const C9_GUARD_SHAPES = new Set(Object.keys(GUARD_SHAPES).filter((shape) => shape !== "OTHER"));
+
+/** C9 cycles carry the card's denial kind, and a guard card its watched shapes; no one else does. */
+function validateC9Scope(detectorId: string, scope: FrozenCycleInput["scope"]): void {
+  if (detectorId !== "C9") {
+    if (scope.denialClass !== undefined || scope.guardShapes !== undefined)
+      throw new EffectValidationError("denial class and guard shapes scope only C9");
+    return;
+  }
+  if (scope.denialClass === undefined || !C9_DENIAL_CLASSES.has(scope.denialClass))
+    throw new EffectValidationError("C9 requires a denial class");
+  const shapes = scope.guardShapes;
+  if (
+    (scope.denialClass === "HOOK_BLOCK") !== (shapes !== undefined) ||
+    shapes?.some((shape) => !C9_GUARD_SHAPES.has(shape))
+  )
+    throw new EffectValidationError("C9 guard shapes are required for HOOK_BLOCK only");
+}
+
+/** C1 cycles, and only they, carry the card's outlier tools. */
+function validateC1Scope(detectorId: string, scope: FrozenCycleInput["scope"]): void {
+  if ((detectorId === "C1") !== (scope.tools !== undefined && scope.tools.length > 0))
+    throw new EffectValidationError("C1, and only C1, requires its outlier tools");
+}
+
+/** A1 cycles, and only they, carry the card's lead file identities. */
+function validateA1Scope(detectorId: string, scope: FrozenCycleInput["scope"]): void {
+  if ((detectorId === "A1") !== (scope.files !== undefined && scope.files.length > 0))
+    throw new EffectValidationError("A1, and only A1, requires its lead files");
+}
+
+/**
+ * Too few counted calls has no direction: in either window for a per-call method, or before only
+ * where zero calls after is a real result.
+ */
+function belowCallMinimum(cycle: EffectCycle, bundle: ObservationBundle): boolean {
+  const { minimumCalls, minimumBaselineCalls } = cycle.targetDefinition;
+  return (
+    (minimumCalls !== undefined &&
+      (bundle.before.exposureN < minimumCalls || bundle.after.exposureN < minimumCalls)) ||
+    (minimumBaselineCalls !== undefined && bundle.before.exposureN < minimumBaselineCalls)
+  );
+}
+
 function safeJson(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -83,6 +129,10 @@ function replayMatches(cycle: EffectCycle, input: FrozenCycleInput): boolean {
       findHandler(input.detectorId, input.targetMetric, input.methodVersion)?.target.metricId ===
         cycle.metricId) &&
     cycle.appliedAt === iso(input.appliedAt, "appliedAt") &&
+    cycle.scheduledObservationTo ===
+      new Date(
+        Date.parse(iso(input.appliedAt, "appliedAt")) + (input.horizonDays ?? 14) * DAY_MS,
+      ).toISOString() &&
     cycle.trackingRequestedAt === iso(input.trackingRequestedAt, "trackingRequestedAt") &&
     cycle.applicationSource === input.applicationSource &&
     cycle.actionRevision === (input.actionRevision ?? null) &&
@@ -102,6 +152,17 @@ function mixShift(before: MixSummary, after: MixSummary): boolean {
           ((after.counts[category] ?? 0) / after.total) * 100,
       ) >= 20,
   );
+}
+
+function toolMixShift(before: MixSummary, after: MixSummary, detectorId: string): boolean {
+  if (detectorId !== "D11") return mixShift(before, after);
+  // D11 asks the user to substitute one shell for the other. Compare their
+  // combined share while retaining shifts between shells and other tools.
+  const combinedShellMix = (mix: MixSummary): MixSummary => {
+    const { Bash = 0, PowerShell = 0, ...otherTools } = mix.counts;
+    return { ...mix, counts: { ...otherTools, Bash: Bash + PowerShell } };
+  };
+  return mixShift(combinedShellMix(before), combinedShellMix(after));
 }
 
 function sameCategories(a: MixSummary, b: MixSummary): boolean {
@@ -180,6 +241,7 @@ function comparison(
     ((bundle.before.sessionN ?? 0) < minimum || (bundle.after.sessionN ?? 0) < minimum)
   )
     reasons.push("INSUFFICIENT_SESSIONS");
+  if (belowCallMinimum(cycle, bundle)) reasons.push("INSUFFICIENT_CALLS");
   if (
     bundle.before.denominator === 0 ||
     bundle.after.denominator === 0 ||
@@ -194,7 +256,8 @@ function comparison(
   if (!sameCategories(bundle.parserMix.before, bundle.parserMix.after))
     reasons.push("PARSER_VERSION_CHANGED");
   if (mixShift(bundle.modelMix.before, bundle.modelMix.after)) reasons.push("MODEL_MIX_SHIFT");
-  if (mixShift(bundle.toolMix.before, bundle.toolMix.after)) reasons.push("TOOL_MIX_SHIFT");
+  if (toolMixShift(bundle.toolMix.before, bundle.toolMix.after, cycle.detectorId))
+    reasons.push("TOOL_MIX_SHIFT");
   if (mixShift(bundle.taskMix.before, bundle.taskMix.after)) reasons.push("TASK_MIX_SHIFT");
   if (
     !bundle.modelMix.before.available ||
@@ -275,6 +338,14 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
     ).run(cycleId, kind, key, at);
   }
 
+  /** HRE links own a lock only while their effect-cycle window remains open. */
+  function releaseArtifactBoundLock(cycleId: string, at: string): void {
+    db.prepare(
+      `UPDATE hre_intervention_locks SET state='RELEASED',released_at=?
+       WHERE cycle_id=? AND state='OPEN'`,
+    ).run(at, cycleId);
+  }
+
   function persistGuardrails(cycleId: string, bundle: ObservationBundle): void {
     const statement = db.prepare(`INSERT INTO effect_guardrail_results
       (cycle_id,guardrail_id,method_version,availability,unit,before_value,after_value,
@@ -351,16 +422,23 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
       throw new EffectValidationError(
         "D1 requires an opaque source identity without path separators",
       );
+    validateC9Scope(input.detectorId, input.scope);
+    validateC1Scope(input.detectorId, input.scope);
+    validateA1Scope(input.detectorId, input.scope);
     const appliedAt = iso(input.appliedAt, "appliedAt");
     const requestedAt = iso(input.trackingRequestedAt, "trackingRequestedAt");
+    const horizonDays = input.horizonDays ?? 14;
+    if (!Number.isSafeInteger(horizonDays) || horizonDays < 1 || horizonDays > 365)
+      throw new EffectValidationError("measurement horizon must be an integer from 1 to 365 days");
     return db.transaction((): TrackResult => {
       const replay = db
-        .prepare("SELECT * FROM effect_cycles WHERE rec_id = ? AND track_idempotency_key = ?")
-        .get(input.recId, input.idempotencyKey) as
-        | Record<string, string | number | null>
-        | undefined;
+        .prepare(
+          "SELECT cycle_id FROM effect_cycles WHERE rec_id = ? AND track_idempotency_key = ?",
+        )
+        .get(input.recId, input.idempotencyKey) as { cycle_id: string } | undefined;
       if (replay !== undefined) {
-        const replayed = cycleFromRow(replay);
+        const replayed = getCycle(db, replay.cycle_id);
+        if (replayed === null) throw new EffectValidationError("effect cycle disappeared");
         assertMutable(replayed);
         if (!replayMatches(replayed, input))
           throw new EffectConflictError(
@@ -390,7 +468,7 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
       );
       const cycleId = id();
       const baselineFrom = new Date(Date.parse(appliedAt) - WINDOW_MS).toISOString();
-      const scheduledTo = new Date(Date.parse(appliedAt) + WINDOW_MS).toISOString();
+      const scheduledTo = new Date(Date.parse(appliedAt) + horizonDays * DAY_MS).toISOString();
       const shell: EffectCycle = {
         cycleId,
         recId: input.recId,
@@ -398,6 +476,7 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
         contractVersion: EFFECT_CONTRACT_VERSION,
         queryDefinitionVersion: EFFECT_QUERY_VERSION,
         versionStatus: "SUPPORTED",
+        bridge: { bridgeKind: "LEGACY_UNLINKED" },
         detectorId: handler.detectorId,
         metricId: handler.target.metricId,
         methodVersion: handler.target.methodVersion,
@@ -512,11 +591,20 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
       if (cycle === null) throw new EffectValidationError("unknown effect cycle");
       assertMutable(cycle);
       if (cycle.state !== "OPEN_SETTLING" && cycle.state !== "OPEN_MEASURING") return cycle;
-      const handler = resolveHandler(cycle.detectorId, cycle.metricId, cycle.methodVersion);
+      const handler = findFrozenHandler(
+        cycle.detectorId,
+        cycle.metricId,
+        cycle.methodVersion,
+        cycle.targetDefinition,
+        cycle.guardrailDefinitions,
+      );
       if (handler === null) {
-        db.prepare(
-          "UPDATE effect_cycles SET state='UNSUPPORTED',terminal_at=?,terminal_reason='HANDLER_UNAVAILABLE' WHERE cycle_id=? AND state IN ('OPEN_SETTLING','OPEN_MEASURING')",
-        ).run(at, cycleId);
+        const changed = db
+          .prepare(
+            "UPDATE effect_cycles SET state='UNSUPPORTED',terminal_at=?,terminal_reason='HANDLER_UNAVAILABLE' WHERE cycle_id=? AND state IN ('OPEN_SETTLING','OPEN_MEASURING')",
+          )
+          .run(at, cycleId).changes;
+        if (changed > 0) releaseArtifactBoundLock(cycleId, at);
         return getCycle(db, cycleId) as EffectCycle;
       }
       // A lifecycle action may arrive before the next pass has finalized an overdue cycle.
@@ -542,7 +630,9 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
           ),
         ),
       );
-      const { direction } = directionFor(handler, bundle.before.value, bundle.after.value);
+      const direction = belowCallMinimum(cycle, bundle)
+        ? "INSUFFICIENT_DATA"
+        : directionFor(handler, bundle.before.value, bundle.after.value).direction;
       const cmp = comparison(
         db,
         cycle,
@@ -571,8 +661,23 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
           cycleId,
         );
       if (result.changes > 0) {
+        if (
+          !stopped &&
+          (direction === "IMPROVED" || direction === "WORSENED" || direction === "UNCHANGED")
+        ) {
+          db.prepare(`UPDATE recommendations SET state=?, adopted_at=CASE WHEN ?='PROPOSED' THEN NULL ELSE adopted_at END
+            WHERE rec_id=? AND state IN ('ADOPTED','MEASURING')
+            AND NOT EXISTS (SELECT 1 FROM effect_cycles newer WHERE newer.rec_id=? AND newer.cycle_no>?)`).run(
+            direction === "IMPROVED" ? "MEASURED_EFFECTIVE" : "PROPOSED",
+            direction === "IMPROVED" ? "MEASURED_EFFECTIVE" : "PROPOSED",
+            cycle.recId,
+            cycle.recId,
+            cycle.cycleNo,
+          );
+        }
         persistGuardrails(cycleId, bundle);
         recordMutation(cycleId, stopped ? "STOP" : "FINALIZE", stopKey ?? at, at);
+        releaseArtifactBoundLock(cycleId, at);
       }
       return result.changes === 0
         ? (getCycle(db, cycleId) as EffectCycle)
@@ -584,11 +689,11 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
     const atIso = at.toISOString();
     const result: PassResult = { settlingAdvanced: 0, finalized: 0, unsupported: 0, unchanged: 0 };
     const settlingCutoff = new Date(at.getTime() - DAY_MS).toISOString();
-    const handlerPredicate = EFFECT_HANDLERS.map(
+    const handlerPredicate = FROZEN_EFFECT_METHODS.map(
       () =>
         "(detector_id=? AND metric_id=? AND method_version=? AND target_definition_json=? AND guardrail_definitions_json=?)",
     ).join(" OR ");
-    const handlerParameters = EFFECT_HANDLERS.flatMap((handler) => [
+    const handlerParameters = FROZEN_EFFECT_METHODS.flatMap((handler) => [
       handler.detectorId,
       handler.target.metricId,
       handler.target.methodVersion,
@@ -627,14 +732,24 @@ export function createEffectEngine(db: Db, options: EffectEngineOptions) {
           result.unchanged++;
           return;
         }
-        if (resolveHandler(cycle.detectorId, cycle.metricId, cycle.methodVersion) === null) {
+        if (
+          findFrozenHandler(
+            cycle.detectorId,
+            cycle.metricId,
+            cycle.methodVersion,
+            cycle.targetDefinition,
+            cycle.guardrailDefinitions,
+          ) === null
+        ) {
           const changed = db
             .prepare(
               "UPDATE effect_cycles SET state='UNSUPPORTED',terminal_at=?,terminal_reason='HANDLER_UNAVAILABLE' WHERE cycle_id=? AND state IN ('OPEN_SETTLING','OPEN_MEASURING')",
             )
             .run(atIso, cycle.cycleId).changes;
-          if (changed > 0) result.unsupported++;
-          else result.unchanged++;
+          if (changed > 0) {
+            releaseArtifactBoundLock(cycle.cycleId, atIso);
+            result.unsupported++;
+          } else result.unchanged++;
           return;
         }
         if (

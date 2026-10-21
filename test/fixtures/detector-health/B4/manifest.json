@@ -1,0 +1,9 @@
+{
+  "id": "B4",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "RAPID_CREATION_THRESHOLD",
+    "expect": "silent"
+  }
+}

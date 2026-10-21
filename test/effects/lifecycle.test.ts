@@ -172,7 +172,7 @@ describe("ESF2 transactional lifecycle", () => {
     db.close();
   });
 
-  it("terminalizes a lost handler and makes stop/finalizer first-commit-wins", () => {
+  it("executes the frozen method after the active registry entry is retired", () => {
     const db = createInMemoryFixtureDb();
     insertRec(db);
     let handlerAvailable = true;
@@ -185,8 +185,14 @@ describe("ESF2 transactional lifecycle", () => {
     });
     engine.track(request());
     handlerAvailable = false;
-    expect(engine.runPass(new Date("2026-02-02T00:00:00Z")).unsupported).toBe(1);
-    expect(engine.getCycle("id-1")?.state).toBe("UNSUPPORTED");
+    expect(engine.runPass(new Date("2026-02-15T00:00:00Z"))).toMatchObject({
+      finalized: 1,
+      unsupported: 0,
+    });
+    expect(engine.getCycle("id-1")).toMatchObject({
+      state: "FINALIZED",
+      targetDirection: "IMPROVED",
+    });
     handlerAvailable = true;
     insertRec(db, "rec-race");
     engine.track({ ...request("rec-race"), idempotencyKey: "race" });

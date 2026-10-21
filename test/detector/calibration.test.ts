@@ -6,10 +6,12 @@
  */
 
 import type Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadConfig } from "../../src/daemon/config.js";
 import {
   DEFAULT_BYTES_PER_TOKEN,
   calibrateBytesPerToken,
+  calibrateBytesPerTokenIfStale,
   configGet,
   configSet,
   resolveBytesPerToken,
@@ -24,7 +26,10 @@ beforeEach(() => {
   db = createInMemoryFixtureDb();
 });
 
-afterEach(() => db.close());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  db.close();
+});
 
 // ---------------------------------------------------------------------------
 // resolveBytesPerToken
@@ -88,6 +93,114 @@ describe("calibrateBytesPerToken — disabled guard", () => {
       sampler: () => [{ text: "hi", bytes: 40 }],
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("calibrateBytesPerToken — effective scan roots", () => {
+  it("passes the unsaved daemon default to the sampler", async () => {
+    configSet(db, "bytes_per_token_calibration_enabled", "true");
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    const result = await calibrateBytesPerToken(db, {
+      sampler,
+      counter: async () => ({ ok: true, input_tokens: 10 }),
+    });
+    expect(result.ok).toBe(false);
+    expect(sampler).toHaveBeenCalledWith(loadConfig().scanRoots, { maxSamples: 150 });
+  });
+
+  it("passes the environment override when no roots are saved", async () => {
+    vi.stubEnv("AW_SCAN_ROOT", "synthetic-env-root");
+    configSet(db, "bytes_per_token_calibration_enabled", "true");
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    await calibrateBytesPerToken(db, { sampler, counter: makeCounter(10) });
+    expect(sampler).toHaveBeenCalledWith(["synthetic-env-root"], { maxSamples: 150 });
+  });
+
+  it.each([
+    ["saved nonempty", '["saved-root"]', ["saved-root"]],
+    ["saved empty", "[]", []],
+    ["malformed JSON", "not-json", null],
+    ["non-array JSON", "5", null],
+    ["non-string element", '["saved-root",5]', null],
+  ])("resolves %s as a whole", async (_label, saved, expected) => {
+    vi.stubEnv("AW_SCAN_ROOT", "synthetic-env-root");
+    configSet(db, "bytes_per_token_calibration_enabled", "true");
+    configSet(db, "scan_roots", saved);
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    await calibrateBytesPerToken(db, { sampler, counter: makeCounter(10) });
+    expect(sampler).toHaveBeenCalledWith(expected ?? ["synthetic-env-root"], { maxSamples: 150 });
+  });
+
+  it("preserves a prior ratio and provenance when the provider fails", async () => {
+    configSet(db, "bytes_per_token_calibration_enabled", "true");
+    configSet(db, "bytes_per_token", "3.25");
+    configSet(db, "bytes_per_token_provenance", "previous measurement");
+    const result = await calibrateBytesPerToken(db, {
+      scanRoots: [],
+      sampler: makeSampler(30, 40),
+      counter: async () => ({ ok: false, reason: "synthetic provider failure" }),
+    });
+    expect(result.ok).toBe(false);
+    expect(configGet(db, "bytes_per_token")).toBe("3.25");
+    expect(configGet(db, "bytes_per_token_provenance")).toBe("previous measurement");
+  });
+
+  it("keeps explicit caller empty roots even when saved roots exist", async () => {
+    configSet(db, "bytes_per_token_calibration_enabled", "true");
+    configSet(db, "scan_roots", JSON.stringify(["saved-root"]));
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    await calibrateBytesPerToken(db, {
+      scanRoots: [],
+      sampler,
+      counter: async () => ({ ok: true, input_tokens: 10 }),
+    });
+    expect(sampler).toHaveBeenCalledWith([], { maxSamples: 150 });
+  });
+
+  it("keeps explicit caller nonempty roots ahead of saved roots", async () => {
+    configSet(db, "bytes_per_token_calibration_enabled", "true");
+    configSet(db, "scan_roots", JSON.stringify(["saved-root"]));
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    await calibrateBytesPerToken(db, {
+      scanRoots: ["caller-root"],
+      sampler,
+      counter: makeCounter(10),
+    });
+    expect(sampler).toHaveBeenCalledWith(["caller-root"], { maxSamples: 150 });
+  });
+});
+
+describe("boot and weekly stale calibration entry", () => {
+  it("samples the unsaved environment root when opted in and unmeasured", async () => {
+    vi.stubEnv("AW_SCAN_ROOT", "synthetic-boot-root");
+    enableCalibration();
+    const sampler = vi.fn<ToolResultSampler>(() =>
+      Array.from({ length: 30 }, (_, i) => ({ text: `boot_${i}`, bytes: 40 })),
+    );
+    const result = await calibrateBytesPerTokenIfStale(db, { sampler, counter: makeCounter(10) });
+    expect(result?.ok).toBe(true);
+    expect(sampler).toHaveBeenCalledWith(["synthetic-boot-root"], { maxSamples: 150 });
+    expect(configGet(db, "bytes_per_token")).toBe("4");
+  });
+
+  it("reruns a stale measurement and retains explicit saved empty roots", async () => {
+    enableCalibration();
+    configSet(db, "scan_roots", "[]");
+    configSet(db, "bytes_per_token_measured_at", "2020-01-01T00:00:00.000Z");
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    const result = await calibrateBytesPerTokenIfStale(db, { sampler, counter: makeCounter(10) });
+    expect(result?.ok).toBe(false);
+    expect(sampler).toHaveBeenCalledWith([], { maxSamples: 150 });
+  });
+
+  it("does not sample when opted out or still fresh", async () => {
+    const sampler = vi.fn<ToolResultSampler>(() => []);
+    const opts = { sampler, counter: makeCounter(10) };
+    expect(await calibrateBytesPerTokenIfStale(db, opts)).toBeNull();
+    enableCalibration();
+    configSet(db, "bytes_per_token_measured_at", new Date().toISOString());
+    expect(await calibrateBytesPerTokenIfStale(db, opts)).toBeNull();
+    expect(sampler).not.toHaveBeenCalled();
   });
 });
 

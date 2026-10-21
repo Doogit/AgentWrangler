@@ -1,0 +1,17 @@
+{
+  "id": "A2",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss-bytes",
+      "target_constant": "A2_TASK_OUTPUT_BYTES_THRESHOLD",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-a1",
+      "target_constant": "A1_RESULT_BYTES_THRESHOLD",
+      "expect": "silent"
+    },
+    { "fixture": "near-miss-pct", "target_constant": "A2_MIN_PCT_OF_SPEND", "expect": "silent" }
+  ]
+}

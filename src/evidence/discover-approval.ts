@@ -304,7 +304,12 @@ function enumerateLocalRepositories(
   for (let index = 0; index < orderedRoots.length; index += 1) {
     for (let other = index + 1; other < orderedRoots.length; other += 1) {
       const relative = path.relative(orderedRoots[index] as string, orderedRoots[other] as string);
-      if (relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== "..") {
+      if (
+        relative !== "" &&
+        !relative.startsWith(`..${path.sep}`) &&
+        relative !== ".." &&
+        !path.isAbsolute(relative)
+      ) {
         refuse("discovery_search_roots_overlap");
       }
     }
@@ -333,7 +338,10 @@ function enumerateLocalRepositories(
       }
       const contained = orderedRoots.some((root) => {
         const relative = path.relative(root, current);
-        return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+        return (
+          relative === "" ||
+          (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+        );
       });
       if (!contained || visited.has(current)) continue;
       visited.add(current);

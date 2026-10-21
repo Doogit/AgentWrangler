@@ -11,6 +11,7 @@ import { setQueryDb } from "../db-context.js";
 import { getSuccessRate } from "./outcomes.js";
 import { getGlobalOverview } from "./overview.js";
 import { listRecommendations } from "./recommendations.js";
+import type { RecommendationsView } from "./recommendations.js";
 
 export interface Report {
   report_id: string;
@@ -55,17 +56,36 @@ export function isoWeekBounds(now: Date): { period_start: string; period_end: st
   };
 }
 
-/** Generate or return the idempotent weekly report for the ISO week containing `now`. */
-export function generateWeeklyReport(db: Db, now: Date = new Date()): Report {
+/**
+ * Generate or return the idempotent weekly report for the ISO week containing
+ * `now`. P0-U4: returns the stored row immediately, before computing
+ * anything, when the report for this week already exists — the boot and
+ * reportsTick call sites hit this on every call after the first in a week.
+ *
+ * `recs` lets a caller (the daemon boot path) pass an already-built
+ * recommendations snapshot (e.g. from `recsSnapshot.get()`) instead of
+ * paying for a synchronous `listRecommendations()` build on the main thread.
+ * Omitted, it falls back to `listRecommendations()` as before.
+ */
+export function generateWeeklyReport(
+  db: Db,
+  now: Date = new Date(),
+  recs?: RecommendationsView,
+): Report {
   setQueryDb(db);
 
   const { period_start, period_end } = isoWeekBounds(new Date(now.getTime() - 7 * MS_PER_DAY));
+  const reportId = `weekly-${period_start}`;
+  const existing = db.prepare("SELECT * FROM reports WHERE report_id = ?").get(reportId) as
+    | Report
+    | undefined;
+  if (existing !== undefined) return existing;
+
   const spendResponse = getGlobalOverview({ from: period_start, to: period_end });
-  const recommendationsResponse = listRecommendations();
+  const recommendations = recs ?? listRecommendations().data;
   const outcomesResponse = getSuccessRate();
 
   const spend = spendResponse.data;
-  const recommendations = recommendationsResponse.data;
   const outcomes = outcomesResponse.data;
 
   const openRecommendations = [
@@ -102,7 +122,6 @@ export function generateWeeklyReport(db: Db, now: Date = new Date()): Report {
     },
   };
 
-  const reportId = `weekly-${period_start}`;
   db.prepare(
     `INSERT OR IGNORE INTO reports
        (report_id, kind, period_start, period_end, generated_at, content_json)

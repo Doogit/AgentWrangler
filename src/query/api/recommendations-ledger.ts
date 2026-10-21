@@ -20,6 +20,7 @@ import { resolveCapReadCoeff } from "../cap-weighted.js";
 import { getQueryDb } from "../db-context.js";
 import type { ApiResponse } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
+import { trustedRecommendationContract } from "../recommendation-contract.js";
 import { capabilityForRecommendation, latestEffectCycle } from "./effect-service.js";
 import type { RecommendationCard } from "./recommendations.js";
 
@@ -67,11 +68,17 @@ export interface LedgerView {
 interface RecSqlRow {
   rec_id: string;
   detector_id: string | null;
+  category: string;
   lever: string;
   adopted_at: string | null;
   state: RecommendationCard["state"];
   target_metric: string;
   modeled_savings_u_per_wk: number | null;
+  evidence_json: string;
+  contract_version: number | null;
+  template_id: string | null;
+  contract_status: string;
+  rule_id: string | null;
 }
 
 interface EffectSqlRow {
@@ -122,8 +129,9 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
     scope !== undefined
       ? db
           .prepare(
-            `SELECT rec_id, detector_id, lever, adopted_at, state, target_metric,
-                    modeled_savings_u_per_wk
+            `SELECT rec_id, detector_id, category, lever, adopted_at, state, target_metric,
+                    modeled_savings_u_per_wk, evidence_json, contract_version,
+                    template_id, contract_status, rule_id
                FROM recommendations
               WHERE (scope_workspace_id = ? OR scope_workspace_id IS NULL)
                 AND state IN ('ADOPTED','MEASURING','MEASURED_EFFECTIVE','MEASURED_NO_EFFECT')
@@ -133,8 +141,9 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
           .all(scope)
       : db
           .prepare(
-            `SELECT rec_id, detector_id, lever, adopted_at, state, target_metric,
-                    modeled_savings_u_per_wk
+            `SELECT rec_id, detector_id, category, lever, adopted_at, state, target_metric,
+                    modeled_savings_u_per_wk, evidence_json, contract_version,
+                    template_id, contract_status, rule_id
                FROM recommendations
               WHERE state IN ('ADOPTED','MEASURING','MEASURED_EFFECTIVE','MEASURED_NO_EFFECT')
                 AND adopted_at IS NOT NULL
@@ -142,6 +151,10 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
           )
           .all()
   ) as RecSqlRow[];
+  const validatedRows = recRows.flatMap((row) => {
+    const contract = trustedRecommendationContract(row);
+    return contract === null ? [] : [{ row, contract }];
+  });
 
   // Read legacy rows only for the eligible ledger entries. Versioned evidence
   // has precedence in the projection and is read as one latest cycle per rec.
@@ -152,12 +165,12 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
   );
 
   // Confounded-window flag: another ADOPTED+ rec within ±86400s of this adoption.
-  const adoptedTimes = recRows.map((r) => ({
-    recId: r.rec_id,
-    ms: r.adopted_at !== null ? Date.parse(r.adopted_at) : Number.NaN,
+  const adoptedTimes = validatedRows.map(({ row }) => ({
+    recId: row.rec_id,
+    ms: row.adopted_at !== null ? Date.parse(row.adopted_at) : Number.NaN,
   }));
 
-  const entries: LedgerEntry[] = recRows.map((r) => {
+  const entries: LedgerEntry[] = validatedRows.map(({ row: r, contract }) => {
     const self = adoptedTimes.find((a) => a.recId === r.rec_id);
     const confounded =
       self !== undefined &&
@@ -171,16 +184,20 @@ export function listLedger(scope?: string): ApiResponse<LedgerView> {
 
     const effects: EffectRow[] = (legacyByRec.all(r.rec_id) as EffectSqlRow[]).map((e) => ({
       ...e,
-      qualification: qualificationFor(e, r.detector_id ?? "", r.target_metric),
+      qualification: qualificationFor(
+        e,
+        contract.definition.detector_id,
+        contract.definition.target_metric,
+      ),
     }));
 
     return {
       rec_id: r.rec_id,
-      detector_id: r.detector_id ?? "unknown",
-      lever: r.lever,
+      detector_id: contract.definition.detector_id,
+      lever: contract.definition.lever,
       adopted_at: r.adopted_at as string,
       state: r.state,
-      target_metric: r.target_metric,
+      target_metric: contract.definition.target_metric,
       modeled_savings_u_per_wk: r.modeled_savings_u_per_wk,
       // Cap-weighted modeled is a DISPLAY figure only — computed server-side,
       // never summed with the realized after_value / delta_pct fields.

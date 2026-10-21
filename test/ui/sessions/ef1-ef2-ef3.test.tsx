@@ -53,7 +53,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     vi.mocked(client.fetchTurnTimeline).mockResolvedValue(mockTurnTimeline("session-demo"));
     render(<SessionDetailPage sessionId="session-demo" onBack={() => {}} />);
 
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     // fixture sets turns_to_first_commit: 4
     expect(screen.getByTestId("turns-to-first-commit").textContent).toBe("4");
   });
@@ -70,7 +70,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     vi.mocked(client.fetchTurnTimeline).mockResolvedValue(mockTurnTimeline("session-no-commit"));
     render(<SessionDetailPage sessionId="session-no-commit" onBack={() => {}} />);
 
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.getByTestId("turns-to-first-commit").textContent).toBe("—/no commit");
   });
 
@@ -91,7 +91,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     vi.mocked(client.fetchTurnTimeline).mockResolvedValue(mockTurnTimeline("session-legacy"));
     render(<SessionDetailPage sessionId="session-legacy" onBack={() => {}} />);
 
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.getByTestId("turns-to-first-commit").textContent).toBe("—");
   });
 
@@ -107,7 +107,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     vi.mocked(client.fetchTurnTimeline).mockResolvedValue(mockTurnTimeline("session-deep"));
     render(<SessionDetailPage sessionId="session-deep" onBack={() => {}} />);
 
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.getByTestId("deep-abandoned").textContent).toContain(
       "DEEP ACTIVITY, NO OBSERVED COMMIT",
     );
@@ -118,7 +118,7 @@ describe("EF1 cells on SessionDetailPage", () => {
     vi.mocked(client.fetchTurnTimeline).mockResolvedValue(mockTurnTimeline("session-demo"));
     render(<SessionDetailPage sessionId="session-demo" onBack={() => {}} />);
 
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.getByTestId("deep-abandoned").textContent).toBe("No");
   });
 });
@@ -152,7 +152,7 @@ describe("FrictionCell gap aggregates (strip variant)", () => {
     expect(screen.getByTestId("long-gap-count").textContent).toBe("1");
   });
 
-  it("shows '—' for all gap fields when gap_n < 2", () => {
+  it("hides all gap rows when gap_n < 2", () => {
     render(
       <FrictionCell
         counts={{
@@ -171,9 +171,10 @@ describe("FrictionCell gap aggregates (strip variant)", () => {
         variant="strip"
       />,
     );
-    expect(screen.getByTestId("gap-median").textContent).toBe("—");
-    expect(screen.getByTestId("gap-p90").textContent).toBe("—");
-    expect(screen.getByTestId("long-gap-count").textContent).toBe("—");
+    // "—" rows are hidden from the strip.
+    expect(screen.queryByTestId("gap-median")).toBeNull();
+    expect(screen.queryByTestId("gap-p90")).toBeNull();
+    expect(screen.queryByTestId("long-gap-count")).toBeNull();
   });
 
   it("tooltip declares the imported LONG_GAP_THRESHOLD_S constant", () => {

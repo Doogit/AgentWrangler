@@ -3,7 +3,9 @@
  *
  * Controls (all round-trip through hash query params):
  *   state  = proposed | adopted | dismissed  (lifecycle filter)
- *   tier   = WARNING | MODELED_SAVINGS | ADVISORY | DIRECTIONAL
+ *   basis  = P | E | O | R  (estimate basis; proposed only)
+ *   seen   = 7d | 30d  (last-seen window on weeks_ago; absent = all history; proposed only)
+ *   type   = safety | friction | cache | cost  (detector type filter; proposed only)
  *   ws     = <scope_workspace_id> | "" (all workspaces)
  *   group  = detector | workspace
  *   sort   = confidence | savings | newest
@@ -16,16 +18,19 @@
 import type { RecommendationCard, RecommendationsView } from "../../query/api/recommendations";
 import { workspaceLabel } from "../lib/workspace-label";
 import InfoTip from "../shell/InfoTip";
-import { confidenceTierLabel } from "./RecCard";
 
 export type LifecycleState = "proposed" | "adopted" | "dismissed";
-export type TierFilter = "WARNING" | "MODELED SAVINGS" | "ADVISORY" | "DIRECTIONAL";
+export type BasisFilter = "P" | "E" | "O" | "R";
+export type SeenWindow = "7d" | "30d";
+export type TypeFilter = "safety" | "friction" | "cache" | "cost";
 export type GroupBy = "detector" | "workspace";
 export type SortOrder = "confidence" | "savings" | "newest";
 
 export interface ToolbarParams {
   state: LifecycleState | null;
-  tier: TierFilter | null;
+  basis: BasisFilter | null;
+  seen: SeenWindow | null; // null = all history
+  type: TypeFilter | null; // detector type filter; proposed only
   ws: string | null; // scope_workspace_id; null = all (kept for backward-compat URL round-trips; scope takes priority)
   /** Scope strip param: 'global' | workspace_id | null (all). Overrides ws when non-null. */
   scope: string | null;
@@ -34,14 +39,55 @@ export interface ToolbarParams {
   focus: string | null; // RV6 deep-link target
 }
 
-const TIER_LABELS: TierFilter[] = ["WARNING", "MODELED SAVINGS", "ADVISORY", "DIRECTIONAL"];
+const BASIS_VALUES: BasisFilter[] = ["P", "E", "O", "R"];
 
-const TIER_DISPLAY_LABEL: Record<TierFilter, string> = {
-  WARNING: "Warning",
-  "MODELED SAVINGS": "Estimated value",
-  ADVISORY: "Suggestion",
-  DIRECTIONAL: "Trend only",
+/** Matches the basis chip labels on RecCard. */
+const BASIS_DISPLAY_LABEL: Record<BasisFilter, string> = {
+  P: "Modeled",
+  E: "Usage-estimated",
+  O: "Overlap",
+  R: "Risk",
 };
+
+/** Last-seen window as the max weeks_ago kept (7 d = this week, 30 d ≈ 4 weeks). */
+const SEEN_MAX_WEEKS_AGO: Record<SeenWindow, number> = { "7d": 0, "30d": 4 };
+
+const TYPE_VALUES: TypeFilter[] = ["safety", "friction", "cache", "cost"];
+
+const TYPE_DISPLAY_LABEL: Record<TypeFilter, string> = {
+  safety: "Safety",
+  friction: "Friction & errors",
+  cache: "Cache",
+  cost: "Cost",
+};
+
+/** Detector ids grouped by type. Unmapped detector ids match no Type. */
+const TYPE_DETECTOR_MAP: Record<TypeFilter, string[]> = {
+  safety: ["H1"],
+  friction: ["C1", "C2", "C5", "C7", "C9", "D7", "D11", "A1", "A2"],
+  cache: ["B1", "B2", "B4", "D8"],
+  cost: ["D1", "D2", "D4", "D9", "D12", "E1", "E2"],
+};
+
+/** Params cleared by "Reset filters": every filter plus sort, group and window. */
+const RESET_KEYS = ["scope", "ws", "basis", "seen", "type", "sort", "group", "tier"];
+
+export function resetToolbarParams(): void {
+  for (const key of RESET_KEYS) setToolbarParam(key, null);
+}
+
+/** True when any toolbar control differs from its default. */
+export function toolbarIsModified(params: ToolbarParams): boolean {
+  return (
+    params.scope !== null ||
+    params.ws !== null ||
+    params.basis !== null ||
+    params.seen !== null ||
+    params.type !== null ||
+    params.sort !== "confidence" ||
+    params.group !== "detector"
+  );
+}
 
 const LIFECYCLE_LABELS: Array<{ value: LifecycleState; label: string }> = [
   { value: "proposed", label: "Proposed" },
@@ -58,16 +104,24 @@ export function parseToolbarParams(hash: string): ToolbarParams {
   const state: LifecycleState | null =
     rawState === "proposed" || rawState === "adopted" || rawState === "dismissed" ? rawState : null;
 
-  const rawTier = params.get("tier");
-  const tier: TierFilter | null = (TIER_LABELS as string[]).includes(rawTier ?? "")
-    ? (rawTier as TierFilter)
+  const rawBasis = params.get("basis");
+  const basis: BasisFilter | null = (BASIS_VALUES as string[]).includes(rawBasis ?? "")
+    ? (rawBasis as BasisFilter)
     : null;
+
+  const rawSeen = params.get("seen");
+  const seen: SeenWindow | null = rawSeen === "7d" || rawSeen === "30d" ? rawSeen : null;
 
   const rawGroup = params.get("group");
   const group: GroupBy = rawGroup === "workspace" ? "workspace" : "detector";
 
   const rawSort = params.get("sort");
   const sort: SortOrder = rawSort === "savings" || rawSort === "newest" ? rawSort : "confidence";
+
+  const rawType = params.get("type");
+  const type: TypeFilter | null = (TYPE_VALUES as string[]).includes(rawType ?? "")
+    ? (rawType as TypeFilter)
+    : null;
 
   const ws = params.get("ws"); // null if not set; kept for backward-compat
 
@@ -76,7 +130,7 @@ export function parseToolbarParams(hash: string): ToolbarParams {
   const rawScope = params.get("scope"); // null | 'global' | workspace_id
   const scope: string | null = rawScope !== "" ? rawScope : null;
 
-  return { state, tier, ws, scope, group, sort, focus };
+  return { state, basis, seen, type, ws, scope, group, sort, focus };
 }
 
 /** Write a single toolbar param into the hash without losing the route path. */
@@ -121,7 +175,15 @@ export function filterRecommendations(
   params: ToolbarParams,
 ): RecommendationCard[] {
   return recs.filter((rec) => {
-    if (params.tier !== null && confidenceTierLabel(rec) !== params.tier) return false;
+    if (params.basis !== null && rec.estimate?.basis !== params.basis) return false;
+    // Unknown recency is kept: stale recs are labeled, not hidden.
+    if (params.seen !== null && (rec.weeks_ago ?? 0) > SEEN_MAX_WEEKS_AGO[params.seen]) {
+      return false;
+    }
+    if (params.type !== null) {
+      const allowed = TYPE_DETECTOR_MAP[params.type];
+      if (!allowed.includes(rec.detector_id ?? "")) return false;
+    }
     if (params.scope !== null) {
       return rec.scope_workspace_id === (params.scope === "global" ? null : params.scope);
     }
@@ -129,12 +191,17 @@ export function filterRecommendations(
   });
 }
 
+/** Basis, Last seen, and Type are proposed-finding filters; adopted/dismissed lists ignore them. */
+export function lifecycleListParams(params: ToolbarParams): ToolbarParams {
+  return { ...params, basis: null, seen: null, type: null };
+}
+
 /** Count visible cards per lifecycle using the same predicate as the page. */
 function countVisible(
   view: RecommendationsView,
   params: ToolbarParams,
 ): { proposed: number; adopted: number; dismissed: number } {
-  const lifecycleParams = { ...params, tier: null };
+  const lifecycleParams = lifecycleListParams(params);
   return {
     proposed: filterRecommendations([...view.active, ...view.limit_warnings], params).length,
     adopted: filterRecommendations(view.adopted, lifecycleParams).length,
@@ -149,25 +216,21 @@ interface RecsToolbarProps {
 
 export default function RecsToolbar({ view, params }: RecsToolbarProps) {
   const counts = countVisible(view, params);
-  const moreFilterState = [
-    params.tier === null ? null : TIER_DISPLAY_LABEL[params.tier],
-    params.group === "detector" ? null : "by workspace",
-    params.sort === "confidence"
-      ? null
-      : params.sort === "savings"
-        ? "by estimated value"
-        : "newest",
-  ].filter((value): value is string => value !== null);
+  const showProposedFilters = params.state === null || params.state === "proposed";
 
   function toggle(key: string, value: string, currentValue: string | null) {
     setToolbarParam(key, currentValue === value ? null : value);
   }
 
   function selectLifecycle(value: LifecycleState) {
-    // Confidence tier applies only to proposed findings. Clear it before
+    // Basis, Last seen, and Type apply only to proposed findings. Clear them before
     // changing views so adopted/dismissed results are never filtered by a
     // control that is no longer shown.
-    if (value !== "proposed") setToolbarParam("tier", null);
+    if (value !== "proposed") {
+      setToolbarParam("basis", null);
+      setToolbarParam("seen", null);
+      setToolbarParam("type", null);
+    }
     toggle("state", value, params.state);
   }
 
@@ -200,74 +263,120 @@ export default function RecsToolbar({ view, params }: RecsToolbarProps) {
         })}
       </fieldset>
 
-      {/* Confidence-tier chips — only relevant for proposed view */}
-      <details className="recs-toolbar-more">
-        <summary>
-          More filters{moreFilterState.length > 0 ? `: ${moreFilterState.join(", ")}` : ""}
-        </summary>
-        {(params.state === null || params.state === "proposed") && (
-          <fieldset className="recs-toolbar-group recs-toolbar-group--tier">
-            <legend className="recs-toolbar-legend">
-              Suggestion type{" "}
-              <InfoTip
-                label="What the evidence filters mean"
-                content="Warnings flag usage that crossed a threshold. Estimated value shows possible savings, suggestions offer conditional advice, and trends show patterns without a savings estimate."
-              />
-            </legend>
-            {TIER_LABELS.map((tierLabel) => {
-              const active = params.tier === tierLabel;
-              return (
-                <button
-                  key={tierLabel}
-                  type="button"
-                  className={`recs-chip recs-chip--tier${active ? " recs-chip--active" : ""}`}
-                  aria-pressed={active}
-                  data-toolbar-tier={tierLabel}
-                  onClick={() => toggle("tier", tierLabel, params.tier)}
-                >
-                  {TIER_DISPLAY_LABEL[tierLabel]}
-                </button>
-              );
-            })}
-          </fieldset>
-        )}
+      {/* Basis chips — only relevant for proposed view */}
+      {showProposedFilters && (
+        <fieldset className="recs-toolbar-group recs-toolbar-group--basis">
+          <legend className="recs-toolbar-legend">
+            Basis{" "}
+            <InfoTip
+              label="What the basis filters mean"
+              content="How each weekly-impact figure was worked out: measured from your sessions, estimated from usage, an overlap with another finding, or a risk upper bound."
+            />
+          </legend>
+          {BASIS_VALUES.map((basis) => {
+            const active = params.basis === basis;
+            return (
+              <button
+                key={basis}
+                type="button"
+                className={`recs-chip recs-chip--basis${active ? " recs-chip--active" : ""}`}
+                aria-pressed={active}
+                data-toolbar-basis={basis}
+                onClick={() => toggle("basis", basis, params.basis)}
+              >
+                {BASIS_DISPLAY_LABEL[basis]}
+              </button>
+            );
+          })}
+        </fieldset>
+      )}
 
-        <div className="recs-toolbar-row">
-          {/* Group-by */}
+      {/* Type chips — only relevant for proposed view */}
+      {showProposedFilters && (
+        <fieldset className="recs-toolbar-group recs-toolbar-group--type">
+          <legend className="recs-toolbar-legend">
+            Type{" "}
+            <InfoTip
+              label="What the type filter means"
+              content="What kind of problem the finding addresses: a safety check, a friction or error source, a cache-efficiency issue, or a pure cost pattern."
+            />
+          </legend>
+          {TYPE_VALUES.map((typeValue) => {
+            const active = params.type === typeValue;
+            return (
+              <button
+                key={typeValue}
+                type="button"
+                className={`recs-chip recs-chip--type${active ? " recs-chip--active" : ""}`}
+                aria-pressed={active}
+                data-toolbar-type={typeValue}
+                onClick={() => toggle("type", typeValue, params.type)}
+              >
+                {TYPE_DISPLAY_LABEL[typeValue]}
+              </button>
+            );
+          })}
+        </fieldset>
+      )}
+
+      <div className="recs-toolbar-row">
+        {showProposedFilters && (
           <label className="recs-toolbar-label">
-            Group by
+            Last seen
             <select
               className="recs-toolbar-select"
-              value={params.group}
-              aria-label="Group recommendations by"
+              value={params.seen ?? "all"}
+              aria-label="Last seen"
               onChange={(e) =>
-                setToolbarParam("group", e.target.value === "workspace" ? "workspace" : null)
+                setToolbarParam("seen", e.target.value === "all" ? null : e.target.value)
               }
             >
-              <option value="detector">Recommendation type</option>
-              <option value="workspace">Workspace</option>
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+              <option value="all">All history</option>
             </select>
           </label>
+        )}
+        {/* Group-by */}
+        <label className="recs-toolbar-label">
+          Group by
+          <select
+            className="recs-toolbar-select"
+            value={params.group}
+            aria-label="Group recommendations by"
+            onChange={(e) =>
+              setToolbarParam("group", e.target.value === "workspace" ? "workspace" : null)
+            }
+          >
+            <option value="detector">Recommendation type</option>
+            <option value="workspace">Workspace</option>
+          </select>
+        </label>
 
-          {/* Sort */}
-          <label className="recs-toolbar-label">
-            Sort
-            <select
-              className="recs-toolbar-select"
-              value={params.sort}
-              aria-label="Sort recommendations"
-              onChange={(e) => {
-                const v = e.target.value;
-                setToolbarParam("sort", v === "confidence" ? null : v);
-              }}
-            >
-              <option value="confidence">Recommended order</option>
-              <option value="savings">Estimated weekly value</option>
-              <option value="newest">Newest</option>
-            </select>
-          </label>
-        </div>
-      </details>
+        {/* Sort */}
+        <label className="recs-toolbar-label">
+          Sort
+          <select
+            className="recs-toolbar-select"
+            value={params.sort}
+            aria-label="Sort recommendations"
+            onChange={(e) => {
+              const v = e.target.value;
+              setToolbarParam("sort", v === "confidence" ? null : v);
+            }}
+          >
+            <option value="confidence">Recommended order</option>
+            <option value="savings">Estimated weekly value</option>
+            <option value="newest">Newest</option>
+          </select>
+        </label>
+
+        {toolbarIsModified(params) && (
+          <button type="button" className="btn-secondary" onClick={resetToolbarParams}>
+            Reset filters
+          </button>
+        )}
+      </div>
     </div>
   );
 }

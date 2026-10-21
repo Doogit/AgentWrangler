@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "frozen_at": "2026-09-21",
+  "sessions": [
+    {
+      "session_id": "gs-b1-severe",
+      "expect_fires": ["B1"],
+      "must_catch": "Per-turn cache reads collapsed 40000 -> 50 (ratio 0.001); name the boundary and give a concrete re-cache/resume action."
+    },
+    {
+      "session_id": "gs-b2-ttlgap",
+      "expect_fires": ["B2"],
+      "must_catch": "Cache miss caused by a >1h idle gap (5m/1h TTL expired); recommend resuming sooner or consolidating the idle window."
+    },
+    {
+      "session_id": "gs-b4-prefix",
+      "expect_fires": ["B1", "B4"],
+      "must_catch": "A mid-session context edit invalidated the cached prefix (re-creation > 2x prior); recommend batching prefix edits."
+    },
+    {
+      "session_id": "gs-d8-churn5m",
+      "expect_fires": ["D8"],
+      "must_catch": "~3 large 5m-TTL prefix re-caches after idle with near-zero reads; quantify wasted write tokens; recommend a TTL/idle mitigation."
+    },
+    {
+      "session_id": "gs-d8-churn1h",
+      "expect_fires": ["D8"],
+      "must_catch": "Same as the 5m churn case for the 1h-TTL band; the larger write volume should rank it above the 5m session."
+    },
+    {
+      "session_id": "session-cache-collapse",
+      "expect_fires": ["B1"],
+      "must_catch": "Base-seed B1 cache-read collapse lane; kept for continuity with prior H1 work — flag the collapse and name a re-cache action."
+    },
+    {
+      "session_id": "gs-context-heavy",
+      "expect_fires": [],
+      "must_catch": "context_tokens_max ~193000 is very large per turn; recommend trimming always-loaded context / session boundaries. The engine currently MISSES this (D2 requires >=150 turns) — this session measures whether the engine under-fires vs. the Claude arm."
+    },
+    {
+      "session_id": "gs-healthy-cache",
+      "expect_fires": [],
+      "must_catch": "Nothing. Stable cache reads and small writes — neither the engine nor the Claude arm may invent a recommendation. False-positive check."
+    },
+    {
+      "session_id": "gs-clean-small",
+      "expect_fires": [],
+      "must_catch": "Nothing. Tiny healthy session with no signal — no recommendation. False-positive check."
+    },
+    {
+      "session_id": "gs-c2-notfound",
+      "expect_fires": ["C2", "C5", "D7"],
+      "must_catch": ">=3 NOT_FOUND tool errors on a single session should surface as a C2 finding. The co-firing D7 loop finding is a WANTED signal — repeated NOT_FOUND calls are a genuine loop."
+    },
+    {
+      "session_id": "gs-c3-editnoread",
+      "expect_fires": ["C3"],
+      "must_catch": "A NOT_READ error on Edit (editing a file not previously read) should surface as C3 within the window. A co-firing D7 loop finding here is a FALSE POSITIVE — a single edit-no-read is not a loop; the engine should ideally suppress it."
+    },
+    {
+      "session_id": "gs-c4-patchfail",
+      "expect_fires": ["C4", "C5", "D7"],
+      "must_catch": "5 consecutive same-file Edit failures should surface as a C4 finding. The co-firing D7 loop finding is WANTED — 5 consecutive same-file failures are a genuine loop."
+    },
+    {
+      "session_id": "gs-c5-errorloop",
+      "expect_fires": ["C5", "D7"],
+      "must_catch": ">=3 identical tool+error_class repetitions should surface as a C5 error-loop finding. The co-firing D7 loop finding is WANTED — this session IS an error loop."
+    },
+    {
+      "session_id": "gs-c7-bashfail",
+      "expect_fires": ["C7", "D7"],
+      "must_catch": ">=3 failed Bash commands of the same family (BASH_GIT) should surface as a C7 finding. The co-firing D7 loop finding is WANTED — repeated same-family Bash failures are a genuine loop."
+    },
+    {
+      "session_id": "gs-c9-denials",
+      "expect_fires": ["C9", "D14"],
+      "must_catch": "Each distinct denial class (hook-block, deny-rule, user-rejected) should produce a C9 finding. A co-firing D7 loop finding here is a FALSE POSITIVE — distinct denial classes are not a repetition loop; the engine should ideally suppress it."
+    },
+    {
+      "session_id": "gs-c11-mcpcap",
+      "expect_fires": ["C11"],
+      "must_catch": "An MCP_CONTENT_TOO_LARGE tool error should surface as a C11 finding."
+    },
+    {
+      "session_id": "gs-d14-interrupt",
+      "expect_fires": ["D14"],
+      "must_catch": "Both interrupt kinds (PURE_INTERRUPT, KILLED_NO_PROMPT) should produce separate D14 findings."
+    },
+    {
+      "session_id": "gs-h1-destructive",
+      "expect_fires": ["H1"],
+      "must_catch": "Each destructive-op class (rm-rf, git-reset-hard) should produce a separate H1 finding."
+    }
+  ]
+}

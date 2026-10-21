@@ -54,35 +54,89 @@ function discoverMigrations(): Array<{ version: string; filePath: string }> {
   }));
 }
 
+/** P3-U8 R-9: skip the pre-migration backup above this size (`VACUUM INTO` ≈ 20 s at 366 MB). */
+export const BACKUP_MAX_BYTES = 512 * 1024 * 1024;
+
+export interface MigrateOptions {
+  backupMaxBytes?: number;
+  log?: (message: string) => void;
+}
+
+/** `VACUUM INTO <db>.pre-migrate.bak` (one file, replaced each time) when the DB is a file under the cap. */
+function backupBeforeMigrating(db: Db, maxBytes: number, log: (m: string) => void): void {
+  if (db.memory || !fs.existsSync(db.name)) return;
+  const size = fs.statSync(db.name).size;
+  if (size > maxBytes) {
+    log(`Migrations: backup skipped — DB is ${size} bytes, over the ${maxBytes}-byte cap`);
+    return;
+  }
+  const backup = `${db.name}.pre-migrate.bak`;
+  fs.rmSync(backup, { force: true });
+  db.prepare("VACUUM INTO ?").run(backup);
+  log(`Migrations: backup written to ${backup}`);
+}
+
 /**
  * Run pending migrations against `db`, optionally stopping at `throughVersion`.
  * Returns the list of newly-applied version strings (empty when already up-to-date).
  *
  * The first migration (001_observe.sql) is responsible for creating the
  * schema_migrations table. Subsequent calls find the table already present.
+ *
+ * P3-U8 R-9: refuses a DB that has a migration newer than this binary's newest (a downgrade),
+ * and backs up an existing DB before applying anything to it.
  */
-export function runMigrations(db: Db, throughVersion?: string): string[] {
+export function runMigrations(
+  db: Db,
+  throughVersion?: string,
+  opts: MigrateOptions = {},
+): string[] {
   // Determine which migrations have already been applied (if the bookkeeping
   // table exists) or treat the list as empty (first ever run).
   const hasTable = migrationsTableExists(db);
   const applied = hasTable ? appliedVersions(db) : new Set<string>();
-  const pending = discoverMigrations().filter(
+  const known = discoverMigrations();
+  const newest = known[known.length - 1]?.version ?? "";
+  const newer = [...applied].filter((v) => v > newest).sort();
+  if (newer.length > 0) {
+    throw new Error(
+      `This DB was migrated by a newer AgentWrangler (${newer.join(", ")}); this build knows up to ` +
+        `${newest}. Upgrade AgentWrangler, or point it at another DB with --db-path.`,
+    );
+  }
+  const pending = known.filter(
     (m) => !applied.has(m.version) && (throughVersion === undefined || m.version <= throughVersion),
   );
+  if (hasTable && pending.length > 0) {
+    backupBeforeMigrating(db, opts.backupMaxBytes ?? BACKUP_MAX_BYTES, opts.log ?? console.log);
+  }
 
   const applied_now: string[] = [];
 
   for (const { version, filePath } of pending) {
     const sql = fs.readFileSync(filePath, "utf-8");
+    const requiresForeignKeysOff = sql.startsWith("-- migrate: foreign-keys-off");
+    const foreignKeysWereEnabled = db.pragma("foreign_keys", { simple: true }) === 1;
+    if (requiresForeignKeysOff && foreignKeysWereEnabled) db.pragma("foreign_keys = OFF");
     // Run the migration SQL + record the version atomically.
-    db.transaction(() => {
-      db.exec(sql);
-      // schema_migrations must now exist (created by the SQL if it wasn't before).
-      db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
-        version,
-        new Date().toISOString(),
-      );
-    })();
+    try {
+      db.transaction(() => {
+        db.exec(sql);
+        if (requiresForeignKeysOff) {
+          const violations = db.pragma("foreign_key_check") as unknown[];
+          if (violations.length > 0) {
+            throw new Error(`migration ${version} introduced foreign-key violations`);
+          }
+        }
+        // schema_migrations must now exist (created by the SQL if it wasn't before).
+        db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
+          version,
+          new Date().toISOString(),
+        );
+      })();
+    } finally {
+      if (requiresForeignKeysOff && foreignKeysWereEnabled) db.pragma("foreign_keys = ON");
+    }
     applied_now.push(version);
   }
 

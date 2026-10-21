@@ -4,10 +4,10 @@
  * contract is introduced here.
  */
 
+import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import type { RecommendationCard } from "../../query/api/recommendations";
 import type { TrendData } from "../../query/api/trends";
-import { buildPromptArtifact } from "../recommendations/prompt-templates";
 
 export interface WindowDelta {
   direction: "up" | "down" | "flat" | "new" | "unavailable";
@@ -19,33 +19,6 @@ function formatUsd(microUsd: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
-}
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
-  return n.toLocaleString("en-US");
-}
-
-/**
- * A short, honest measured claim for the top recommendation — the concrete
- * quantity the detector observed, not a dollar figure (which would overstate
- * cache-read exposure ~10×). Falls back to modeled savings, then null.
- */
-function topRecClaim(rec: RecommendationCard): string | null {
-  const num = (key: string): number | null => {
-    const value = rec.evidence[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  };
-  const source = num("source_tokens");
-  const target = num("source_target");
-  if (source !== null && target !== null)
-    return `${fmtTokens(source)} always-loaded vs ${fmtTokens(target)} target`;
-  const delta = num("delta_context_tokens");
-  if (delta !== null) return `−${fmtTokens(delta)} tokens/turn`;
-  if (rec.modeled_savings_u_per_wk !== null && rec.detector_id !== "D4")
-    return `${formatUsd(rec.modeled_savings_u_per_wk)}/wk modeled`;
-  return null;
 }
 
 function trendTotal(data: TrendData | null): number | null {
@@ -71,36 +44,99 @@ export function DeltaBadge({ delta }: { delta: WindowDelta }) {
   return <span className={`window-delta window-delta-${delta.direction}`}>{delta.label}</span>;
 }
 
+function fmtCompact(microUsd: number): string {
+  const usd = microUsd / 1_000_000;
+  if (usd >= 1000) return `$${(usd / 1000).toFixed(1)}k`;
+  if (usd >= 1) return `$${usd.toFixed(2)}`;
+  return `$${usd.toFixed(3)}`;
+}
+
 export function TrendSparkline({ values, label }: { values: number[]; label: string }) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
   const usable = values.filter((value) => Number.isFinite(value));
   if (usable.length < 2) return <span className="trend-sparkline-empty">Trend unavailable</span>;
 
   const max = Math.max(...usable);
   const min = Math.min(...usable);
   const range = max - min || 1;
-  const points = usable
-    .map(
-      (value, index) =>
-        `${(index / (usable.length - 1)) * 100},${28 - ((value - min) / range) * 24}`,
-    )
-    .join(" ");
+
+  const pts = usable.map((value, index) => ({
+    x: (index / (usable.length - 1)) * 100,
+    y: 28 - ((value - min) / range) * 24,
+    v: value,
+  }));
+  const polyPoints = pts.map((p) => `${p.x},${p.y}`).join(" ");
+  const last = pts[pts.length - 1];
+  if (last === undefined) return <span className="trend-sparkline-empty">Trend unavailable</span>;
+
+  function handleMouseMove(e: React.MouseEvent<SVGSVGElement>) {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const fraction = (e.clientX - rect.left) / rect.width;
+    const idx = Math.max(
+      0,
+      Math.min(usable.length - 1, Math.round(fraction * (usable.length - 1))),
+    );
+    setHoverIndex(idx);
+  }
+
+  const hovered = hoverIndex !== null ? usable[hoverIndex] : null;
+  const hoverPt = hoverIndex !== null ? pts[hoverIndex] : null;
 
   return (
-    <svg
-      className="trend-sparkline"
-      viewBox="0 0 100 32"
-      role="img"
-      aria-label={label}
-      preserveAspectRatio="none"
-    >
-      <polyline
-        points={points}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.4"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
+    <div className="trend-sparkline-wrap">
+      <span className="trend-sparkline-axis-label trend-sparkline-axis-min" aria-hidden="true">
+        {fmtCompact(min)}
+      </span>
+      <div className="trend-sparkline-svg-wrap">
+        <svg
+          ref={svgRef}
+          className="trend-sparkline"
+          viewBox="0 0 100 32"
+          role="img"
+          aria-label={label}
+          preserveAspectRatio="none"
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => setHoverIndex(null)}
+        >
+          <polyline
+            points={polyPoints}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            vectorEffect="non-scaling-stroke"
+          />
+          <circle
+            cx={last.x}
+            cy={last.y}
+            r="3"
+            fill="currentColor"
+            vectorEffect="non-scaling-stroke"
+          />
+          {hoverPt !== null && hoverPt !== undefined && hoverIndex !== usable.length - 1 && (
+            <circle
+              cx={hoverPt.x}
+              cy={hoverPt.y}
+              r="3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </svg>
+        {hovered !== null && hovered !== undefined && (
+          <span className="trend-sparkline-hover-val" aria-live="polite">
+            {fmtCompact(hovered)}
+          </span>
+        )}
+      </div>
+      <span className="trend-sparkline-axis-label trend-sparkline-axis-max" aria-hidden="true">
+        {fmtCompact(max)}
+      </span>
+    </div>
   );
 }
 
@@ -131,38 +167,15 @@ interface VerdictBandProps {
   trend: TrendData | null;
   priorTrend: TrendData | null;
   isLoading: boolean;
-  topRecommendation: RecommendationCard | null;
+  /** Retained for existing callers; recommendation presentation lives in OverviewPage. */
+  topRecommendation?: RecommendationCard | null;
 }
 
-export default function VerdictBand({
-  preset,
-  trend,
-  priorTrend,
-  isLoading,
-  topRecommendation,
-}: VerdictBandProps) {
+export default function VerdictBand({ preset, trend, priorTrend, isLoading }: VerdictBandProps) {
   const currentTotal = trendTotal(trend);
   const priorTotal = trendTotal(priorTrend);
   const delta = windowDelta(currentTotal, priorTotal);
   const values = trend?.buckets.map((bucket) => bucket.cost_equiv_u) ?? [];
-  const wasteSource =
-    topRecommendation?.title ?? topRecommendation?.lever ?? "No active waste source detected";
-  const claim = topRecommendation === null ? null : topRecClaim(topRecommendation);
-  const promptArtifact = topRecommendation === null ? null : buildPromptArtifact(topRecommendation);
-  const focusHref =
-    topRecommendation === null
-      ? "#/recommendations"
-      : `#/recommendations?focus=${encodeURIComponent(topRecommendation.rec_id)}`;
-  const [promptCopied, setPromptCopied] = useState(false);
-  const [isPromptOpen, setIsPromptOpen] = useState(false);
-
-  function handleCopyPrompt() {
-    if (promptArtifact === null) return;
-    void navigator.clipboard.writeText(promptArtifact.text).then(() => {
-      setPromptCopied(true);
-      setTimeout(() => setPromptCopied(false), 2000);
-    });
-  }
 
   return (
     <section
@@ -179,57 +192,20 @@ export default function VerdictBand({
             <CountUpValue value={currentTotal} />
             <div className="verdict-band-caption">{preset.toUpperCase()} list-price equivalent</div>
           </div>
-          <DeltaBadge delta={delta} />
+          {/* While either window is still loading, withhold the delta — showing
+              "Prior window unavailable" before the prior fetch resolves causes a
+              visible flip to the real "% vs prior" once it lands (UIC-3a/O4). */}
+          {!isLoading && <DeltaBadge delta={delta} />}
         </div>
         <div className="verdict-band-trend">
-          <TrendSparkline values={values} label={`${preset} spend trend`} />
+          {isLoading ? (
+            <span className="trend-sparkline-empty">Loading trend…</span>
+          ) : (
+            <TrendSparkline values={values} label={`${preset} spend trend`} />
+          )}
           <span>Selected-window spend trend</span>
         </div>
-        <div className="verdict-band-detail verdict-band-next-step">
-          <strong>Suggested next step:</strong> {wasteSource}
-          {claim !== null && <span className="verdict-band-claim"> · {claim}</span>}
-        </div>
       </div>
-      <div className="verdict-band-actions">
-        {promptArtifact !== null && (
-          <button type="button" className="verdict-band-copy" onClick={handleCopyPrompt}>
-            {promptCopied ? "Copied ✓" : "Copy fix prompt"}
-          </button>
-        )}
-        <a className="verdict-band-action" href={focusHref}>
-          {topRecommendation === null ? "Review recommendations →" : "Review suggestion →"}
-        </a>
-      </div>
-      {promptArtifact !== null && (
-        <div className="verdict-prompt-drawer">
-          <div className="verdict-prompt-drawer-header">
-            <div>
-              <div className="verdict-prompt-drawer-label">Fix prompt</div>
-              <div className="verdict-prompt-drawer-summary">Paste this into Claude Code</div>
-            </div>
-            <button
-              type="button"
-              className="verdict-prompt-toggle"
-              aria-expanded={isPromptOpen}
-              aria-controls="verdict-fix-prompt"
-              onClick={() => setIsPromptOpen((open) => !open)}
-            >
-              {isPromptOpen ? "Hide fix prompt" : "Show fix prompt"}
-            </button>
-          </div>
-          {isPromptOpen && (
-            <div className="verdict-prompt-panel" id="verdict-fix-prompt">
-              <div className="verdict-prompt-panel-label">Paste this</div>
-              <textarea
-                className="prompt-code verdict-prompt"
-                aria-label="Fix prompt"
-                readOnly
-                value={promptArtifact.text}
-              />
-            </div>
-          )}
-        </div>
-      )}
     </section>
   );
 }

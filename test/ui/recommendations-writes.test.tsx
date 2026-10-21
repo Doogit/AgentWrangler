@@ -19,6 +19,37 @@ import { makeEffectCycle } from "./effect-cycle-fixture";
 
 vi.mock("../../src/ui/api/client");
 
+// GoalSelector and the recommendation cards mount on RecommendationsPage and call feedback-client
+// functions on load. Mock the entire module so those calls never touch global fetch
+// (which is sequenced-mocked per-test for the UA3 lifecycle write paths).
+vi.mock("../../src/ui/api/feedback-client", () => ({
+  FeedbackClientError: class FeedbackClientError extends Error {
+    constructor(
+      public readonly status: number,
+      public readonly code: string,
+    ) {
+      super(`Feedback request failed (${code}, HTTP ${status}).`);
+      this.name = "FeedbackClientError";
+    }
+  },
+  listFeedback: vi.fn().mockResolvedValue({ data: [], meta: { ts: 0 } }),
+  setFeedback: vi.fn().mockResolvedValue({ data: {}, meta: { ts: 0 } }),
+  undoFeedback: vi.fn().mockResolvedValue({ data: {}, meta: { ts: 0 } }),
+  deleteFeedback: vi.fn().mockResolvedValue({ data: {}, meta: { ts: 0 } }),
+  getGoal: vi.fn().mockResolvedValue({
+    data: { scope_key: "__global__", goal: "PRESERVE_QUALITY" },
+    meta: { ts: 0 },
+  }),
+  setGoal: vi.fn().mockResolvedValue({
+    data: { scope_key: "__global__", goal: "PRESERVE_QUALITY" },
+    meta: { ts: 0 },
+  }),
+  resetGoal: vi.fn().mockResolvedValue({
+    data: { scope_key: "__global__", goal: "PRESERVE_QUALITY" },
+    meta: { ts: 0 },
+  }),
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.defineProperty(navigator, "clipboard", {
@@ -76,32 +107,28 @@ function trackableRecommendations() {
 
 async function loaded() {
   const result = render(<RecommendationsPage />);
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Show guided prompt" })).toBeTruthy(),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Show guided prompt" }));
-  // The shared scenario also has a D1 copy action. Exercise the D2 card whose
-  // guided prompt we opened, keeping the other family present on the page.
-  fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Copy prompt" }));
+  await waitFor(() => expect(lifecycleCard()).toBeTruthy());
+  // The shared scenario also has a D1 action. Exercise the D2 member's copy.
+  fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Copy instruction" }));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "I completed the change" })).toBeTruthy(),
   );
   fireEvent.click(screen.getByRole("button", { name: "I completed the change" }));
-  expect(screen.getByRole("button", { name: "Track this change" })).toBeTruthy();
+  expect(within(lifecycleCard()).getByRole("button", { name: "Track" })).toBeTruthy();
   return result;
 }
 
 function lifecycleCard(): HTMLElement {
-  const card = screen
-    .getByRole("button", { name: "Hide guided prompt" })
-    .closest<HTMLElement>(".rec-card");
-  if (!card) throw new Error("missing guided recommendation card");
+  const card = Array.from(document.querySelectorAll<HTMLElement>(".rec-card")).find((item) =>
+    item.textContent?.includes("Use /clear between unrelated tasks"),
+  );
+  if (!card) throw new Error("missing D2 recommendation card");
   return card;
 }
 
-async function commit(action: "Track this change" | "Dismiss") {
+async function commit(action: "Track" | "Dismiss") {
   fireEvent.click(within(lifecycleCard()).getByRole("button", { name: action }));
-  const pending = action === "Track this change" ? "Track" : action;
+  const pending = action === "Track" ? "Track" : action;
   expect(screen.getAllByText(`${pending} pending \u2014 Undo`).length).toBeGreaterThan(0);
   await act(async () => {
     vi.advanceTimersByTime(5_000);
@@ -152,7 +179,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     await loaded();
     vi.useFakeTimers();
 
-    await commit("Track this change");
+    await commit("Track");
 
     const alert = saveAlert();
     expect(alert).toBeTruthy();
@@ -192,7 +219,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     await loaded();
     vi.useFakeTimers();
 
-    await commit("Track this change");
+    await commit("Track");
     expect(saveAlert()).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(screen.queryAllByText("Track pending \u2014 Undo")).toHaveLength(0);
@@ -244,7 +271,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     await loaded();
     vi.useFakeTimers();
 
-    await commit("Track this change");
+    await commit("Track");
 
     expect(saveAlert()?.textContent).toContain("Unable to authorize this change");
     expect(tokenAndPostCalls(fetchMock)).toHaveLength(1);
@@ -345,7 +372,7 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     const first = await loaded();
     vi.useFakeTimers();
 
-    fireEvent.click(screen.getByRole("button", { name: "Track this change" }));
+    fireEvent.click(within(lifecycleCard()).getByRole("button", { name: "Track" }));
     expect(screen.getAllByText("Track pending \u2014 Undo").length).toBeGreaterThan(0);
     first.unmount();
     await act(async () => {
@@ -355,15 +382,14 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
 
     vi.useRealTimers();
     render(<RecommendationsPage />);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Show guided prompt" })).toBeTruthy(),
-    );
+    await waitFor(() => expect(lifecycleCard()).toBeTruthy());
     expect(screen.queryByText("Tracking saved")).toBeNull();
     expect(screen.queryByText("Dismissal saved")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("acknowledges a visible D5 limit warning through the existing adopt write", async () => {
+  // uip-6: D5 limit warning is now a slim banner; the old inline Acknowledge/adopt path was removed.
+  it("renders a visible D5 limit warning as a slim calibrate banner", async () => {
     const initial = mockRecommendations();
     const warning = initial.data?.active[0];
     if (!initial.data || !warning) throw new Error("missing recommendation fixture");
@@ -378,42 +404,34 @@ describe("RecommendationsPage \u2014 UA3 lifecycle writes", () => {
     initial.data.active = [];
     initial.data.active_groups = [];
     initial.data.limit_warnings = [d5Warning];
-    const refreshed = structuredClone(initial);
-    if (!refreshed.data) throw new Error("missing refreshed recommendations");
-    refreshed.data.limit_warnings = [];
-    refreshed.data.adopted = [{ ...d5Warning, state: "ADOPTED" }];
-    vi.mocked(client.fetchRecommendations)
-      .mockResolvedValueOnce(initial)
-      .mockResolvedValue(refreshed);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(response(200, { token: "d5-token" }))
-      .mockResolvedValueOnce(response(200));
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(initial);
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<RecommendationsPage />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Acknowledge" })).toBeTruthy());
-    vi.useFakeTimers();
-    expect(screen.getByRole("link", { name: "Calibrate budget hook" }).getAttribute("href")).toBe(
-      "#/settings?section=calibration",
-    );
-    expect(screen.queryByRole("button", { name: "Track this change" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
-    expect(screen.getAllByText("Adopt pending \u2014 Undo").length).toBeGreaterThan(0);
-    await act(async () => {
-      vi.advanceTimersByTime(5_000);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    const { container } = render(<RecommendationsPage />);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "/api/recommendations/adopt",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ rec_id: "rec-d5-warning" }),
-        headers: expect.objectContaining({ "X-AgentWrangler-Token": "d5-token" }),
-      }),
-    );
+    // Wait for the slim banner strip to appear
+    await waitFor(() => expect(container.querySelector(".limit-warning-strip")).not.toBeNull());
+
+    const strip = container.querySelector(".limit-warning-strip");
+
+    // \u26a0 icon present
+    expect(strip?.querySelector(".limit-warning-strip-icon")?.textContent).toContain("\u26a0");
+
+    // "Limit warning {lever}" text
+    const textEl = strip?.querySelector(".limit-warning-strip-text");
+    expect(textEl?.textContent).toContain("Limit warning");
+    expect(textEl?.textContent).toContain(d5Warning.lever);
+
+    // "Calibrate budget hook" link navigates to calibration settings
+    const calibrateLink = strip?.querySelector("a.limit-warning-strip-action") as HTMLAnchorElement;
+    expect(calibrateLink).not.toBeNull();
+    expect(calibrateLink.getAttribute("href")).toBe("#/settings?section=calibration");
+
+    // NO Acknowledge button \u2014 the inline adopt path was removed by uip-6
+    expect(screen.queryByRole("button", { name: "Acknowledge" })).toBeNull();
+
+    // NO adopt fetch \u2014 the banner is purely informational with a link, no write path
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

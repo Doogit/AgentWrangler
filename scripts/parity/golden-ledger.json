@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "frozen_at": "2026-10-09T15:30:00.000Z",
+  "source": "seed",
+  "as_of": "2026-09-28T00:00:00.000Z",
+  "windows": {
+    "7": {
+      "tile_u": 1024280,
+      "causes": {
+        "CONTEXT_TOO_LARGE": 0,
+        "CACHE_REBUILT_MID_SESSION": 1012032,
+        "TOOL_RESULTS_TOO_LARGE": 0,
+        "ALWAYS_LOADED_TOO_BIG": 12248,
+        "MODEL_BIGGER_THAN_NEEDED": 0,
+        "SAME_FILES_REREAD_ACROSS_SESSIONS": 0
+      }
+    },
+    "14": {
+      "tile_u": 1024280,
+      "causes": {
+        "CONTEXT_TOO_LARGE": 0,
+        "CACHE_REBUILT_MID_SESSION": 1012032,
+        "TOOL_RESULTS_TOO_LARGE": 0,
+        "ALWAYS_LOADED_TOO_BIG": 12248,
+        "MODEL_BIGGER_THAN_NEEDED": 0,
+        "SAME_FILES_REREAD_ACROSS_SESSIONS": 0
+      }
+    },
+    "30": {
+      "tile_u": 1024430,
+      "causes": {
+        "CONTEXT_TOO_LARGE": 0,
+        "CACHE_REBUILT_MID_SESSION": 1012032,
+        "TOOL_RESULTS_TOO_LARGE": 0,
+        "ALWAYS_LOADED_TOO_BIG": 12398,
+        "MODEL_BIGGER_THAN_NEEDED": 0,
+        "SAME_FILES_REREAD_ACROSS_SESSIONS": 0
+      }
+    }
+  }
+}

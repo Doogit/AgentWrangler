@@ -1,0 +1,1 @@
+Haiku 5 | [35mAgentWrangler[0m | [36mmain[0m | ctx [32m[----------] 0%[0m | [33m~$12.30[0m 0s

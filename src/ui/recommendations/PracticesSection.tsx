@@ -20,13 +20,14 @@ import type {
   PracticesResult,
 } from "../../detector/practice-registry";
 import { fetchPractices } from "../api/client";
+import AsyncErrorState from "../shell/AsyncErrorState";
 import Chip from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
 import { SkeletonBlock } from "../shell/Skeleton";
 
 type LoadState =
   | { status: "loading" }
-  | { status: "error"; message: string }
+  | { status: "error" }
   | { status: "ok"; value: PracticesResult };
 
 function statusKind(status: PracticeStatus): "PASS" | "ATTENTION" | "NO_DATA" {
@@ -85,7 +86,9 @@ function PracticeRow({ practice }: { practice: PracticeEntry }) {
 
 export default function PracticesSection() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [refreshKey, setRefreshKey] = useState(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an intentional re-fetch trigger
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
@@ -93,13 +96,13 @@ export default function PracticesSection() {
       .then((v) => {
         if (!cancelled) setState({ status: "ok", value: v });
       })
-      .catch((e: unknown) => {
-        if (!cancelled) setState({ status: "error", message: String(e) });
+      .catch(() => {
+        if (!cancelled) setState({ status: "error" });
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   if (state.status === "loading") {
     return (
@@ -112,9 +115,7 @@ export default function PracticesSection() {
   if (state.status === "error") {
     return (
       <div className="practices-section">
-        <div className="banner banner-error" role="alert">
-          <span>Practices unavailable: {state.message}</span>
-        </div>
+        <AsyncErrorState resource="practices" onRetry={() => setRefreshKey((key) => key + 1)} />
       </div>
     );
   }

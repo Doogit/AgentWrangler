@@ -10,6 +10,7 @@ import type { Db } from "../../src/db/open.js";
 import {
   MAX_TAIL_LINE_BYTES,
   type Offset,
+  appendOnlyGrowth,
   fileVersion,
   loadOffset,
   saveOffset,
@@ -176,6 +177,22 @@ describe("tailFileChunk", () => {
     expect(result.newOffset).toBe(oneShot.newOffset);
   });
 
+  it("lineEnds gives the absolute offset past each kept line, skipping blank lines (P2-U4a)", () => {
+    // bytes: \n | a \n | \n \n | é(2) 😀(4) \n | z \n | part
+    fs.writeFileSync(fp, "\na\n\n\né😀\nz\npart");
+    const first = tailFileChunk(fp, null);
+    expect(first.lines).toEqual(["a", "é😀", "z"]);
+    expect(first.lineEnds).toEqual([3, 12, 14]);
+    expect(first.newOffset).toBe(14);
+    const resumed = tailFileChunk(fp, {
+      offset: 3,
+      headHash: first.newHeadHash,
+      fileVersion: fileVersion(fs.statSync(fp)),
+    });
+    expect(resumed.lines).toEqual(["é😀", "z"]);
+    expect(resumed.lineEnds).toEqual([12, 14]);
+  });
+
   it("does not split UTF-8 lines when a chunk ends inside a code point", () => {
     fs.writeFileSync(fp, "a\n😀\nz\n");
     const first = tailFileChunk(fp, null, 3);
@@ -302,6 +319,7 @@ describe("offset store (ingest_offsets)", () => {
       offset: 128,
       headHash: "deadbeef",
       fileVersion: firstVersion,
+      tailHash: null,
     });
     // Upsert overwrites.
     const secondVersion = { size: 256, dev: "1", ino: "2", mtimeMs: 5, ctimeMs: 6 };
@@ -310,6 +328,7 @@ describe("offset store (ingest_offsets)", () => {
       offset: 256,
       headHash: "cafe",
       fileVersion: secondVersion,
+      tailHash: null,
     });
   });
 
@@ -318,6 +337,31 @@ describe("offset store (ingest_offsets)", () => {
       `INSERT INTO ingest_offsets (file_path, byte_offset, file_hash_head, updated_at)
        VALUES (?, ?, ?, ?)`,
     ).run(fp, 128, "deadbeef", "2026-01-01T00:00:00.000Z");
-    expect(loadOffset(db, fp)).toEqual({ offset: 128, headHash: "deadbeef", fileVersion: null });
+    expect(loadOffset(db, fp)).toEqual({
+      offset: 128,
+      headHash: "deadbeef",
+      fileVersion: null,
+      tailHash: null,
+    });
+  });
+});
+
+describe("appendOnlyGrowth (M2 backfill eligibility)", () => {
+  const base = { size: 100, dev: "1", ino: "2", mtimeMs: 10, ctimeMs: 10 };
+
+  it("is true when the same file grew, even with a newer mtime/ctime", () => {
+    // mtimeMs/ctimeMs are intentionally ignored — a grown file always has newer
+    // timestamps, so comparing them would defeat append detection.
+    expect(appendOnlyGrowth(base, { ...base, size: 200, mtimeMs: 99, ctimeMs: 99 })).toBe(true);
+  });
+
+  it("is false for a rotation (new inode), so a rotated prefix is never backfilled", () => {
+    expect(appendOnlyGrowth(base, { ...base, size: 200, ino: "replacement" })).toBe(false);
+    expect(appendOnlyGrowth(base, { ...base, size: 200, dev: "9" })).toBe(false);
+  });
+
+  it("is false when the file did not strictly grow (same-size rewrite or shrink)", () => {
+    expect(appendOnlyGrowth(base, { ...base, size: 100, mtimeMs: 99 })).toBe(false);
+    expect(appendOnlyGrowth(base, { ...base, size: 50 })).toBe(false);
   });
 });

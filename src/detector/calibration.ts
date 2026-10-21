@@ -3,7 +3,8 @@
  *
  * Calibrates the bytes-per-token ratio used by D6 TOOL_RESULT_BLOAT by sampling
  * real tool-result content blocks from the user's own transcripts and counting
- * their tokens via Anthropic's free count_tokens API (no generation, no charge).
+ * their tokens via Anthropic's free count_tokens API (no generation, no charge),
+ * authenticated with the user's own Anthropic API key (OAUTH-1).
  *
  * Privacy gate (opt-in, OFF by default):
  *   Calibration sends sampled tool-result TEXT to Anthropic count_tokens.
@@ -20,7 +21,11 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { loadConfig } from "../daemon/config.js";
+import { resolveScanRoots } from "../daemon/scan-roots.js";
 import type { Db } from "../db/open.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
+import { readAnthropicApiKey } from "../oauth/anthropic-api-key.js";
 import type { TokenCounter } from "../oauth/count-tokens.js";
 import { countTokens } from "../oauth/count-tokens.js";
 
@@ -315,23 +320,28 @@ export async function calibrateBytesPerToken(
     model = row?.model ?? FALLBACK_MODEL;
   }
 
-  // 3. Sample blocks and count tokens.
-  const counter: TokenCounter = opts.counter ?? countTokens;
+  // 3. Sample blocks and count tokens. The default counter needs the user's own
+  // Anthropic API key (OAUTH-1: never the Claude Code OAuth token); read it once.
+  let counter: TokenCounter;
+  if (opts.counter !== undefined) {
+    counter = opts.counter;
+  } else {
+    const key = await readAnthropicApiKey();
+    if (!key.ok) {
+      return {
+        ok: false,
+        reason: "calibration needs an Anthropic API key (set ANTHROPIC_API_KEY)",
+      };
+    }
+    counter = (text, m) => countTokens(text, m, key.data);
+  }
   const sampler: ToolResultSampler = opts.sampler ?? sampleToolResultBlocks;
 
-  // Resolve scan roots: from user_config or caller override.
-  let scanRoots: string[] = opts.scanRoots ?? [];
-  if (scanRoots.length === 0) {
-    const raw = configGet(db, "scan_roots");
-    if (raw !== null) {
-      try {
-        const parsed: unknown = JSON.parse(raw);
-        if (Array.isArray(parsed)) scanRoots = parsed as string[];
-      } catch {
-        // ignore
-      }
-    }
-  }
+  const scanRoots = resolveScanRoots(
+    configGet(db, "scan_roots"),
+    loadConfig().scanRoots,
+    opts.scanRoots,
+  );
 
   // Collect samples (text in memory only — SEC-101).
   const blocks = sampler(scanRoots, { maxSamples: DEFAULT_MAX_SAMPLES });
@@ -360,7 +370,7 @@ export async function calibrateBytesPerToken(
   if (ratios.length < MIN_SAMPLES) {
     return {
       ok: false,
-      reason: `Only ${ratios.length} successful sample(s) — need ≥${MIN_SAMPLES} (check OAuth login or increase scan roots).`,
+      reason: `Only ${ratios.length} successful sample(s) — need ≥${MIN_SAMPLES} (check the API key or increase scan roots).`,
     };
   }
 
@@ -378,6 +388,7 @@ export async function calibrateBytesPerToken(
   const provenance = `calibrated ${date} via count_tokens · model ${effectiveModel} · N=${ratios.length} · median ${ratioStr}`;
 
   // 6. Persist (counts/ratio/provenance only — no text).
+  await awaitDbWriteGate();
   db.transaction(() => {
     configSet(db, "bytes_per_token", String(median));
     configSet(db, "bytes_per_token_measured_at", new Date().toISOString());
@@ -385,4 +396,18 @@ export async function calibrateBytesPerToken(
   })();
 
   return { ok: true, ratio: median, n: ratios.length, model: effectiveModel, provenance };
+}
+
+/** Boot/weekly entry: only remeasure an opted-in ratio that is absent or stale. */
+export async function calibrateBytesPerTokenIfStale(
+  db: Db,
+  opts: Parameters<typeof calibrateBytesPerToken>[1] = {},
+): Promise<CalibrateBytesPerTokenResult | null> {
+  if (configGet(db, "bytes_per_token_calibration_enabled") !== "true") return null;
+  const measuredAt = configGet(db, "bytes_per_token_measured_at");
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+  if (measuredAt !== null && Date.now() - new Date(measuredAt).getTime() < thirtyDaysMs) {
+    return null;
+  }
+  return calibrateBytesPerToken(db, opts);
 }

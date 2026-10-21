@@ -27,8 +27,9 @@ export type HookConfigUpdate = Partial<HookConfig>;
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
   context_window: 200_000,
-  soft_pct: 0.6,
-  hard_pct: 0.8,
+  // Sessions degrade well before the window fills; the urgent stage asks for a commit + handoff.
+  soft_pct: 0.2,
+  hard_pct: 0.3,
   stale_s: 300,
   d7_fail_count: 3,
   d7_window_turns: 10,

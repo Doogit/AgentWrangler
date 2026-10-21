@@ -432,8 +432,6 @@ const routes = (workspaceId: string, sessionId: string): Array<{ name: string; p
   { name: "overview", path: `/api/overview?${encodedWindow}` },
   { name: "workspaces", path: `/api/workspaces?${encodedWindow}` },
   { name: "trends", path: `/api/trends?${encodedWindow}&bucket=day` },
-  { name: "flavor", path: `/api/overview/flavor?${encodedWindow}` },
-  { name: "cache_write", path: `/api/trends/cache-write?${encodedWindow}` },
   { name: "recommendations", path: "/api/recommendations" },
   { name: "live", path: "/api/live" },
   { name: "hot_sessions", path: `/api/hot-sessions?${encodedWindow}` },

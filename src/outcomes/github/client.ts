@@ -13,6 +13,7 @@
 import { fingerprintBranchRef } from "../branch-key.js";
 import { type CheckRunsBody, aggregateCheckConclusion, normalizePRBody } from "../conclusions.js";
 import type { TokenResult } from "./credential.js";
+import type { GhPRPage, GhPRRead, PRPageRequest } from "./pr-page.js";
 
 // ---------------------------------------------------------------------------
 // Response envelope
@@ -32,6 +33,8 @@ export interface GhPR {
   created_at: string;
   merge_commit_sha: string | null;
   head: { sha: string; refKey: string | null };
+  /** GitHub's last-modified time; absent when the payload lacks it. */
+  updated_at?: string;
 }
 
 export interface GhCheckRun {
@@ -68,6 +71,21 @@ export interface GithubClient {
     repo: string,
     prNumber: number,
   ): Promise<GhResult<GhReviewThread[]>>;
+  /**
+   * P0-U13 S3: one batched GraphQL page of PRs with body, commits, threads and
+   * checks. Optional: a client without it keeps the per-PR REST reads.
+   */
+  listPRPage?(owner: string, repo: string, request: PRPageRequest): Promise<GhResult<GhPRPage>>;
+  /**
+   * P0-U13 S3b: body + first 100 commits for several PRs in one aliased GraphQL
+   * call. PRs it cannot return are absent from the map. Optional: a client
+   * without it keeps the per-PR REST reads.
+   */
+  listPRReads?(
+    owner: string,
+    repo: string,
+    numbers: readonly number[],
+  ): Promise<GhResult<Map<number, GhPRRead>>>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -105,6 +123,7 @@ function projectPR(value: unknown): GhPR | null {
     created_at: value.created_at,
     merge_commit_sha: value.merge_commit_sha,
     head: { sha: value.head.sha, refKey: fingerprintBranchRef(value.head.ref) },
+    ...(typeof value.updated_at === "string" ? { updated_at: value.updated_at } : {}),
   };
 }
 

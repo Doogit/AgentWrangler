@@ -1,0 +1,28 @@
+{
+  "id": "B3",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss-creation",
+      "target_constant": "B3_CACHE_CREATION_THRESHOLD",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-ratio-low",
+      "target_constant": "RESUME_CONTEXT_MATCH_LOW",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-ratio-high",
+      "target_constant": "RESUME_CONTEXT_MATCH_HIGH",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-read-fall",
+      "target_constant": "COLLAPSE_READ_FALL_SHARE",
+      "expect": "silent"
+    },
+    { "fixture": "near-miss-ttl", "target_constant": "PREVIOUS_SESSION_TTL", "expect": "silent" },
+    { "fixture": "near-miss-avoidable", "target_constant": "AVOIDABLE_TOKENS", "expect": "silent" }
+  ]
+}

@@ -106,6 +106,17 @@ describe("getGlobalOverview", () => {
 });
 
 describe("listWorkspaces", () => {
+  it("bounds the recent-stage response without changing the full result", () => {
+    const first = listWorkspaces(WINDOW, { limit: 1 });
+    expect(first.data?.items.map((row) => row.workspace_id)).toEqual(["ws-alpha"]);
+    expect(first.data?.next_cursor).not.toBeNull();
+    expect(
+      listWorkspaces(WINDOW, { limit: 1, after: first.data?.next_cursor ?? "" }).data?.items.map(
+        (row) => row.workspace_id,
+      ),
+    ).toEqual(["ws-beta"]);
+    expect(listWorkspaces(WINDOW).data?.items).toHaveLength(2);
+  });
   it("orders by cost desc with correct shares and $/turn", () => {
     const res = listWorkspaces(WINDOW);
     const items = res.data?.items ?? [];

@@ -26,7 +26,6 @@ import {
   D4_MISMATCH_MIN_CONTEXT_TOKENS,
   D4_MISMATCH_MIN_FRACTION,
   D4_OPUS_MIN_TURNS,
-  D4_REDUCTION_FRACTION,
 } from "../../src/detector/savings.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
@@ -62,7 +61,7 @@ function insOpusTurn(
   inputTokens: number,
   outputTokens: number,
   ts = "2026-01-02T00:00:00.000Z",
-  options: { isSidechain?: boolean; provisional?: boolean } = {},
+  options: { isSidechain?: boolean; provisional?: boolean; agentId?: string } = {},
 ): void {
   // Ensure workspace exists.
   db.prepare(
@@ -85,9 +84,9 @@ function insOpusTurn(
         is_sidechain, input_tokens, output_tokens,
         cache_read_tokens, cache_write_5m, cache_write_1h, cache_write_other,
         tool_result_bytes, pricing_snapshot_id, cost_equiv_u, cost_claim,
-        provisional, parser_version)
+        provisional, parser_version, agent_id)
      VALUES (?, ?, ?, ?, 'claude-opus-4', ?, ?, ?, 0, 0, 0, 0,
-             NULL, 'snap-opus', 0, 'LIST_EQUIV', ?, 'test-v1')`,
+             NULL, 'snap-opus', 0, 'LIST_EQUIV', ?, 'test-v1', ?)`,
   ).run(
     msgId,
     sessionId,
@@ -97,22 +96,25 @@ function insOpusTurn(
     inputTokens,
     outputTokens,
     options.provisional ? 1 : 0,
+    options.agentId ?? null,
   );
 }
 
-/** Insert N mismatch Opus turns (high context, low output) for workspaceId. */
-function insMismatchTurns(n: number, workspaceId: string): void {
+/** Insert N mismatch turns (high context, low output) from one Opus lookup subagent. */
+function insMismatchTurns(n: number, workspaceId: string, agentId = `lookup-${workspaceId}`): void {
   for (let i = 0; i < n; i++) {
     insOpusTurn(
-      `msg-d4-mismatch-${workspaceId}-${i}`,
+      `msg-d4-mismatch-${agentId}-${i}`,
       workspaceId,
       D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000, // context > threshold
       Math.floor(D4_MISMATCH_MAX_OUTPUT_TOKENS / 2), // output < threshold
+      "2026-01-02T00:00:00.000Z",
+      { isSidechain: true, agentId },
     );
   }
 }
 
-/** Insert N legitimate Opus turns (large output — not a mismatch). */
+/** Insert N legitimate turns (large output) from one Opus working subagent. */
 function insLegitTurns(n: number, workspaceId: string): void {
   for (let i = 0; i < n; i++) {
     insOpusTurn(
@@ -120,6 +122,8 @@ function insLegitTurns(n: number, workspaceId: string): void {
       workspaceId,
       D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000, // high context
       5_000, // large output — Opus is doing real work
+      "2026-01-02T00:00:00.000Z",
+      { isSidechain: true, agentId: `work-${workspaceId}` },
     );
   }
 }
@@ -151,13 +155,12 @@ describe("D4 per-model cap attribution", () => {
     runDetectors(db, { now: NOW });
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
-    const evidence = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const evidence = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
 
-    expect(evidence.withheld).toBe(true);
-    // Reason must reflect the actual observed utilization numbers, not a static string.
-    expect(evidence.withheld_reason).toMatch(/0\.72/);
-    expect(String(evidence.withheld_reason)).toMatch(/\d+(\.\d+)?/);
-    expect(evidence.title).toMatch(/^Model change is not recommended:/);
+    expect(evidence.workspace_id).toBe("ws-sonnet-bind");
+    expect(evidence.cap_attribution).toBe("sonnet_binds");
+    expect(evidence).not.toHaveProperty("withheld_reason");
+    expect(evidence).not.toHaveProperty("title");
     // Withheld recs never carry a crisp savings headline.
     expect(r.modeled_savings_u_per_wk).toBeNull();
   });
@@ -174,8 +177,10 @@ describe("D4 per-model cap attribution", () => {
     runDetectors(db, { now: NOW });
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
-    const evidence = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const evidence = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
 
+    expect(evidence.workspace_id).toBe("ws-opus-bind");
+    // U7: the cap read is now surfaced in the payload (it was computed and dropped).
     expect(evidence.cap_attribution).toBe("all_models_or_opus_binds");
     expect(evidence.withheld).toBeUndefined();
   });
@@ -186,7 +191,7 @@ describe("D4 per-model cap attribution", () => {
     runDetectors(db, { now: NOW });
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
-    const evidence = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const evidence = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
 
     expect(evidence.withheld).toBeUndefined();
     expect(evidence.cap_attribution).toBeUndefined();
@@ -204,10 +209,39 @@ describe("D4 per-model cap attribution", () => {
     runDetectors(db, { now: NOW });
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
-    const evidence = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const evidence = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
 
     expect(evidence.withheld).toBeUndefined();
     expect(evidence.cap_attribution).toBeUndefined();
+  });
+
+  it("rec output ignores captured_at (while fresh) and five_hour_util (recs ingest mark relies on this)", () => {
+    const evidenceFor = (extra: Record<string, unknown>): string => {
+      db.close();
+      db = createInMemoryFixtureDb();
+      db.prepare(
+        `INSERT OR IGNORE INTO pricing_snapshots
+           (snapshot_id, model_tier, unit_prices_json, captured_at, stale_after)
+         VALUES ('snap-opus', 'opus', ?, '2026-01-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z')`,
+      ).run(JSON.stringify([15, 75, 1.5, 18.75, 30]));
+      insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-mark");
+      seedPerModelSnapshot({
+        captured_at: NOW.toISOString(),
+        seven_day_util: 0.72,
+        five_hour_util: 0.1,
+        per_model: [{ model: "claude-sonnet-4", utilization: 0.72 }],
+        ...extra,
+      });
+      runDetectors(db, { now: NOW });
+      const r = d4Recs()[0];
+      if (!r) throw new Error("expected D4 rec");
+      return JSON.stringify(r);
+    };
+    const base = evidenceFor({});
+    expect(base).toContain("sonnet_binds");
+    expect(evidenceFor({ captured_at: "2026-01-07T06:00:00.000Z", five_hour_util: 0.9 })).toBe(
+      base,
+    );
   });
 
   it("fails open for malformed snapshot JSON", () => {
@@ -221,7 +255,7 @@ describe("D4 per-model cap attribution", () => {
     runDetectors(db, { now: NOW });
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
-    const evidence = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const evidence = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
 
     expect(evidence.withheld).toBeUndefined();
     expect(evidence.cap_attribution).toBeUndefined();
@@ -356,19 +390,14 @@ describe("D4 — evidence carries required fields", () => {
     runDetectors(db, { now: NOW });
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
 
     expect(ev.workspace_id).toBe("ws-ev");
     expect(typeof ev.total_opus_turns_per_week).toBe("number");
     expect(typeof ev.mismatch_turns_per_week).toBe("number");
     expect(typeof ev.mismatch_fraction).toBe("number");
-    expect(ev.min_context_tokens_threshold).toBe(D4_MISMATCH_MIN_CONTEXT_TOKENS);
-    expect(ev.max_output_tokens_threshold).toBe(D4_MISMATCH_MAX_OUTPUT_TOKENS);
-    expect(ev.mismatch_fraction_threshold).toBe(D4_MISMATCH_MIN_FRACTION);
-    expect(ev.min_opus_turns_threshold).toBe(D4_OPUS_MIN_TURNS);
-    expect(ev.reduction_fraction).toBe(D4_REDUCTION_FRACTION);
-    expect(Array.isArray(ev.steps)).toBe(true);
-    expect((ev.steps as string[]).length).toBeGreaterThan(0);
+    expect(typeof ev.avg_input_tokens).toBe("number");
+    expect(typeof ev.avg_output_tokens).toBe("number");
   });
 
   it("evidence.mismatch_fraction matches the actual ratio", () => {
@@ -378,18 +407,19 @@ describe("D4 — evidence carries required fields", () => {
     runDetectors(db, { now: NOW });
     const evRow = d4Recs()[0];
     if (!evRow) throw new Error("expected D4 rec");
-    const ev = JSON.parse(evRow.evidence_json as string) as Record<string, unknown>;
+    const ev = JSON.parse(evRow.evidence_json as string).facts as Record<string, unknown>;
     expect(ev.mismatch_turns_per_week).toBe(5);
     expect(ev.total_opus_turns_per_week).toBe(5);
     expect(ev.mismatch_fraction).toBe(1.0);
   });
 
-  it("counts only non-provisional premium sidechain turns in the half-open window", () => {
+  it("counts only non-provisional Opus subagents in the half-open window", () => {
     const workspaceId = "ws-sidechain";
     insMismatchTurns(D4_OPUS_MIN_TURNS, workspaceId);
 
     insOpusTurn("msg-sidechain-in-window", workspaceId, 1_000, 1_000, "2026-01-07T23:59:59.999Z", {
       isSidechain: true,
+      agentId: "agent-in-window",
     });
     insOpusTurn(
       "msg-sidechain-provisional",
@@ -397,18 +427,120 @@ describe("D4 — evidence carries required fields", () => {
       1_000,
       1_000,
       "2026-01-07T23:59:59.999Z",
-      { isSidechain: true, provisional: true },
+      { isSidechain: true, provisional: true, agentId: "agent-provisional" },
     );
     insOpusTurn("msg-sidechain-at-upper-bound", workspaceId, 1_000, 1_000, NOW.toISOString(), {
       isSidechain: true,
+      agentId: "agent-upper-bound",
     });
 
     runDetectors(db, { now: NOW });
     const row = d4Recs()[0];
     if (!row) throw new Error("expected D4 rec");
-    const evidence = JSON.parse(row.evidence_json as string) as Record<string, unknown>;
+    const evidence = JSON.parse(row.evidence_json as string).facts as Record<string, unknown>;
 
-    expect(evidence.sidechain_premium_turns).toBe(1);
+    expect(evidence.opus_subagent_count).toBe(2);
+    expect(evidence.lookup_subagent_count).toBe(1);
+    expect(evidence.total_opus_turns_per_week).toBe(D4_OPUS_MIN_TURNS + 1);
+  });
+});
+
+/** An Edit tool call in the workspace's D4 session: marks the main thread as an editing session. */
+function insEditEvent(workspaceId: string): void {
+  db.prepare(
+    `INSERT INTO tool_events (event_id, session_id, ts, tool_name)
+     VALUES (?, ?, '2026-01-02T00:00:00.000Z', 'Edit')`,
+  ).run(`evt-edit-${workspaceId}`, `sess-${workspaceId}-d4`);
+}
+
+describe("D4 — lookup agents (U7: 80% of turns, main thread included)", () => {
+  it("ignores main-thread turns in a session that edits files", () => {
+    for (let i = 0; i < 20; i++) {
+      insOpusTurn(`msg-main-${i}`, "ws-main", D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000, 100);
+    }
+    insEditEvent("ws-main");
+    const statuses = runDetectors(db, { now: NOW });
+    expect(statuses.find((s) => s.detector_id === "D4")?.status).toBe("INACTIVE");
+    expect(d4Recs()).toHaveLength(0);
+  });
+
+  it("fires on a lookup-shaped main thread in a session with no Edit/Write", () => {
+    for (let i = 0; i < 20; i++) {
+      insOpusTurn(`msg-main-${i}`, "ws-main-ro", D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000, 100);
+    }
+    runDetectors(db, { now: NOW });
+    const r = d4Recs()[0];
+    if (!r) throw new Error("expected D4 rec");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.main_thread_turns).toBe(20);
+    expect(ev.lookup_subagent_count).toBe(1);
+  });
+
+  it("keeps an agent in when only its cold first turn is small (>= 80% lookup-shaped)", () => {
+    // Shape of the real data: every agent opens with a cold, small-context turn, which the old
+    // every-turn rule used to disqualify (it kept 1 of 26 agents).
+    for (let a = 0; a < 3; a++) {
+      const agentId = `agent-cold-${a}`;
+      insOpusTurn(`msg-cold-${a}`, "ws-cold", 1_000, 100, "2026-01-02T00:00:00.000Z", {
+        isSidechain: true,
+        agentId,
+      });
+      for (let i = 0; i < 4; i++) {
+        insOpusTurn(
+          `msg-cold-${a}-${i}`,
+          "ws-cold",
+          D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000,
+          100,
+          "2026-01-02T00:00:00.000Z",
+          { isSidechain: true, agentId },
+        );
+      }
+    }
+    runDetectors(db, { now: NOW });
+    const r = d4Recs()[0];
+    if (!r) throw new Error("expected D4 rec");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.lookup_subagent_count).toBe(3);
+    expect(ev.total_opus_turns_per_week).toBe(15);
+    expect(ev.mismatch_turns_per_week).toBe(15);
+  });
+
+  it("keeps a subagent out when too many of its turns wrote a lot", () => {
+    insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-mixed", "agent-mixed");
+    for (let i = 0; i < 2; i++) {
+      insOpusTurn(
+        `msg-mixed-edit-${i}`,
+        "ws-mixed",
+        D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000,
+        D4_MISMATCH_MAX_OUTPUT_TOKENS + 1,
+        "2026-01-02T00:00:00.000Z",
+        { isSidechain: true, agentId: "agent-mixed" },
+      );
+    }
+    runDetectors(db, { now: NOW });
+    expect(d4Recs()).toHaveLength(0);
+  });
+
+  it("keeps a subagent out when too many of its turns read a small context", () => {
+    insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-small", "agent-small");
+    for (let i = 0; i < 2; i++) {
+      insOpusTurn(`msg-small-ctx-${i}`, "ws-small", 1_000, 100, "2026-01-02T00:00:00.000Z", {
+        isSidechain: true,
+        agentId: "agent-small",
+      });
+    }
+    runDetectors(db, { now: NOW });
+    expect(d4Recs()).toHaveLength(0);
+  });
+
+  it("does not fire when the saving is under 0.25% of the workspace's 7-day spend", () => {
+    insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-tiny");
+    // The workspace spent $1000 (priced work) in the window; the modeled saving is about $2.
+    db.prepare("UPDATE turns SET cost_equiv_u = 1000000000 WHERE message_id = ?").run(
+      "msg-d4-mismatch-lookup-ws-tiny-0",
+    );
+    runDetectors(db, { now: NOW });
+    expect(d4Recs()).toHaveLength(0);
   });
 });
 
@@ -422,10 +554,10 @@ describe("D4 — modeled formula", () => {
     const r = d4Recs()[0];
     if (!r) throw new Error("expected D4 rec");
     const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-    expect(formula.model).toBe("D4_MODEL_MISMATCH_V1");
+    expect(formula.formula_id).toBe("D4_MODEL_MISMATCH_V1");
   });
 
-  it("formula inputs include reduction_fraction as a labeled value", () => {
+  it("formula inputs contain only registered measured facts", () => {
     insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-formula");
 
     runDetectors(db, { now: NOW });
@@ -434,13 +566,12 @@ describe("D4 — modeled formula", () => {
     const formula = JSON.parse(fiRow.modeled_formula_json as string) as Record<string, unknown>;
     expect(formula.inputs).toBeDefined();
     const inputs = formula.inputs as Record<string, unknown>;
-    expect(inputs.reduction_fraction).toBe(D4_REDUCTION_FRACTION);
     expect(typeof inputs.avg_input_tokens).toBe("number");
     expect(typeof inputs.avg_output_tokens).toBe("number");
     expect(typeof inputs.mismatch_turns_per_week).toBe("number");
   });
 
-  it("ADVISORY-GATED: modeled_savings headline is suppressed; diagnostic figure kept in evidence", () => {
+  it("ADVISORY-GATED: modeled_savings headline is suppressed", () => {
     insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-savings");
 
     runDetectors(db, { now: NOW });
@@ -449,47 +580,49 @@ describe("D4 — modeled formula", () => {
 
     // W0.3 advisory gate: no crisp $/wk headline emitted from transcripts alone.
     expect(r.modeled_savings_u_per_wk).toBeNull();
-    // Formula is retained but marked ADVISORY (diagnostic, not a headline).
-    const formula = JSON.parse(r.modeled_formula_json as string) as {
-      kind?: string;
-      result_usd_per_wk?: number;
-      inputs: {
-        avg_input_tokens: number;
-        avg_output_tokens: number;
-        mismatch_turns_per_week: number;
-        opus_input_price_usd_per_mtok: number;
-        opus_output_price_usd_per_mtok: number;
-        sonnet_input_price_usd_per_mtok: number;
-        sonnet_output_price_usd_per_mtok: number;
-        reduction_fraction: number;
-      };
-    };
-    expect(formula.kind).toBe("ADVISORY");
-    // FIX 3: result_usd_per_wk must be absent from the advisory formula so no
-    // consumer can resurface the suppressed crisp figure.
-    expect(formula.result_usd_per_wk).toBeUndefined();
+    const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
+    expect(formula.formula_id).toBe("D4_MODEL_MISMATCH_V1");
 
-    // The lever is conditional on which cap binds (references /usage).
-    expect((r.lever as string).toLowerCase()).toContain("/usage");
+    // P3.1 review 1 (R1.12): the card shows no limits, so its title does not promise them.
+    expect((r.lever as string).toLowerCase()).not.toContain("usage limits");
 
-    // The computed figure survives as diagnostic evidence, matching the formula inputs.
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.advisory).toBe(true);
-    expect(ev.requires_usage_cap_data).toBe(true);
-    const diagnostic = ev.diagnostic_savings_u_per_wk_if_all_models_cap_binds as number;
-    expect(typeof diagnostic).toBe("number");
-    expect(diagnostic > 0).toBe(true);
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev).not.toHaveProperty("diagnostic_savings_u_per_wk_if_all_models_cap_binds");
+    expect(ev).not.toHaveProperty("requires_usage_cap_data");
+  });
 
-    const inp = formula.inputs;
-    const perTurnSavings =
-      inp.avg_input_tokens *
-        (inp.opus_input_price_usd_per_mtok - inp.sonnet_input_price_usd_per_mtok) +
-      inp.avg_output_tokens *
-        (inp.opus_output_price_usd_per_mtok - inp.sonnet_output_price_usd_per_mtok);
-    const computedU = Math.round(
-      perTurnSavings * inp.mismatch_turns_per_week * inp.reduction_fraction,
-    );
-    expect(computedU).toBe(diagnostic);
+  it("P2 estimate prices only the lookup subagents' turns (D4 knob, AV 0.5)", () => {
+    insMismatchTurns(D4_OPUS_MIN_TURNS, "ws-savings");
+    // Main-thread lookup-shaped turns in an editing session are out of scope and add nothing.
+    insEditEvent("ws-savings");
+    for (const i of [0, 1]) {
+      insOpusTurn(
+        `msg-d4-main-${i}`,
+        "ws-savings",
+        D4_MISMATCH_MIN_CONTEXT_TOKENS + 10_000,
+        Math.floor(D4_MISMATCH_MAX_OUTPUT_TOKENS / 2),
+      );
+    }
+
+    runDetectors(db, { now: NOW });
+    const r = d4Recs()[0];
+    if (!r) throw new Error("expected D4 rec");
+    expect(r.modeled_savings_u_per_wk).toBeNull();
+
+    // Hand-computed per subagent turn vs the sonnet-5 target (LIST [2,10]; PRICE-O55-F1, was
+    // sonnet-4): 60,000 in x (15 - 2) + 250 out x (75 - 10) = 796,250 uUSD differential,
+    // x 0.5 AV = 398,125. Five turns = 1,990,625.
+    const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
+    expect(formula.estimate).toMatchObject({ basis: "E", rank_value_u_per_wk: 1_990_625 });
+
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.mismatch_turns_per_week).toBe(D4_OPUS_MIN_TURNS);
+    expect(ev.session_ids).toEqual(["sess-ws-savings-d4"]);
+    expect(
+      db
+        .prepare("SELECT COUNT(*) AS n FROM sessions WHERE session_id = ?")
+        .get("sess-ws-savings-d4"),
+    ).toEqual({ n: 1 });
   });
 });
 

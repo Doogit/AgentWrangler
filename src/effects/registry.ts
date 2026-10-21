@@ -3,7 +3,8 @@ import type { RegisteredHandler } from "./types.js";
 const commonSessionEligibility =
   "RECONCILED sessions in frozen scope with last_turn_at in half-open window; non-provisional evidence only";
 
-export const EFFECT_HANDLERS: readonly RegisteredHandler[] = [
+/** Append-only implementation archive used to execute persisted cycles. */
+export const FROZEN_EFFECT_METHODS: readonly RegisteredHandler[] = [
   {
     detectorId: "D1",
     aliases: ["avg_context_per_turn", "SOURCE_CONTEXT_TOKENS", "context_source_tokens"],
@@ -177,7 +178,8 @@ export const EFFECT_HANDLERS: readonly RegisteredHandler[] = [
   },
   {
     detectorId: "D8",
-    aliases: ["cache_read_to_creation_ratio"],
+    // Retired from new cycles by P3.2-F3: its alias moved to d8-idle-rewrite-tokens.
+    aliases: [],
     target: {
       metricId: "d8-cache-ratio",
       methodVersion: "d8-cache-ratio-v2",
@@ -202,7 +204,191 @@ export const EFFECT_HANDLERS: readonly RegisteredHandler[] = [
       { guardrailId: "completion-repair", methodVersion: "esf3-pending", unit: "outcome" },
     ],
   },
+  {
+    // P3.2-F3: measures what D8 prices (idle re-write creation), not the read/creation ratio.
+    detectorId: "D8",
+    // The D8 descriptor's target_metric; kept so cards and tracking resolve to this method.
+    aliases: ["cache_read_to_creation_ratio"],
+    target: {
+      metricId: "d8-idle-rewrite-tokens",
+      methodVersion: "d8-idle-rewrite-tokens-v1",
+      unit: "tokens",
+      sampleUnit: "eligible turn",
+      aggregation:
+        "sum creation of turns meeting the D8 condition (cacheThreadSteps: gap > thread TTL, creation >= 50k, reads < 0.2 x creation) / eligible turns",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -15,
+      worseningThreshold: 15,
+      eligibleDefinition: `${commonSessionEligibility}; turn ts in window; non-sidechain; same-session history before the window sets each turn's predecessor`,
+      excludedDefinition: "LIVE, provisional, sidechain, synthetic, or out-of-window turns",
+      denominatorDefinition: "eligible turns",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      {
+        guardrailId: "interruption-burden",
+        methodVersion: "unsupported-v1",
+        unit: "interruptions",
+      },
+      { guardrailId: "completion-repair", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
+  {
+    detectorId: "B2",
+    // The B2 descriptor's target_metric. B1 shares it but has no handler: lookups are per detector.
+    aliases: ["cache_read_tokens"],
+    target: {
+      metricId: "b2-cold-resume-tokens",
+      methodVersion: "b2-cold-resume-tokens-v1",
+      unit: "tokens",
+      sampleUnit: "eligible turn",
+      aggregation:
+        "sum previous-turn cache reads over B2 pairs (gap > 1h, previous reads > 20k, current reads < 10%) / eligible turns",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -15,
+      worseningThreshold: 15,
+      eligibleDefinition: `${commonSessionEligibility}; turn ts in window; non-sidechain; same-session history before the window sets each turn's predecessor`,
+      excludedDefinition: "LIVE, provisional, sidechain, synthetic, or out-of-window turns",
+      denominatorDefinition: "eligible turns",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      { guardrailId: "completion-repair", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
+  {
+    detectorId: "D11",
+    aliases: ["shell_error_rate"],
+    target: {
+      metricId: "d11-shell-error-rate",
+      methodVersion: "d11-shell-error-rate-v1",
+      unit: "ratio",
+      sampleUnit: "shell call",
+      aggregation: "error shell calls / all shell calls",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -20,
+      worseningThreshold: 20,
+      eligibleDefinition: `${commonSessionEligibility}; main-thread non-provisional owners and events in window`,
+      excludedDefinition:
+        "LIVE, sidechain, provisional, missing or ambiguous owner, out-of-window evidence",
+      denominatorDefinition: "eligible Bash and PowerShell calls",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      { guardrailId: "reported-repair-usefulness", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
+  {
+    detectorId: "C5",
+    aliases: ["same_error_loop_count"],
+    target: {
+      metricId: "c5-same-error-loop-count",
+      methodVersion: "c5-same-error-loop-count-v1",
+      unit: "loops per 100 sessions",
+      sampleUnit: "session",
+      aggregation:
+        "100 * identical-error clusters of at least 3 / eligible sessions; cluster by session, tool, normalized retained error text (legacy class fallback), classifier tool-error-1",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -20,
+      worseningThreshold: 20,
+      eligibleDefinition: `${commonSessionEligibility}; main-thread non-provisional owners and events in window`,
+      excludedDefinition:
+        "LIVE, sidechain, provisional, missing or ambiguous owner, out-of-window evidence",
+      denominatorDefinition: "distinct eligible sessions, including quiet sessions",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      { guardrailId: "reported-repair-usefulness", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
+  {
+    // P3.A (d), operator OK 2026-09-28. The guard stays strict, so a guard card counts calls in the
+    // watched shapes whether blocked or not: loosening the guard cannot read as a fix.
+    detectorId: "C9",
+    aliases: ["denial_friction_count"],
+    target: {
+      metricId: "c9-denial-friction",
+      methodVersion: "c9-denial-friction-v1",
+      unit: "calls per 100 sessions",
+      sampleUnit: "session",
+      aggregation:
+        "100 * counted calls / eligible sessions. HOOK_BLOCK: Bash and PowerShell calls whose command has a guard shape in the frozen scope.guardShapes, blocked or not (OTHER never counts). DENY_RULE / USER_REJECTED: non-interrupt main-thread denial events of the scope's kind",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -20,
+      worseningThreshold: 20,
+      eligibleDefinition: `${commonSessionEligibility}; main-thread non-provisional owners and events in window`,
+      excludedDefinition:
+        "LIVE, sidechain, provisional, missing or ambiguous owner, out-of-window evidence; shell calls whose command cannot be read",
+      denominatorDefinition: "distinct eligible sessions, including quiet sessions",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+    },
+    guardrails: [
+      { guardrailId: "reported-repair-usefulness", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
+  {
+    // P3.A (d), operator OK 2026-09-28. A flat rate over the card's outlier tools, frozen at
+    // tracking, in every workspace like the card. Dropping a tool reads as too few calls, not a fix.
+    detectorId: "C1",
+    aliases: ["tool_error_rate"],
+    target: {
+      metricId: "c1-tool-error-rate",
+      methodVersion: "c1-tool-error-rate-v1",
+      unit: "errors per 100 calls",
+      sampleUnit: "tool call",
+      aggregation:
+        "100 * failed calls / calls of the tools in the frozen scope.tools. Failed = ERROR or TEST_FAIL and not a benign failure (C1's own rule)",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -20,
+      worseningThreshold: 20,
+      eligibleDefinition: `${commonSessionEligibility}; main-thread non-provisional owners and events in window; all workspaces`,
+      excludedDefinition:
+        "LIVE, sidechain, provisional, missing or ambiguous owner, out-of-window evidence",
+      denominatorDefinition: "eligible calls of the frozen tools",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+      minimumCalls: 50,
+    },
+    guardrails: [
+      { guardrailId: "reported-repair-usefulness", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
+  {
+    // P3.A (d), operator OK 2026-09-28. Bytes from the card's lead file, pinned at tracking, per
+    // session: smaller reads, a summary, a split file or no reads at all all lower it.
+    detectorId: "A1",
+    aliases: ["tool_result_bytes"],
+    target: {
+      metricId: "a1-file-result-bytes",
+      methodVersion: "a1-file-result-bytes-v1",
+      unit: "result bytes per session",
+      sampleUnit: "session",
+      aggregation:
+        "Sum of result_bytes of calls (any tool, any size) whose file matches the frozen scope.files / eligible sessions",
+      deltaSemantics: "RELATIVE_PERCENT",
+      improvementThreshold: -20,
+      worseningThreshold: 20,
+      eligibleDefinition: `${commonSessionEligibility}; main-thread non-provisional owners and events in window; card workspace`,
+      excludedDefinition:
+        "LIVE, sidechain, provisional, missing or ambiguous owner, out-of-window evidence, result size not recorded",
+      denominatorDefinition: "eligible main-thread sessions in the workspace",
+      boundaryRule: "[from,to)",
+      minimumSessions: 10,
+      minimumBaselineCalls: 20,
+    },
+    guardrails: [
+      { guardrailId: "reported-repair-usefulness", methodVersion: "esf3-pending", unit: "outcome" },
+    ],
+  },
 ] as const;
+
+/** Active selection view. Entries may retire without deleting their frozen implementation. */
+export const EFFECT_HANDLERS: readonly RegisteredHandler[] = FROZEN_EFFECT_METHODS;
 
 export function findHandler(
   detectorId: string,
@@ -214,6 +400,29 @@ export function findHandler(
       candidate.detectorId === detectorId &&
       (candidate.target.metricId === targetMetric || candidate.aliases.includes(targetMetric)) &&
       (methodVersion === undefined || methodVersion === candidate.target.methodVersion),
+  );
+  return handler ?? null;
+}
+
+/**
+ * Resolves an already-frozen implementation. This archive is deliberately
+ * independent from active recommendation selection: removing an active
+ * selector must not change an in-flight cycle's measurement semantics.
+ */
+export function findFrozenHandler(
+  detectorId: string,
+  metricId: string,
+  methodVersion: string,
+  target: unknown,
+  guardrails: unknown,
+): RegisteredHandler | null {
+  const handler = FROZEN_EFFECT_METHODS.find(
+    (candidate) =>
+      candidate.detectorId === detectorId &&
+      candidate.target.metricId === metricId &&
+      candidate.target.methodVersion === methodVersion &&
+      JSON.stringify(candidate.target) === JSON.stringify(target) &&
+      JSON.stringify(candidate.guardrails) === JSON.stringify(guardrails),
   );
   return handler ?? null;
 }

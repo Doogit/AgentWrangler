@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "note": "O-3 baseline (P0-U11). A test fails when any counter exceeds baseline by more than 10%.",
+  "scenarios": {
+    "append-1000-events": {
+      "statementsPrepared": 8,
+      "statementExecutions": 6322,
+      "rowsStepped": 23629,
+      "bytesParsed": 338292
+    },
+    "w0-walk": {
+      "statementsPrepared": 163,
+      "statementExecutions": 159,
+      "rowsStepped": 463,
+      "bytesParsed": 0
+    },
+    "one-get-per-route": {
+      "statementsPrepared": 478,
+      "statementExecutions": 471,
+      "rowsStepped": 1403,
+      "bytesParsed": 0
+    }
+  },
+  "parked": {}
+}

@@ -11,7 +11,7 @@ import type Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "../../src/daemon/http.js";
 import type { UsageReader } from "../../src/oauth/usage.js";
-import { getBurnStatus } from "../../src/query/api/burn-status.js";
+import { _resetBurnStatusLastGood, getBurnStatus } from "../../src/query/api/burn-status.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
@@ -46,8 +46,16 @@ beforeAll(async () => {
     }),
   );
 });
-beforeEach(() => setQueryDb(db));
-afterEach(() => resetQueryDb());
+beforeEach(() => {
+  setQueryDb(db);
+  _resetBurnStatusLastGood();
+  // OV-1: last-good now also persists in user_config; start each test without it.
+  db.prepare("DELETE FROM user_config WHERE key = 'usage_last_good'").run();
+});
+afterEach(() => {
+  resetQueryDb();
+  _resetBurnStatusLastGood();
+});
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   db.close();
@@ -175,5 +183,47 @@ describe("getBurnStatus per-model snapshot persistence", () => {
     const envelope = await getBurnStatus(reader);
     expect(envelope.data?.available).toBe(false);
     expect(readSnapshot()).toBe("PRIOR");
+  });
+});
+
+describe("getBurnStatus last-good across a daemon restart (OV-1)", () => {
+  const good =
+    (five: number): UsageReader =>
+    () =>
+      Promise.resolve({
+        ok: true,
+        data: {
+          five_hour: { utilization: five, resets_at: "2026-09-03T00:00:00Z" },
+          seven_day: { utilization: 0.4, resets_at: "2026-09-09T00:00:00Z" },
+          per_model: [{ model: "opus", utilization: 0.5 }],
+        },
+      });
+  const rateLimited: UsageReader = () =>
+    Promise.resolve({ ok: false, reason: "rate limited", status: 429 });
+
+  it("serves the persisted last good values, stale with their asOf, after a restart", async () => {
+    const first = await getBurnStatus(good(0.25));
+    _resetBurnStatusLastGood(); // restart: in-memory copy gone
+
+    const envelope = await getBurnStatus(rateLimited);
+    expect(envelope.data?.available).toBe(true);
+    expect(envelope.data?.stale).toBe(true);
+    expect(envelope.data?.asOf).toBe(first.data?.asOf);
+    expect(envelope.data?.five_hour).toEqual({
+      utilization: 0.25,
+      resets_at: "2026-09-03T00:00:00Z",
+    });
+    expect(envelope.data?.per_model).toEqual([{ model: "opus", utilization: 0.5 }]);
+  });
+
+  it("a later good fetch replaces the persisted values", async () => {
+    await getBurnStatus(good(0.25));
+    _resetBurnStatusLastGood();
+    await getBurnStatus(good(0.7));
+    _resetBurnStatusLastGood();
+
+    const envelope = await getBurnStatus(rateLimited);
+    expect(envelope.data?.stale).toBe(true);
+    expect(envelope.data?.five_hour?.utilization).toBe(0.7);
   });
 });

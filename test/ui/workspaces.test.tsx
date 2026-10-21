@@ -16,6 +16,7 @@ import {
   mockLinkageRate,
   mockSuccessRate,
   mockTrends,
+  mockWorkspaceNames,
   mockWorkspaceOutcomes,
   mockWorkspaces,
 } from "../../src/ui/api/fixtures";
@@ -35,6 +36,7 @@ afterEach(() => {
 // Default mock setup for all WorkspacesPage calls
 function setupWorkspacesPageMocks() {
   vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
+  vi.mocked(client.fetchWorkspaceNames).mockResolvedValue(mockWorkspaceNames());
   vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
   vi.mocked(client.fetchWorkspaceOutcomes).mockResolvedValue(mockWorkspaceOutcomes());
 }
@@ -203,7 +205,112 @@ describe("ContextCompositionPanel", () => {
 
 describe("WorkspacesPage — RV1a spend table", () => {
   beforeEach(() => {
+    window.location.hash = "#/workspaces";
     setupWorkspacesPageMocks();
+  });
+
+  it("shows seven-day rows before all-history spend finishes", async () => {
+    let finishFull!: (value: ReturnType<typeof mockWorkspaces>) => void;
+    vi.mocked(client.fetchWorkspaces).mockImplementation((filter) =>
+      "preset" in filter && filter.preset === "7d"
+        ? Promise.resolve(mockWorkspaces({ preset: "7d" }))
+        : new Promise((resolve) => {
+            finishFull = resolve;
+          }),
+    );
+    render(<WorkspacesPage />);
+    await screen.findByText(
+      /Showing up to eight workspaces from the recent seven days while loading all history/,
+    );
+    expect(client.fetchWorkspaces).toHaveBeenCalledWith(
+      { preset: "7d" },
+      { fresh: true, limit: 8 },
+    );
+    expect(screen.getByRole("link", { name: /acme\/orbit-api/ })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /acme\/legacy-etl/ })).toBeNull();
+    await waitFor(() =>
+      expect(client.fetchWorkspaces).toHaveBeenCalledWith(
+        { from: "1970-01-01T00:00:00.000Z" },
+        { fresh: true },
+      ),
+    );
+    finishFull(mockWorkspaces({ from: "1970-01-01T00:00:00.000Z" }));
+    await waitFor(() => expect(screen.queryByText(/Showing up to eight workspaces/)).toBeNull());
+  });
+
+  it("defaults to all history for the list and trends", async () => {
+    render(<WorkspacesPage />);
+    expect(screen.getByRole("button", { name: "All history" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    await waitFor(() => {
+      expect(client.fetchWorkspaces).toHaveBeenCalledWith(
+        { from: "1970-01-01T00:00:00.000Z" },
+        { fresh: true },
+      );
+      expect(client.fetchTrends).toHaveBeenCalledWith({ from: "1970-01-01T00:00:00.000Z" }, "day");
+      expect(window.location.hash).toBe("#/workspaces?window=all");
+    });
+  });
+
+  it.each(["7d", "30d"] as const)("selecting %s refetches and updates the hash", async (value) => {
+    render(<WorkspacesPage />);
+    fireEvent.click(screen.getByRole("button", { name: value }));
+    await waitFor(() => {
+      expect(client.fetchWorkspaces).toHaveBeenCalledWith({ preset: value }, { fresh: true });
+      expect(client.fetchTrends).toHaveBeenCalledWith({ preset: value }, "day");
+      expect(window.location.hash).toBe(`#/workspaces?window=${value}`);
+      expect(screen.getByRole("button", { name: value }).getAttribute("aria-pressed")).toBe("true");
+    });
+  });
+
+  it("reads the window from the hash on mount", async () => {
+    window.location.hash = "#/workspaces?window=30d";
+    render(<WorkspacesPage />);
+    expect(screen.getByRole("button", { name: "30d" }).getAttribute("aria-pressed")).toBe("true");
+    await waitFor(() =>
+      expect(client.fetchWorkspaces).toHaveBeenCalledWith({ preset: "30d" }, { fresh: true }),
+    );
+  });
+
+  it("keeps registered workspaces without window activity visible", async () => {
+    render(<WorkspacesPage />);
+    await waitFor(() => {
+      const idle = screen.getByRole("link", { name: "acme/legacy-etl" }).closest("tr");
+      expect(idle?.textContent).toContain("No activity in window");
+      expect(idle?.textContent).not.toContain("$0.00");
+    });
+    expect(client.fetchWorkspaceNames).toHaveBeenCalled();
+  });
+
+  it("lists idle workspaces after active ones", async () => {
+    render(<WorkspacesPage />);
+    await waitFor(() => screen.getByRole("link", { name: "acme/legacy-etl" }));
+    const links = screen
+      .getAllByRole("link")
+      .filter((a) => a.getAttribute("href")?.startsWith("#/workspaces/"));
+    expect(links.at(-1)?.textContent).toBe("acme/legacy-etl");
+  });
+
+  it("makes every workspace row (active and idle) a click target for its detail page", async () => {
+    render(<WorkspacesPage />);
+    await waitFor(() => screen.getByRole("link", { name: "acme/legacy-etl" }));
+    const rows = screen
+      .getAllByRole("link")
+      .filter((a) => a.getAttribute("href")?.startsWith("#/workspaces/"))
+      .map((a) => a.closest("tr"));
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      expect(row?.classList.contains("workspace-row")).toBe(true);
+      expect(row?.querySelectorAll("a.workspace-row-link")).toHaveLength(1);
+    }
+  });
+
+  it("still renders active workspaces when the names fetch fails", async () => {
+    vi.mocked(client.fetchWorkspaceNames).mockRejectedValue(new Error("names down"));
+    render(<WorkspacesPage />);
+    await waitFor(() => expect(screen.getByRole("link", { name: /acme\/orbit-api/ })).toBeTruthy());
+    expect(screen.queryByText("No activity in window")).toBeNull();
   });
 
   it("renders the expected table columns", async () => {
@@ -211,6 +318,7 @@ describe("WorkspacesPage — RV1a spend table", () => {
     await waitFor(() => {
       expect(screen.getByRole("columnheader", { name: "Workspace" })).toBeTruthy();
     });
+    expect(screen.getAllByText("Est. value").length).toBeGreaterThan(0);
     expect(screen.getByRole("columnheader", { name: "Estimated value" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Share" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Trend" })).toBeTruthy();
@@ -290,6 +398,7 @@ describe("WorkspacesPage — RV1a spend table", () => {
     if (empty.data === null) throw new Error("fixture must have data");
     empty.data.items = [];
     vi.mocked(client.fetchWorkspaces).mockResolvedValue(empty);
+    vi.mocked(client.fetchWorkspaceNames).mockResolvedValue([]);
 
     render(<WorkspacesPage />);
     await waitFor(() => {
@@ -297,16 +406,16 @@ describe("WorkspacesPage — RV1a spend table", () => {
     });
   });
 
-  it("navigates to workspace detail on row click", async () => {
+  it("uses a real workspace detail link in the primary cell", async () => {
     render(<WorkspacesPage />);
     await waitFor(() => {
       expect(screen.getByText(/acme\/orbit-api/)).toBeTruthy();
     });
-    const row = screen.getByText(/acme\/orbit-api/).closest("tr");
-    expect(row).not.toBeNull();
-    fireEvent.click(row as Element);
+    const link = screen.getByRole("link", { name: /acme\/orbit-api/ });
+    expect(link.getAttribute("href")).toBe("#/workspaces/ws-1?window=all");
+    fireEvent.click(link);
     await waitFor(() => {
-      expect(window.location.hash).toBe("#/workspaces/ws-1");
+      expect(window.location.hash).toBe("#/workspaces/ws-1?window=all");
     });
   });
 });

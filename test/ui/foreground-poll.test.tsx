@@ -127,6 +127,21 @@ describe("foreground network polling", () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it("runs the initial fetch even when the tab mounts hidden, then pauses recurring polls (O3/O6)", async () => {
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    const request = vi.fn().mockResolvedValue(1);
+    const success = vi.fn();
+    renderHook(() => useForegroundPoll(request, 30_000, success, vi.fn()));
+    await advance(0);
+    // The first fetch runs while hidden so the UI reaches a terminal state
+    // (no endless skeleton / "Checking…" widget).
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(success).toHaveBeenCalledTimes(1);
+    // Recurring polls still pause while hidden (battery optimization intact).
+    await advance(120_000);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it("does not overlap or publish an aborted response during rapid hide/resume", async () => {
     let resolve!: (value: number) => void;
     const request = vi.fn(
@@ -183,7 +198,7 @@ describe("foreground network polling", () => {
     expect(success).toHaveBeenCalledWith(2);
   });
 
-  it("forwards caller cancellation to fetch and preserves the eight-second timeout", async () => {
+  it("forwards caller cancellation to fetch and preserves the fifteen-second timeout", async () => {
     const signals: AbortSignal[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(
       (_url, init) =>
@@ -201,7 +216,7 @@ describe("foreground network polling", () => {
     expect(signals[0]?.aborted).toBe(true);
     const timed = fetchCachedJson("/api/live");
     const timeout = expect(timed).rejects.toThrow();
-    await advance(7_999);
+    await advance(14_999);
     expect(signals[1]?.aborted).toBe(false);
     await advance(1);
     await timeout;

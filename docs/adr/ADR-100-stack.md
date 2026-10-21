@@ -81,7 +81,8 @@ lockfile):
 ## Decision
 
 **Confirm option (a) for language/runtime/DB: TypeScript on Node 22 LTS + better-sqlite3, one
-daemon process, direct SQL, no workers** (carries AD-107). The SQLite schema and LocalQueryAPI
+daemon process, direct SQL** (carries AD-107). *Amended 2026-09-29: "no workers" no longer holds;
+worker threads run CPU passes — see ADR-113.* The SQLite schema and LocalQueryAPI
 are the stable seams; a P1 governance daemon may later be a different process/language behind
 those seams without disturbing the MVP (AD-110) — so no stack choice here is load-bearing beyond
 Phase 0/1.
@@ -188,3 +189,4 @@ was used.
 
 - 2026-08-21 (Session 12): Fixed stale cross-reference: tokenizer-pin note updated from "S5" to "ADR-105" (the actual decision record for the tokenizer selection) — source: SG-S5-05
 - 2026-09-10: Tooling security upgrade — Vitest 2.x → 4.x (`4.1.11`), Vite floor raised to `6.4.3` (major unchanged). Resolves all five `npm audit` development-tool advisories (Vitest critical GHSA-5xrq-8626-4rwp; Vite high GHSA-4w7w-66w2-5vf9; moderate GHSA-82fw-gwwq-j7x9, GHSA-67mh-4wv8-2f99, vite-node). `npm audit` now reports 0 vulnerabilities. Test-semantics note: Vitest 4 enforces the default 5 s timeout on synchronous tests (v2 could not); two legitimately long sync tests now declare explicit `{ timeout: 60_000 }` — no assertions changed. Vitest 4 also removed the `--minWorkers` CLI flag (`--maxWorkers` remains).
+- 2026-09-29: Decision amended — "no workers" removed. `8535a09` (ADOPT-1) and `src/daemon/history-worker.ts` already run CPU passes in worker threads; the process model, scheduler and push design are recorded in ADR-113 (Proposed). Still one process, better-sqlite3, direct SQL.

@@ -25,7 +25,11 @@ import type { Db } from "../db/open.js";
 import { ESF_EFFECT_WRITER_ENABLED } from "../effects/gate.js";
 import { PREMIUM_MODEL_SQL } from "../ingest/pricing.js";
 import { GLOBAL_WORKSPACE_ID } from "./context-probe.js";
-import { isD1SourceBackedRecommendation, parseD1SourceIdentity } from "./d1-source-identity.js";
+import {
+  d1HistoryFileRef,
+  isD1SourceBackedRecommendation,
+  parseD1SourceIdentity,
+} from "./d1-source-identity.js";
 
 /** Wait ≥1 day after adoption before entering MEASURING. */
 export const MIN_SETTLING_DAYS = 1;
@@ -239,7 +243,8 @@ export function snapshotBeforeValue(
     const src = parseD1SourceIdentity(rec.evidence_json);
     if (src === null) return null;
     const workspaceId = rec.scope_workspace_id ?? GLOBAL_WORKSPACE_ID;
-    const row = latestHistoryRow(db, workspaceId, src.component, src.fileRef, nowIso);
+    const fileRef = d1HistoryFileRef(db, workspaceId, src);
+    const row = latestHistoryRow(db, workspaceId, src.component, fileRef, nowIso);
     if (row === null) return null;
     // History appends one row per distinct version → the snapshot grain is one
     // observation (the latest version's token count).
@@ -336,9 +341,13 @@ function d1AfterValue(
           AND observed_at > ? AND observed_at <= ?
         ORDER BY observed_at DESC, id DESC LIMIT 1`,
     )
-    .get(workspaceId, src.component, src.fileRef, adoptedIso, deadlineIso) as
-    | { tokens: number; observed_at: string }
-    | undefined;
+    .get(
+      workspaceId,
+      src.component,
+      d1HistoryFileRef(db, workspaceId, src),
+      adoptedIso,
+      deadlineIso,
+    ) as { tokens: number; observed_at: string } | undefined;
   if (row === undefined) return null;
   return { value: row.tokens, to_ts: row.observed_at, n: 1 };
 }
@@ -497,12 +506,19 @@ function closeMeasurement(
     return;
   }
 
-  // INCONCLUSIVE maps to the NO_EFFECT state (the state enum has no INCONCLUSIVE);
-  // the effect row's verdict column keeps the honest distinction for the ledger.
-  const nextState = computed.verdict === "EFFECTIVE" ? "MEASURED_EFFECTIVE" : "MEASURED_NO_EFFECT";
+  // A measured lack of improvement reopens the recommendation. INCONCLUSIVE
+  // retains its separate ledger verdict and does not imply a measured result.
+  const nextState =
+    computed.verdict === "EFFECTIVE"
+      ? "MEASURED_EFFECTIVE"
+      : computed.verdict === "NO_EFFECT"
+        ? "PROPOSED"
+        : "MEASURED_NO_EFFECT";
   const trans = db
-    .prepare("UPDATE recommendations SET state = ? WHERE rec_id = ? AND state = 'MEASURING'")
-    .run(nextState, rec.rec_id);
+    .prepare(
+      "UPDATE recommendations SET state = ?, adopted_at = CASE WHEN ? = 'PROPOSED' THEN NULL ELSE adopted_at END WHERE rec_id = ? AND state = 'MEASURING'",
+    )
+    .run(nextState, nextState, rec.rec_id);
   if (trans.changes === 0) {
     console.warn(`W4: rec ${rec.rec_id} not in MEASURING at close — skipped`);
     result.skipped++;

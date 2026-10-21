@@ -13,6 +13,7 @@ import {
   listRecommendations,
 } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const gate = vi.hoisted(() => ({ enabled: true }));
@@ -27,15 +28,21 @@ const DAY = 86_400_000;
 let db: ReturnType<typeof createInMemoryFixtureDb>;
 
 function rec(id: string, detector = "D2", metric = "avg_context_per_turn") {
-  db.prepare(`INSERT INTO recommendations
-    (rec_id,provenance,detector_id,category,scope_workspace_id,lever,
-     modeled_formula_json,evidence_json,target_metric,state,created_at)
-    VALUES(?,'RULE',?,'CONTEXT','ws-alpha','test','{}','{}',?,'PROPOSED',?)`).run(
-    id,
-    detector,
-    metric,
-    NOW.toISOString(),
-  );
+  void metric;
+  const templateId =
+    detector === "D1"
+      ? "D1_CONTEXT_ALWAYS_LOADED"
+      : detector === "D5"
+        ? "D5_LIMIT_BURN_WARNING"
+        : detector === "D6"
+          ? "D6_TOOL_RESULT_BLOAT"
+          : "D2_LONG_FULL_CONTEXT";
+  seedValidatedRecommendation(db, {
+    recId: id,
+    templateId,
+    scope: "ws-alpha",
+    createdAt: NOW.toISOString(),
+  });
 }
 
 beforeEach(() => {
@@ -51,15 +58,12 @@ afterEach(() => {
 describe("ESF2 writer switch", () => {
   it("protects active D1 history and releases terminal windows without treating v2 adoption as malformed W4", () => {
     rec("retention", "D1");
-    db.prepare("UPDATE recommendations SET evidence_json=? WHERE rec_id='retention'").run(
-      JSON.stringify({ component: "CLAUDE_MD", file_ref: "/synthetic/esf.md" }),
-    );
     const history = (days: number) =>
       Number(
         db
           .prepare(`INSERT INTO context_inventory_history
       (workspace_id,component,file_ref,file_hash,tokens,attribution_version,observed_at)
-      VALUES('ws-alpha','CLAUDE_MD','/synthetic/esf.md',?,100,'chars4-v1',?)`)
+      VALUES('ws-alpha','CLAUDE_MD','CLAUDE.md',?,100,'chars4-v1',?)`)
           .run(`hash-${days}`, new Date(NOW.getTime() + days * DAY).toISOString()).lastInsertRowid,
       );
     const baseline = history(-1);
@@ -108,16 +112,18 @@ describe("ESF2 writer switch", () => {
     );
   });
 
-  it("acknowledges warnings without a cycle and refuses unsupported measurement", () => {
+  it("acknowledges warnings and adopts unmeasurable recs without a cycle", () => {
     rec("warning", "D5", "limit_burn_forecast");
     rec("manual", "D6", "tool_result_bytes");
     adoptRecommendation("warning", NOW.getTime());
     expect(getRecommendationCard("warning")?.effect_capability?.mode).toBe("ACKNOWLEDGEMENT");
-    expect(() => adoptRecommendation("manual", NOW.getTime(), { completedChange: true })).toThrow(
-      /Manual measurement/,
-    );
+    // REL-FIX 2 (operator 2026-10-19): no handler → adoption saved, effect not measured.
+    expect(adoptRecommendation("manual", NOW.getTime(), { completedChange: true }).data).toEqual({
+      ok: true,
+      effect_measured: false,
+    });
     expect(getRecommendationCard("manual")?.effect_capability?.mode).toBe("MANUAL");
-    expect(getRecommendationCard("manual")?.state).toBe("PROPOSED");
+    expect(getRecommendationCard("manual")?.state).toBe("ADOPTED");
     expect(db.prepare("SELECT * FROM effect_cycles").all()).toHaveLength(0);
     expect(db.prepare("SELECT * FROM recommendation_effects").all()).toHaveLength(0);
   });

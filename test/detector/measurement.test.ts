@@ -23,6 +23,7 @@ import {
 import { listLedger } from "../../src/query/api/recommendations-ledger.js";
 import { adoptRecommendation } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 // Preserve the original W4 writer regressions under the explicit legacy code gate.
@@ -58,6 +59,31 @@ function insertProposedRec(
     modeledSavings?: number | null;
   },
 ): void {
+  if (opts.detectorId === "D1") {
+    seedValidatedRecommendation(db, {
+      recId,
+      scope: opts.scopeWorkspaceId ?? null,
+      savings: opts.modeledSavings ?? null,
+      createdAt: new Date(T0).toISOString(),
+      facts: { scope: opts.scopeWorkspaceId === null ? "global" : "workspace" },
+    });
+    return;
+  }
+  if (opts.detectorId === "D2" || opts.detectorId === "D5" || opts.detectorId === "D8") {
+    seedValidatedRecommendation(db, {
+      recId,
+      templateId:
+        opts.detectorId === "D2"
+          ? "D2_LONG_FULL_CONTEXT"
+          : opts.detectorId === "D5"
+            ? "D5_LIMIT_BURN_WARNING"
+            : "D8_CACHE_WRITE_CHURN",
+      scope: opts.scopeWorkspaceId ?? null,
+      savings: opts.modeledSavings ?? null,
+      createdAt: new Date(T0).toISOString(),
+    });
+    return;
+  }
   db.prepare(
     `INSERT INTO recommendations
        (rec_id, provenance, detector_id, analysis_run_id, category, scope_workspace_id,
@@ -120,24 +146,35 @@ function effectRow(recId: string) {
 }
 
 describe("D1 source identity compatibility", () => {
-  it("parses the exact component/file_ref tuple without tightening string validity", () => {
+  it("derives the trusted file reference from an exact V1 D1 payload", () => {
     expect(
       parseD1SourceIdentity(
-        JSON.stringify({ component: "CLAUDE_MD", file_ref: "/fake/CLAUDE.md", extra: true }),
+        JSON.stringify({
+          version: 1,
+          template_id: "D1_CONTEXT_ALWAYS_LOADED",
+          facts: {
+            component: "CLAUDE_MD",
+            source_tokens: 10_000,
+            source_target: 5_000,
+            delta_context_tokens: 5_000,
+            turns_per_week: 100,
+            scope: "workspace",
+            workspace_multiplier: 1,
+          },
+        }),
       ),
-    ).toEqual({ component: "CLAUDE_MD", fileRef: "/fake/CLAUDE.md" });
-    expect(parseD1SourceIdentity('{"component":"","file_ref":""}')).toEqual({
-      component: "",
-      fileRef: "",
-    });
+    ).toEqual({ component: "CLAUDE_MD", fileRef: "CLAUDE.md" });
   });
 
   it.each([
     ["malformed JSON", "{"],
     ["JSON null", "null"],
     ["an array", "[]"],
-    ["a missing field", '{"component":"CLAUDE_MD"}'],
-    ["a non-string field", '{"component":"CLAUDE_MD","file_ref":42}'],
+    ["legacy evidence", '{"component":"CLAUDE_MD","file_ref":"CLAUDE.md"}'],
+    [
+      "an unknown field",
+      '{"version":1,"template_id":"D1_CONTEXT_ALWAYS_LOADED","facts":{},"extra":true}',
+    ],
   ])("returns null for %s", (_label, evidenceJson) => {
     expect(parseD1SourceIdentity(evidenceJson)).toBeNull();
   });
@@ -170,7 +207,7 @@ function seedD1Rec(recId: string, baselineTokens: number, adoptedMs: number): vo
   insertHistoryRow({
     workspaceId: "ws-alpha",
     component: "CLAUDE_MD",
-    fileRef: "/fake/CLAUDE.md",
+    fileRef: "CLAUDE.md",
     hash: "hash-baseline",
     tokens: baselineTokens,
     observedAtMs: adoptedMs - MS_PER_DAY,
@@ -178,7 +215,7 @@ function seedD1Rec(recId: string, baselineTokens: number, adoptedMs: number): vo
   insertProposedRec(recId, {
     detectorId: "D1",
     scopeWorkspaceId: "ws-alpha",
-    evidence: { component: "CLAUDE_MD", file_ref: "/fake/CLAUDE.md" },
+    evidence: { component: "CLAUDE_MD", file_ref: "CLAUDE.md" },
     modeledSavings: 500_000_000,
   });
   adoptRecommendation(recId, adoptedMs);
@@ -191,7 +228,7 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     const source = {
       workspaceId: GLOBAL_WORKSPACE_ID,
       component: "CLAUDE_MD",
-      fileRef: "/fake/global-CLAUDE.md",
+      fileRef: "CLAUDE.md",
     };
     db.prepare(
       `INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at)
@@ -235,7 +272,7 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     expect(recState("rec-D1-global-bounds")).toBe("MEASURED_EFFECTIVE");
   });
 
-  it("measures a legacy CONTEXT_TOKENS target through the D1 handler", () => {
+  it("rejects adoption for a legacy CONTEXT_TOKENS row without a V1 payload", () => {
     const adoptedMs = T0;
     insertHistoryRow({
       workspaceId: "ws-alpha",
@@ -251,47 +288,25 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
       evidence: { component: "CLAUDE_MD", file_ref: "/fake/legacy.md" },
       targetMetric: "CONTEXT_TOKENS:CLAUDE_MD:/fake/legacy.md",
     });
-    adoptRecommendation("rec-D1-legacy", adoptedMs);
-    insertHistoryRow({
-      workspaceId: "ws-alpha",
-      component: "CLAUDE_MD",
-      fileRef: "/fake/legacy.md",
-      hash: "legacy-after",
-      tokens: 400,
-      observedAtMs: adoptedMs + MS_PER_DAY,
-    });
-
-    runMeasurementPass(db, new Date(adoptedMs + (AFTER_WINDOW_DAYS + 1) * MS_PER_DAY), {
-      force: true,
-    });
-
-    expect(effectRow("rec-D1-legacy")).toMatchObject({
-      before_value: 1000,
-      after_value: 400,
-      verdict: "EFFECTIVE",
-    });
-    expect(recState("rec-D1-legacy")).toBe("MEASURED_EFFECTIVE");
+    expect(() => adoptRecommendation("rec-D1-legacy", adoptedMs)).toThrow(
+      /contract is not trusted/,
+    );
+    expect(effectRow("rec-D1-legacy")).toBeUndefined();
+    expect(recState("rec-D1-legacy")).toBe("PROPOSED");
   });
 
-  it("keeps malformed D1 evidence unmeasurable and closes it INCONCLUSIVE", () => {
+  it("rejects adoption for malformed D1 evidence", () => {
     const adoptedMs = T0;
     insertProposedRec("rec-D1-malformed", { detectorId: "D1" });
     db.prepare("UPDATE recommendations SET evidence_json = ? WHERE rec_id = ?").run(
       "{",
       "rec-D1-malformed",
     );
-    adoptRecommendation("rec-D1-malformed", adoptedMs);
-
-    runMeasurementPass(db, new Date(adoptedMs + (AFTER_WINDOW_DAYS + 1) * MS_PER_DAY), {
-      force: true,
-    });
-
-    expect(effectRow("rec-D1-malformed")).toMatchObject({
-      before_value: null,
-      after_value: null,
-      verdict: "INCONCLUSIVE",
-    });
-    expect(recState("rec-D1-malformed")).toBe("MEASURED_NO_EFFECT");
+    expect(() => adoptRecommendation("rec-D1-malformed", adoptedMs)).toThrow(
+      /contract is not trusted/,
+    );
+    expect(effectRow("rec-D1-malformed")).toBeUndefined();
+    expect(recState("rec-D1-malformed")).toBe("PROPOSED");
   });
 
   it("computes after_value from the history table and verdict EFFECTIVE when reduction > 5%", () => {
@@ -301,7 +316,7 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-trimmed",
       tokens: 400,
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -322,13 +337,36 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     expect(eff?.delta_pct).toBeCloseTo(-60, 5);
   });
 
+  it("reads D1 history rows that store the probe's absolute path (review 6 R6-07)", () => {
+    const adoptedMs = T0;
+    const source = {
+      workspaceId: "ws-alpha",
+      component: "CLAUDE_MD",
+      fileRef: "/repo/alpha/CLAUDE.md",
+    };
+    insertHistoryRow({ ...source, hash: "abs-before", tokens: 1000, observedAtMs: adoptedMs - 1 });
+    insertProposedRec("rec-D1-abs", { detectorId: "D1", scopeWorkspaceId: "ws-alpha" });
+    adoptRecommendation("rec-D1-abs", adoptedMs);
+    insertHistoryRow({ ...source, hash: "abs-after", tokens: 400, observedAtMs: adoptedMs + 1 });
+
+    runMeasurementPass(db, new Date(adoptedMs + (AFTER_WINDOW_DAYS + 1) * MS_PER_DAY), {
+      force: true,
+    });
+
+    expect(effectRow("rec-D1-abs")).toMatchObject({
+      before_value: 1000,
+      after_value: 400,
+      verdict: "EFFECTIVE",
+    });
+  });
+
   it("returns NO_EFFECT when the reduction is under 5%", () => {
     const adoptedMs = T0;
     seedD1Rec("rec-D1-small", 1000, adoptedMs);
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-tiny",
       tokens: 980, // −2%
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -338,7 +376,7 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
       force: true,
     });
 
-    expect(recState("rec-D1-small")).toBe("MEASURED_NO_EFFECT");
+    expect(recState("rec-D1-small")).toBe("PROPOSED");
     expect(effectRow("rec-D1-small")?.verdict).toBe("NO_EFFECT");
   });
 
@@ -362,7 +400,7 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-x",
       tokens: 700,
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -406,7 +444,7 @@ describe("W4 measurement pass — D1 (probe/history signal)", () => {
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-ledger-follow-up",
       tokens: 600,
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -434,7 +472,7 @@ describe("W4 measurement pass — D1 threshold boundaries (§7c)", () => {
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-b5",
       tokens: 950, // exactly −5%
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -452,7 +490,7 @@ describe("W4 measurement pass — D1 threshold boundaries (§7c)", () => {
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-b501",
       tokens: 94990, // −5.01%
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -470,7 +508,7 @@ describe("W4 measurement pass — D1 threshold boundaries (§7c)", () => {
     insertHistoryRow({
       workspaceId: "ws-alpha",
       component: "CLAUDE_MD",
-      fileRef: "/fake/CLAUDE.md",
+      fileRef: "CLAUDE.md",
       hash: "hash-grew",
       tokens: 1500,
       observedAtMs: adoptedMs + MS_PER_DAY,
@@ -568,22 +606,13 @@ describe("W4 measurement pass — D2 / D5 / unknown metrics", () => {
     expect(result.to_measuring).toBe(0);
   });
 
-  it("unknown target_metric transitions to MEASURING but never closes (logs handler-miss)", () => {
+  it("rejects an unknown detector contract before lifecycle mutation", () => {
     const adoptedMs = T0;
-    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     insertProposedRec("rec-DX-unknown", { detectorId: "DX", targetMetric: "some_future_metric" });
-    adoptRecommendation("rec-DX-unknown", adoptedMs);
-
-    runMeasurementPass(db, new Date(adoptedMs + (AFTER_WINDOW_DAYS + 1) * MS_PER_DAY), {
-      force: true,
-    });
-
-    expect(recState("rec-DX-unknown")).toBe("MEASURING");
-    expect(
-      infoSpy.mock.calls.some((c) =>
-        String(c[0]).includes("no measurement handler for target_metric some_future_metric"),
-      ),
-    ).toBe(true);
+    expect(() => adoptRecommendation("rec-DX-unknown", adoptedMs)).toThrow(
+      /contract is not trusted/,
+    );
+    expect(recState("rec-DX-unknown")).toBe("PROPOSED");
   });
 });
 
@@ -660,7 +689,7 @@ describe("W4 measurement pass — D8 cache read/creation ratio (RI9)", () => {
       force: true,
     });
 
-    expect(recState("rec-D8-flat")).toBe("MEASURED_NO_EFFECT");
+    expect(recState("rec-D8-flat")).toBe("PROPOSED");
     expect(effectRow("rec-D8-flat")?.verdict).toBe("NO_EFFECT");
   });
 

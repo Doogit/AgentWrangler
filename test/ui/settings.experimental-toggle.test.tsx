@@ -32,4 +32,15 @@ describe("SettingsPage — experimental actions", () => {
       ).toBe(true);
     });
   });
+
+  it("D8: says one-click apply is off in 0.2.0, with the reason, and no longer promises Apply controls", async () => {
+    render(<SettingsPage />);
+    await screen.findByRole("checkbox", { name: "Experimental actions" });
+    expect(
+      screen.getByText(
+        /One-click apply is off in 0\.2\.0: Claude Code permission rules can't confine the edit yet\./,
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText(/Apply\/dry-run controls/)).toBeNull();
+  });
 });

@@ -1,13 +1,10 @@
 /**
  * src/oauth/judge-g2-client.ts — Claude client for blinded G2 adjudication.
  *
- * Calls Anthropic Messages using the local Claude Code OAuth credential. The
- * displayed evidence is sent only for the adjudication request and is never
- * logged (SEC-101).
+ * Calls Anthropic Messages with the user's own Anthropic API key (OAUTH-1: never
+ * the Claude Code OAuth token). The displayed evidence is sent only for the
+ * adjudication request and is never logged (SEC-101).
  */
-
-import type { CredentialSource } from "./credentials.js";
-import { fileCredentialSource } from "./credentials.js";
 
 const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 
@@ -84,24 +81,16 @@ function backoffDelayMs(attempt: number, baseDelayMs: number, headers?: Headers)
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-export function claudeJudgeClient(
-  opts: {
-    credSource?: CredentialSource;
-    fetchFn?: typeof fetch;
-    model?: string;
-    /**
-     * When set, authenticate with a raw Anthropic API key (`x-api-key`) instead
-     * of the Claude Code subscription OAuth token. Draws on a separate rate-limit
-     * pool, so the judge no longer competes with live Claude Code generation.
-     */
-    apiKey?: string;
-    /** Max retry attempts after the first try on a transient 429/5xx. */
-    maxRetries?: number;
-    baseDelayMs?: number;
-    sleepFn?: (ms: number) => Promise<void>;
-  } = {},
-): JudgeClient {
-  const credSource = opts.credSource ?? fileCredentialSource;
+export function claudeJudgeClient(opts: {
+  fetchFn?: typeof fetch;
+  model?: string;
+  /** The user's Anthropic API key, sent as `x-api-key`. */
+  apiKey: string;
+  /** Max retry attempts after the first try on a transient 429/5xx. */
+  maxRetries?: number;
+  baseDelayMs?: number;
+  sleepFn?: (ms: number) => Promise<void>;
+}): JudgeClient {
   const fetchFn = opts.fetchFn ?? fetch;
   const model = opts.model ?? "claude-opus-4-8";
   const apiKey = opts.apiKey;
@@ -110,27 +99,11 @@ export function claudeJudgeClient(
   const sleepFn = opts.sleepFn ?? defaultSleep;
 
   return async ({ evidenceKind, evidence }): Promise<JudgeResult> => {
-    // API-key auth uses `x-api-key`; OAuth (subscription) auth uses a Bearer
-    // token + the oauth beta header. Resolve one set of auth headers up front.
-    let authHeaders: Record<string, string>;
-    if (apiKey !== undefined) {
-      authHeaders = {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      };
-    } else {
-      const credResult = credSource.read();
-      if (!credResult.ok) {
-        return { ok: false, reason: credResult.reason };
-      }
-      authHeaders = {
-        Authorization: `Bearer ${credResult.credential.accessToken}`,
-        "anthropic-beta": "oauth-2025-04-20",
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      };
-    }
+    const authHeaders: Record<string, string> = {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    };
 
     for (let attempt = 0; ; attempt++) {
       let response: Awaited<ReturnType<typeof fetch>>;

@@ -1,0 +1,5 @@
+{
+  "id": "D7",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": { "fixture": "near-miss", "target_constant": "MIN_RUN", "expect": "silent" }
+}

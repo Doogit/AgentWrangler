@@ -1,18 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CredentialSource } from "../../src/oauth/credentials.js";
 import { claudeJudgeClient } from "../../src/oauth/judge-g2-client.js";
 
-const validCredSource: CredentialSource = {
-  read: () => ({
-    ok: true,
-    credential: {
-      accessToken: "t",
-      expiresAt: Date.now() + 1_000_000,
-      subscriptionType: null,
-      rateLimitTier: null,
-    },
-  }),
-};
+const apiKey = "sk-ant-test";
 
 describe("claudeJudgeClient", () => {
   it("returns a validated G2 verdict from the first text block", async () => {
@@ -27,7 +16,7 @@ describe("claudeJudgeClient", () => {
         ],
       }),
     }) as unknown as typeof fetch;
-    const judge = claudeJudgeClient({ credSource: validCredSource, fetchFn });
+    const judge = claudeJudgeClient({ apiKey, fetchFn });
 
     await expect(
       judge({ findingAlias: "g2_1", evidenceKind: "message", evidence: {} }),
@@ -56,7 +45,7 @@ describe("claudeJudgeClient", () => {
         ],
       }),
     }) as unknown as typeof fetch;
-    const judge = claudeJudgeClient({ credSource: validCredSource, fetchFn });
+    const judge = claudeJudgeClient({ apiKey, fetchFn });
 
     await expect(
       judge({ findingAlias: "g2_1", evidenceKind: "message", evidence: {} }),
@@ -73,7 +62,7 @@ describe("claudeJudgeClient", () => {
       ok: true,
       json: async () => ({ content: [{ type: "text", text: "not rubric JSON" }] }),
     }) as unknown as typeof fetch;
-    const judge = claudeJudgeClient({ credSource: validCredSource, fetchFn });
+    const judge = claudeJudgeClient({ apiKey, fetchFn });
 
     const result = await judge({ findingAlias: "g2_1", evidenceKind: "message", evidence: {} });
     expect(result.ok).toBe(false);
@@ -103,7 +92,7 @@ describe("claudeJudgeClient", () => {
       .mockResolvedValue(success) as unknown as typeof fetch;
     const sleepFn = vi.fn().mockResolvedValue(undefined);
     const judge = claudeJudgeClient({
-      credSource: validCredSource,
+      apiKey,
       fetchFn,
       sleepFn,
       baseDelayMs: 1,
@@ -124,7 +113,7 @@ describe("claudeJudgeClient", () => {
     const fetchFn = vi.fn().mockResolvedValue(throttled) as unknown as typeof fetch;
     const sleepFn = vi.fn().mockResolvedValue(undefined);
     const judge = claudeJudgeClient({
-      credSource: validCredSource,
+      apiKey,
       fetchFn,
       sleepFn,
       maxRetries: 2,
@@ -140,7 +129,7 @@ describe("claudeJudgeClient", () => {
     const badRequest = { ok: false, status: 400, headers: new Headers() };
     const fetchFn = vi.fn().mockResolvedValue(badRequest) as unknown as typeof fetch;
     const sleepFn = vi.fn().mockResolvedValue(undefined);
-    const judge = claudeJudgeClient({ credSource: validCredSource, fetchFn, sleepFn });
+    const judge = claudeJudgeClient({ apiKey, fetchFn, sleepFn });
 
     const result = await judge({ findingAlias: "g2_1", evidenceKind: "message", evidence: {} });
     expect(result).toEqual({ ok: false, reason: "HTTP 400 from Messages API", status: 400 });
@@ -148,19 +137,7 @@ describe("claudeJudgeClient", () => {
     expect(sleepFn).not.toHaveBeenCalled();
   });
 
-  it("fails closed without a network call when credentials are unavailable", async () => {
-    const fetchFn = vi.fn() as unknown as typeof fetch;
-    const judge = claudeJudgeClient({
-      credSource: { read: () => ({ ok: false, reason: "x" }) },
-      fetchFn,
-    });
-
-    const result = await judge({ findingAlias: "g2_1", evidenceKind: "message", evidence: {} });
-    expect(result.ok).toBe(false);
-    expect(fetchFn).not.toHaveBeenCalled();
-  });
-
-  it("uses x-api-key auth (no OAuth read) when an apiKey is provided", async () => {
+  it("uses x-api-key auth and never the OAuth bearer token", async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -172,16 +149,10 @@ describe("claudeJudgeClient", () => {
         ],
       }),
     }) as unknown as typeof fetch;
-    const credRead = vi.fn(() => ({ ok: false as const, reason: "should-not-be-read" }));
-    const judge = claudeJudgeClient({
-      apiKey: "sk-ant-test",
-      credSource: { read: credRead },
-      fetchFn,
-    });
+    const judge = claudeJudgeClient({ apiKey, fetchFn });
 
     const result = await judge({ findingAlias: "g2_1", evidenceKind: "message", evidence: {} });
     expect(result.ok).toBe(true);
-    expect(credRead).not.toHaveBeenCalled();
     const init = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as {
       headers: Record<string, string>;
     };

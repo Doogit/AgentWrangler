@@ -23,7 +23,10 @@ function loadWorkspaceNames(): Promise<Map<string, WorkspaceNameRow>> {
 }
 
 /** Resolve workspace IDs to the same owner/name labels used by the Workspaces page. */
-export function useWorkspaceNames(): { labelFor: (workspaceId: string) => string } {
+export function useWorkspaceNames(): {
+  labelFor: (workspaceId: string) => string;
+  options: { id: string; label: string }[];
+} {
   const [workspaces, setWorkspaces] = useState<Map<string, WorkspaceNameRow> | null>(null);
 
   useEffect(() => {
@@ -46,7 +49,10 @@ export function useWorkspaceNames(): { labelFor: (workspaceId: string) => string
     [workspaces],
   );
 
-  return { labelFor };
+  const options = [...(workspaces?.values() ?? [])]
+    .map((row) => ({ id: row.workspace_id, label: workspaceLabel(row) }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  return { labelFor, options };
 }
 
 /** Test-only cache reset so each mock response is independently exercised. */

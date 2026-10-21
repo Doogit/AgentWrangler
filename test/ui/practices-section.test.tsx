@@ -11,7 +11,7 @@
  *   - Loading state shows aria-busy; error state shows a banner.
  */
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import { mockPractices } from "../../src/ui/api/fixtures";
@@ -34,9 +34,20 @@ describe("PracticesSection — states", () => {
     vi.mocked(client.fetchPractices).mockRejectedValue(new Error("ECONNREFUSED"));
     const { container } = render(<PracticesSection />);
     await waitFor(() => {
-      expect(container.querySelector(".banner-error")).not.toBeNull();
+      expect(container.querySelector(".async-error-state")).not.toBeNull();
     });
-    expect(container.textContent ?? "").toContain("Practices unavailable");
+    expect(container.textContent ?? "").toContain("Could not load practices.");
+    expect(container.textContent ?? "").not.toContain("ECONNREFUSED");
+  });
+
+  it("retries only the practices resource", async () => {
+    vi.mocked(client.fetchPractices)
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValue(mockPractices());
+    const { getByRole } = render(<PracticesSection />);
+    const retry = await waitFor(() => getByRole("button", { name: "Retry practices" }));
+    fireEvent.click(retry);
+    await waitFor(() => expect(vi.mocked(client.fetchPractices)).toHaveBeenCalledTimes(2));
   });
 });
 

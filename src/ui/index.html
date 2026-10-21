@@ -5,34 +5,104 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f1a'/%3E%3Cpath d='M18 18h28v28H18z' fill='none' stroke='%2322d3ee' stroke-width='6'/%3E%3Cpath d='M38 18v12H26' fill='none' stroke='%23a78bfa' stroke-width='6'/%3E%3C/svg%3E" />
     <title>AgentWrangler · Local Observability Dashboard</title>
+    <script>
+      // Apply the saved theme synchronously before first paint so the loading
+      // screen and the dashboard share one theme from t=0 (no dark→light snap).
+      (function () {
+        var stored = null;
+        try { stored = localStorage.getItem("aw-theme"); } catch (_) {}
+        var theme = stored === "light" || stored === "dark" ? stored : "dark";
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <style>
-      html, body { margin: 0; min-height: 100%; background: #0b0f1a; color: #e2e8f0; }
+      /* Critical inline styles: the pre-JS overlay must be styled from t=0,
+         before the JS bundle (which carries styles.css) evaluates. Values mirror
+         the dark/light design tokens; styles.css refines these once it loads
+         (same selectors, later in the cascade). Keep in sync with the
+         `.loading-screen` block in styles.css. */
+      :root {
+        --_bg: #0b0f1a; --_text: #e2e8f0; --_soft: #94a3b8; --_cyan: #22d3ee; --_track: #1a2233;
+      }
+      :root[data-theme="light"] {
+        --_bg: #f8fafc; --_text: #0f172a; --_soft: #475569; --_cyan: #0891b2; --_track: #e2e8f0;
+      }
+      html, body { margin: 0; min-height: 100%; }
+      body { background: var(--_bg); color: var(--_text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
       #root { min-height: 100vh; }
+      #boot-overlay.loading-screen {
+        position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+        padding: 40px 24px; background: var(--_bg); color: var(--_text);
+      }
+      #boot-overlay .loading-screen__content { display: grid; width: min(100%, 480px); gap: 16px; }
+      #boot-overlay .loading-screen__eyebrow {
+        margin: 0; color: var(--_cyan); font-size: 13px; font-weight: 700;
+        letter-spacing: .08em; text-transform: uppercase;
+      }
+      #boot-overlay h1 { margin: 0; font-size: 22px; }
+      #boot-overlay .loading-screen__progress {
+        height: 6px; overflow: hidden; border-radius: 999px; background: var(--_track);
+      }
+      #boot-overlay .loading-screen__progress-fill {
+        display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--_cyan);
+        animation: aw-boot-progress 1.2s ease-in-out infinite;
+      }
+      @keyframes aw-boot-progress {
+        0% { transform: translateX(-110%); } 100% { transform: translateX(290%); }
+      }
+      /* Shown by CSS alone if the app bundle never takes over (no JS needed). */
+      #boot-overlay .loading-screen__slow {
+        margin: 0; color: var(--_soft); opacity: 0; animation: aw-boot-slow 0s linear 30s forwards;
+      }
+      @keyframes aw-boot-slow { to { opacity: 1; } }
+      #boot-overlay.loading-screen--done { opacity: 0; transition: opacity 250ms ease-out; }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-overlay .loading-screen__progress-fill,
+        #boot-overlay.loading-screen--done { animation: none; transition: none; }
+      }
     </style>
   </head>
   <body>
-    <div id="root">
-      <div style="display:flex;min-height:100vh;background:#0b0f1a;color:#e2e8f0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
-        <aside style="width:224px;flex:0 0 224px;padding:24px 16px;border-right:1px solid rgba(255,255,255,.07);background:#0b0f1a;box-sizing:border-box">
-          <div style="width:116px;height:16px;margin:4px 0 34px;border-radius:5px;background:#1a2233"></div>
-          <div style="display:grid;gap:12px">
-            <div style="height:12px;border-radius:4px;background:#1a2233"></div>
-            <div style="height:12px;border-radius:4px;background:#1a2233"></div>
-            <div style="height:12px;border-radius:4px;background:#1a2233"></div>
-            <div style="height:12px;border-radius:4px;background:#1a2233"></div>
-          </div>
-        </aside>
-        <main style="flex:1;padding:32px;box-sizing:border-box">
-          <div style="width:180px;height:20px;margin-bottom:24px;border-radius:6px;background:#1a2233"></div>
-          <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px">
-            <div style="height:112px;border:1px solid rgba(255,255,255,.07);border-radius:10px;background:#111827"></div>
-            <div style="height:112px;border:1px solid rgba(255,255,255,.07);border-radius:10px;background:#111827"></div>
-            <div style="height:112px;border:1px solid rgba(255,255,255,.07);border-radius:10px;background:#111827"></div>
-            <div style="height:112px;border:1px solid rgba(255,255,255,.07);border-radius:10px;background:#111827"></div>
-          </div>
-        </main>
-      </div>
+    <div id="root"></div>
+    <!-- Pre-JS paint (P1-U5): a sibling of #root (NOT a child), so createRoot(#root)
+         never wipes it. Static markup only — no polling. App removes it on its first
+         commit via window.__awBoot.reveal(); boot progress then lives in the shell's
+         StatusChip. -->
+    <div id="boot-overlay" class="loading-screen" aria-labelledby="loading-screen-title" aria-busy="true">
+      <section class="loading-screen__content">
+        <p class="loading-screen__eyebrow">AgentWrangler</p>
+        <h1 id="loading-screen-title">Opening your dashboard…</h1>
+        <div class="loading-screen__progress" aria-hidden="true">
+          <span class="loading-screen__progress-fill"></span>
+        </div>
+        <p class="loading-screen__slow">
+          Still loading? Reload this page. If it stays blank, check the terminal that started
+          AgentWrangler, or read <code>docs/help/guide.md</code> in the checkout.
+        </p>
+      </section>
     </div>
+    <script>
+      // Exposes window.__awBoot.reveal() for App's first commit (see main.tsx / App.tsx).
+      (function () {
+        var overlay = document.getElementById("boot-overlay");
+        var revealed = false;
+        window.__awBoot = {
+          reveal: function () {
+            if (revealed || !overlay) return;
+            revealed = true;
+            var reduced = false;
+            try { reduced = matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_) {}
+            var remove = function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); };
+            if (reduced) { remove(); return; }
+            overlay.classList.add("loading-screen--done");
+            overlay.addEventListener("transitionend", remove, { once: true });
+            setTimeout(remove, 400);
+          },
+        };
+      })();
+    </script>
     <script type="module" src="/main.tsx"></script>
   </body>
 </html>

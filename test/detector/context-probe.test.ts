@@ -27,6 +27,7 @@ import {
   encodeToolSearchState,
   makeProbeId,
   parseToolSearchState,
+  readMemoryDir,
   runContextProbe,
 } from "../../src/detector/context-probe.js";
 
@@ -163,6 +164,64 @@ describe("global CLAUDE.md probing", () => {
   });
 });
 
+describe("measured token counts (C1 decision A)", () => {
+  // Counts measured by Claude Code 2.1.280 / claude-opus-5-5 (scripts/parity/source-pairs.mjs).
+  const evidence = path.join(
+    import.meta.dirname,
+    "../../.claude/audits/certification/p1f/source-pairs-2.1.280.json",
+  );
+  const sentinel = Array.from(
+    { length: 200 },
+    (_, index) =>
+      `Canary memory sentinel line ${String(index + 1).padStart(3, "0")}: ABCDEFGHIJKLMNOPQRSTUVWXYZ\n`,
+  ).join("");
+  // The evidence file is private-only (absent from the public export); private CI always has it.
+  const hasEvidence = fs.existsSync(evidence);
+  const measured = hasEvidence
+    ? ((
+        JSON.parse(fs.readFileSync(evidence, "utf8")) as {
+          deltas: { mode: string; contentSha1: string; observed: number[] }[];
+        }
+      ).deltas.find((d) => d.mode === "M" && d.contentSha1 === expectedHash(sentinel))
+        ?.observed[0] as number)
+    : 0;
+
+  it.skipIf(!hasEvidence)(
+    "uses the measured count for matching content and records its basis",
+    () => {
+      writeFile(path.join(claudeDir, "CLAUDE.md"), sentinel);
+      runContextProbe(db, NOW, { claudeDir, measuredCountsFile: evidence });
+      const r = requireRow(inventoryRows());
+      expect(r.tokens).toBe(measured);
+      expect(r.tokens).not.toBe(expectedTokens(sentinel));
+      expect(r.attribution_version).toBe("measured-pair-v1:2.1.280/claude-opus-5-5");
+    },
+  );
+
+  it.skipIf(!hasEvidence)("falls back to chars4-v1 for unmeasured content", () => {
+    writeFile(path.join(claudeDir, "CLAUDE.md"), `${sentinel}extra\n`);
+    runContextProbe(db, NOW, { claudeDir, measuredCountsFile: evidence });
+    expect(requireRow(inventoryRows()).attribution_version).toBe("chars4-v1");
+  });
+
+  it.skipIf(!hasEvidence)("appends history when only the sizing basis changes", () => {
+    writeFile(path.join(claudeDir, "CLAUDE.md"), sentinel);
+    const missing = path.join(claudeDir, "no-counts.json");
+    runContextProbe(db, NOW, { claudeDir, measuredCountsFile: missing });
+    runContextProbe(db, new Date("2026-01-09T00:00:00.000Z"), {
+      claudeDir,
+      measuredCountsFile: evidence,
+    });
+    const history = db
+      .prepare("SELECT tokens, attribution_version FROM context_inventory_history ORDER BY id")
+      .all();
+    expect(history).toEqual([
+      { tokens: expectedTokens(sentinel), attribution_version: "chars4-v1" },
+      { tokens: measured, attribution_version: "measured-pair-v1:2.1.280/claude-opus-5-5" },
+    ]);
+  });
+});
+
 describe("idempotent UPSERT", () => {
   it("running the probe twice yields the same single row (no duplicate accumulation)", () => {
     const content = "# Rules\n\nBe concise.";
@@ -214,7 +273,44 @@ describe("SEC-101 — no content stored", () => {
 });
 
 describe("per-workspace memory probing", () => {
-  it("sums all *.md files in the memory directory", () => {
+  let memoryDir: string;
+
+  beforeEach(() => {
+    memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-memory-probe-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(memoryDir, { recursive: true, force: true });
+  });
+
+  it("reads only the first 200 lines of MEMORY.md and ignores topic files", () => {
+    const lines = Array.from({ length: 250 }, (_, i) => `line ${i + 1}`);
+    writeFile(path.join(memoryDir, "MEMORY.md"), lines.join("\n"));
+    writeFile(path.join(memoryDir, "topic.md"), "topic-only".repeat(512));
+
+    const content = readMemoryDir(memoryDir);
+    expect(content).toBe(lines.slice(0, 200).join("\n"));
+    expect(content).not.toContain("topic-only");
+  });
+
+  it("keeps a UTF-8 prefix of at most 25,600 bytes", () => {
+    const fileContent = Array(50)
+      .fill(`x${"😀".repeat(256)}`)
+      .join("\n");
+    writeFile(path.join(memoryDir, "MEMORY.md"), fileContent);
+
+    const content = readMemoryDir(memoryDir);
+    if (content === null) throw new Error("expected MEMORY.md content");
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(25_600);
+    expect(fileContent.startsWith(content)).toBe(true);
+  });
+
+  it("returns null when only a topic file exists", () => {
+    writeFile(path.join(memoryDir, "topic.md"), "on-demand only");
+    expect(readMemoryDir(memoryDir)).toBeNull();
+  });
+
+  it("sizes the MEMORY row from MEMORY.md alone", () => {
     // Register a workspace
     db.prepare(
       `INSERT INTO workspaces (workspace_id, project_slug, registered_at)
@@ -222,9 +318,8 @@ describe("per-workspace memory probing", () => {
     ).run();
 
     const memDir = mkDir(claudeDir, "projects", "proj-1", "memory");
-    writeFile(path.join(memDir, "a.md"), "A".repeat(200)); // 50 tokens
-    writeFile(path.join(memDir, "b.md"), "B".repeat(200)); // 50 tokens
-    // Combined = 400 bytes → 100 tokens
+    writeFile(path.join(memDir, "MEMORY.md"), "A".repeat(200));
+    writeFile(path.join(memDir, "topic.md"), "B".repeat(200));
 
     runContextProbe(db, NOW, { claudeDir });
 
@@ -235,7 +330,8 @@ describe("per-workspace memory probing", () => {
       .get() as Record<string, unknown> | undefined;
 
     expect(memRow).toBeDefined();
-    expect(memRow?.tokens).toBe(expectedTokens(`${"A".repeat(200)}\n${"B".repeat(200)}`));
+    expect(memRow?.tokens).toBe(expectedTokens("A".repeat(200)));
+    expect(memRow?.file_hash).toBe(expectedHash("A".repeat(200)));
     expect(memRow?.workspace_id).toBe("ws-1");
   });
 
@@ -396,6 +492,79 @@ describe("plugin/skill catalog (MCP_SCHEMAS)", () => {
     expect(catalogRow?.file_hash).toBe(expectedHash(expected));
   });
 
+  it("records per-item catalog rows; MCP servers are listed but never sized (U7 D10)", () => {
+    const installPath = mkDir(claudeDir, "plugins", "cache", "market", "demo", "1.0.0");
+    writeFile(
+      path.join(installPath, "skills", "helper", "SKILL.md"),
+      "---\nname: helper\ndescription: Plugin helper\n---\n# body is not resident",
+    );
+    writeFile(
+      path.join(installPath, ".mcp.json"),
+      JSON.stringify({ mcpServers: { "demo-srv": { command: "x" } } }),
+    );
+    writeFile(
+      path.join(claudeDir, "skills", "solo", "SKILL.md"),
+      "---\nname: solo\ndescription: Standalone skill\n---\n# body",
+    );
+    writeFile(
+      path.join(claudeDir, "plugins", "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins: { "demo@market": [{ installPath }] } }),
+    );
+    writeFile(
+      path.join(claudeDir, "settings.json"),
+      JSON.stringify({ mcpServers: { "user-srv": { command: "y" } } }),
+    );
+    const claudeJsonPath = path.join(claudeDir, "claude.json");
+    writeFile(claudeJsonPath, JSON.stringify({ mcpServers: { "cli-srv": { command: "z" } } }));
+
+    runContextProbe(db, NOW, { claudeDir, claudeJsonPath });
+
+    const rows = db
+      .prepare(
+        `SELECT kind, name, plugin, usage_key, tokens, bytes, size_basis, source
+           FROM catalog_items ORDER BY kind, name`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const helperLine = "skill:helper Plugin helper";
+    const soloLine = "skill:solo Standalone skill";
+    const pluginBytes = Buffer.byteLength("plugin:demo@market") + Buffer.byteLength(helperLine) + 1;
+    expect(
+      rows.map((r) => [r.kind, r.name, r.plugin, r.usage_key, r.tokens, r.size_basis]),
+    ).toEqual([
+      ["mcp_server", "cli-srv", null, "mcp__cli-srv__", null, "unmeasured"],
+      [
+        "mcp_server",
+        "demo:demo-srv",
+        "demo@market",
+        "mcp__plugin_demo_demo-srv__",
+        null,
+        "unmeasured",
+      ],
+      ["mcp_server", "user-srv", null, "mcp__user-srv__", null, "unmeasured"],
+      ["plugin", "demo@market", "demo@market", null, Math.ceil(pluginBytes / 4), "chars4-v1"],
+      [
+        "skill",
+        "demo:helper",
+        "demo@market",
+        "demo:helper",
+        expectedTokens(helperLine),
+        "chars4-v1",
+      ],
+      ["skill", "solo", null, "solo", expectedTokens(soloLine), "chars4-v1"],
+    ]);
+    for (const row of rows.filter((r) => r.kind === "mcp_server")) {
+      expect(row.bytes).toBeNull();
+      expect(row.source).toContain("not measurable from local files");
+    }
+
+    // Re-probe after removing the standalone skill: rows reflect the current catalog only.
+    fs.rmSync(path.join(claudeDir, "skills"), { recursive: true, force: true });
+    runContextProbe(db, NOW, { claudeDir, claudeJsonPath });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM catalog_items WHERE name = 'solo'").get()).toEqual(
+      { n: 0 },
+    );
+  });
+
   it("preserves distinct skill files that render the same catalog text", () => {
     const alphaPath = mkDir(claudeDir, "plugins", "cache", "market", "alpha", "1.0.0");
     const betaPath = mkDir(claudeDir, "plugins", "cache", "market", "beta", "1.0.0");
@@ -462,6 +631,40 @@ describe("plugin/skill catalog (MCP_SCHEMAS)", () => {
       .get() as { tokens: number; file_hash: string } | undefined;
     expect(catalogRow?.tokens).toBe(expectedTokens(expected));
     expect(catalogRow?.file_hash).toBe(expectedHash(expected));
+  });
+
+  it("does not count an installed plugin that settings.json leaves out once others are enabled", () => {
+    const onPath = mkDir(claudeDir, "plugins", "cache", "market", "on", "1.0.0");
+    const unlistedPath = mkDir(claudeDir, "plugins", "cache", "market", "unlisted", "1.0.0");
+    writeFile(
+      path.join(onPath, "skills", "kept-skill", "SKILL.md"),
+      "---\nname: kept-skill\ndescription: Kept\n---",
+    );
+    writeFile(
+      path.join(unlistedPath, "skills", "idle-skill", "SKILL.md"),
+      "---\nname: idle-skill\ndescription: Installed but never switched on\n---",
+    );
+    writeFile(
+      path.join(claudeDir, "plugins", "installed_plugins.json"),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          "on@market": [{ installPath: onPath }],
+          "unlisted@market": [{ installPath: unlistedPath }],
+        },
+      }),
+    );
+    writeFile(
+      path.join(claudeDir, "settings.json"),
+      JSON.stringify({ enabledPlugins: { "on@market": true } }),
+    );
+
+    runContextProbe(db, NOW, { claudeDir });
+
+    const names = db.prepare("SELECT name FROM catalog_items ORDER BY name").all() as Array<{
+      name: string;
+    }>;
+    expect(names.map((row) => row.name)).toEqual(["on:kept-skill", "on@market"]);
   });
 
   it("ignores malformed, missing, and out-of-cache install paths", () => {

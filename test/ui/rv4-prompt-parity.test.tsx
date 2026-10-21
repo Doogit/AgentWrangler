@@ -11,6 +11,7 @@ function makeRec(overrides: Partial<RecommendationCard> = {}): RecommendationCar
     scope_workspace_id: null,
     lever: "Reduce avoidable context",
     modeled_savings_u_per_wk: 0,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: { model: "test", inputs: {}, expression: "test" },
     evidence: {},
@@ -33,10 +34,12 @@ function expectTurnkeySections(rec: RecommendationCard): void {
 
   expect(artifact).not.toBeNull();
   expect(artifact?.flavor).toBe("TURNKEY");
-  expect(artifact?.text).toContain("TASK:");
-  expect(artifact?.text).toContain("CONSTRAINTS:");
-  expect(artifact?.text).toContain("ACCEPTANCE:");
-  expect(artifact?.text.match(/Measured .*:\s*[\d,]/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+  expect(artifact?.text).toContain("PURPOSE:");
+  expect(artifact?.text).toContain("AGGREGATES:");
+  expect(artifact?.text).toContain("READ-ONLY STEPS:");
+  expect(artifact?.text).toContain("SUCCESS CRITERIA:");
+  expect(artifact?.text).toContain("STOP CRITERIA:");
+  expect(artifact?.text.match(/^- .*:\s*[\d,]/gm)?.length ?? 0).toBeGreaterThanOrEqual(3);
 }
 
 describe("RV4 prompt artifact parity", () => {
@@ -76,7 +79,7 @@ describe("RV4 prompt artifact parity", () => {
     );
   });
 
-  it("uses labeled guided sections without the work-through filler", () => {
+  it("uses labeled guided sections without free-form recommendation text", () => {
     const artifact = buildPromptArtifact(
       makeRec({
         detector_id: "D6",
@@ -91,13 +94,19 @@ describe("RV4 prompt artifact parity", () => {
 
     expect(artifact).not.toBeNull();
     expect(artifact?.flavor).toBe("GUIDED");
-    expect(artifact?.text).toContain("TASK:");
-    expect(artifact?.text).toContain("CONSTRAINTS:");
-    expect(artifact?.text).toContain("ACCEPTANCE:");
-    expect(artifact?.text).not.toContain("Work this through");
+    expect(artifact?.text).toContain("PURPOSE:");
+    expect(artifact?.text).toContain("AGGREGATES:");
+    expect(artifact?.text).toContain("READ-ONLY STEPS:");
+    expect(artifact?.text).toContain("SUCCESS CRITERIA:");
+    expect(artifact?.text).not.toContain("attributed_tool");
   });
 
-  it("returns null for detectors without a template", () => {
-    expect(buildPromptArtifact(makeRec({ detector_id: "D9", evidence: {} }))).toBeNull();
+  it("returns a structured handler-unavailable artifact for unsupported detectors", () => {
+    const artifact = buildPromptArtifact(makeRec({ detector_id: "D9", evidence: {} }));
+
+    expect(artifact).not.toBeNull();
+    expect(artifact?.flavor).toBe("GUIDED");
+    expect(artifact?.text).toContain("Reason code: HANDLER_UNAVAILABLE.");
+    expect(artifact?.text).toContain("[AUTOMATIC_HANDLER]");
   });
 });

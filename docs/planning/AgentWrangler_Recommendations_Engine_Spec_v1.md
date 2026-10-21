@@ -7,7 +7,7 @@
 > rate-limit cap at the **cached rate (~0.1×, unverified)**, not full weight, so **D1 is a *secondary*
 > lever, NOT "the biggest."** The dominant reducible drivers (cache-miss/write churn, tool-result bloat,
 > idle sessions, retry loops) are new detectors to be specced here when built. The go-forward design is
-> **`docs/plans/spec-recommendations-engine.md` §W0** (cap-weighted meter + primary detectors + D4
+> **`docs/plans/Archive/spec-recommendations-engine.md` §W0** (cap-weighted meter + primary detectors + D4
 > advisory-gate, sequenced first). Read that before treating the D1/D4 sections below as authoritative.
 
 ## 1. Shared contract (both tiers)
@@ -47,7 +47,7 @@ reserved for cache-write-churn. Resolution:
 | **D9** | `IDLE_BACKGROUND_SESSION` | idle / background burn | shipped | sidechain-share proxy |
 | **D10** | `CATALOG_FOOTPRINT` | MCP/plugin/skill catalog footprint | shipped | next issued id after D9 |
 | **D11** | `EFFORT_MISMATCH` | over-budgeted thinking / effort | **BLOCKED** | calibration and task-complexity evidence missing; id reserved |
-| **D12** | `FORK_CONTEXT_INHERITANCE` | full-history fork re-sends oversize context | **BLOCKED** | parent↔child linkage heuristic (issue #32175); id reserved — see intake `docs/plans/2026-08-26-subagent-routing-finding-intake.md` |
+| **D12** | `FORK_CONTEXT_INHERITANCE` | full-history fork re-sends oversize context | **BLOCKED** | parent↔child linkage heuristic (issue #32175); id reserved — see intake `docs/plans/Archive/2026-08-26-subagent-routing-finding-intake.md` |
 | ~~D3~~ | ~~`ROUTING_NON_ADHERENCE`~~ | — | **RETIRED** | concept realized at runtime `D4`; **do not reuse the `D3` id** |
 
 - **Why D8, not D4, for cache-write-churn:** reusing `D4` collides with the shipped model-routing detector; reusing
@@ -94,7 +94,7 @@ Adoption: manual. Target: premium share on mechanical turns; $/turn.
 > transcripts alone.
 > **Subagent-routing facet (reserved, 2026-08-26).** Recon/worker subagents spawned with no model override
 > can inherit a premium model (the Codex "55 recon agents on Sol" finding — intake
-> `docs/plans/2026-08-26-subagent-routing-finding-intake.md`). On Claude Code JSONL this is buildable as a
+> `docs/plans/Archive/2026-08-26-subagent-routing-finding-intake.md`). On Claude Code JSONL this is buildable as a
 > D4 facet, not a new detector: add an evidence field for routing on `is_sidechain = 1` turns and surface it
 > under the same advisory-gate/conditional-lever framing. Do **not** emit a crisp savings figure. Not yet
 > scheduled.
@@ -176,11 +176,11 @@ reasoning from mismatch.
 No authoritative six-field contract exists while blocked. In particular, modeled savings are `NULL`; a future
 implementation may show only a directional generation-token delta and must state the real quality/rework tradeoff.
 Unblocking requires the evidence and scratch-copy calibration gate in
-`docs/plans/spec-d11-effort-mismatch.md`; passing it must produce a selective six-field
+`docs/plans/Archive/spec-d11-effort-mismatch.md`; passing it must produce a selective six-field
 trigger/evidence/lever/model/adoption/target contract before any code or UI status changes.
 
 **D12 `FORK_CONTEXT_INHERITANCE` — BLOCKED (reserved, 2026-08-26).** Reserve D12 for the "full-history fork
-re-sends very large context" pattern (intake `docs/plans/2026-08-26-subagent-routing-finding-intake.md`),
+re-sends very large context" pattern (intake `docs/plans/Archive/2026-08-26-subagent-routing-finding-intake.md`),
 distinct from D4 routing (which model) and D8 churn (cache re-writes) — this is about the *inherited context
 size* a fork carries. Do not register a detector or emit recommendations. Blocked on the same heuristic
 parent↔child linkage gap as D9's strict form: child transcript files carry no parent-session key
@@ -275,6 +275,6 @@ PROPOSED ── user adopts ──▶ ADOPTED ──▶ MEASURING ──▶ MEAS
 - 2026-08-21 (Session 12): D1 modeled-savings example corrected from `$875/wk` (misattributed; belongs to D2) to ≈ `$45/wk`; scenario relabeled — source: FW-03 / SG-S5-01
 - 2026-08-21 (Session 12): Added forward-looking note to D1: trigger (>40k tokens OR >25% avg context) is met by no current workspace; D1 is not presently actionable for this user — source: SG-S5-02
 - 2026-08-25: Economic-model correction (external research pass, briefs A/B). D1 downgraded from "biggest lever" to **secondary** — cache reads count against the cap at ~0.1× (unverified), not full weight; D1 modeled savings below are full-weight. New primary detectors (cache-miss/write churn, TTL-regime, tool-result bloat, idle-session, retry-loop) + a cap-weighted meter + D4 advisory-gate to be specced here when built — source: `spec-recommendations-engine.md` §W0
-- 2026-08-25 (W0 spec pass): **detectors made build-ready.** Added §2.0 **detector-id reconciliation** (runtime ids frozen for the fired D1/D2/D4/D5 because `rec_id`/`detector_id` persist them; spec-D3 routing concept realized at runtime `D4`, **advisory-gated**; spec-D4 cache-write-churn renumbered to a fresh **D8** to avoid the shipped-D4 collision; spec-D3 **retired**; `registry.ts` stale placeholder names to reconcile at build). Wrote six-field contracts with UNVALIDATED thresholds in **cap-weighted** terms for **D8 `CACHE_WRITE_CHURN`** (flagship; **TTL 5m/1h is a facet of D8**, not a separate detector) and **D6 `TOOL_RESULT_BLOAT`** (per-turn grain; per-tool attribution flagged as future ingestion since `tool_events.result_bytes` is `NULL`); added **D9 `IDLE_BACKGROUND_SESSION`** (buildable on `is_sidechain` share; strict "no-user-turn" form needs user-turn ingestion). Gated **D4** routing to advisory (conditional lever + crisp savings suppressed until `/usage`). Flagged **D7 `LOOP_RETRY_WASTE`** **BLOCKED** — `tool_events.input_hash`/`exit_class` and tool `file_path` are not ingested (`ingestor.ts:372-373`, `parser.ts:217`); future-ingestion task, out of W0.2 scope — source: `recommendations-improvement-v2.md` §W0 + research briefs A/B + `docs/handoffs/2026-08-25-w0-detector-spec-pass.md`
+- 2026-08-25 (W0 spec pass): **detectors made build-ready.** Added §2.0 **detector-id reconciliation** (runtime ids frozen for the fired D1/D2/D4/D5 because `rec_id`/`detector_id` persist them; spec-D3 routing concept realized at runtime `D4`, **advisory-gated**; spec-D4 cache-write-churn renumbered to a fresh **D8** to avoid the shipped-D4 collision; spec-D3 **retired**; `registry.ts` stale placeholder names to reconcile at build). Wrote six-field contracts with UNVALIDATED thresholds in **cap-weighted** terms for **D8 `CACHE_WRITE_CHURN`** (flagship; **TTL 5m/1h is a facet of D8**, not a separate detector) and **D6 `TOOL_RESULT_BLOAT`** (per-turn grain; per-tool attribution flagged as future ingestion since `tool_events.result_bytes` is `NULL`); added **D9 `IDLE_BACKGROUND_SESSION`** (buildable on `is_sidechain` share; strict "no-user-turn" form needs user-turn ingestion). Gated **D4** routing to advisory (conditional lever + crisp savings suppressed until `/usage`). Flagged **D7 `LOOP_RETRY_WASTE`** **BLOCKED** — `tool_events.input_hash`/`exit_class` and tool `file_path` are not ingested (`ingestor.ts:372-373`, `parser.ts:217`); future-ingestion task, out of W0.2 scope — source: `recommendations-improvement-v2.md` §W0 + research briefs A/B + `docs/handoffs/Archive/2026-08-25-w0-detector-spec-pass.md`
 - 2026-08-26: Reserved **D11 `EFFORT_MISMATCH`** after shipped D10 and marked it **BLOCKED**. Effort is observable, but thinking is not separable from visible `output_tokens`, task complexity is absent, and 98.6% of labeled turns are `high`; no selective threshold or savings claim is defensible without the documented calibration gate.
-- 2026-08-26: Added a **subagent-routing facet to D4** (reserved) and reserved **D12 `FORK_CONTEXT_INHERITANCE`** (BLOCKED on issue #32175 parent↔child linkage). Both trace to the Codex "55 recon agents on Sol" finding — source: `docs/plans/2026-08-26-subagent-routing-finding-intake.md`.
+- 2026-08-26: Added a **subagent-routing facet to D4** (reserved) and reserved **D12 `FORK_CONTEXT_INHERITANCE`** (BLOCKED on issue #32175 parent↔child linkage). Both trace to the Codex "55 recon agents on Sol" finding — source: `docs/plans/Archive/2026-08-26-subagent-routing-finding-intake.md`.

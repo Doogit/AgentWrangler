@@ -13,6 +13,7 @@ import {
 import { AFTER_WINDOW_DAYS, runMeasurementPass } from "../../src/detector/measurement.js";
 import { adoptRecommendation } from "../../src/query/api/recommendations.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createFixtureDb, createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 // These populated-history fixtures exercise legacy W4 retention and upgrade fidelity.
@@ -20,7 +21,23 @@ vi.mock("../../src/effects/gate.js", () => ({ ESF_EFFECT_WRITER_ENABLED: false }
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-08-26T12:00:00.000Z");
-const SOURCE = { workspaceId: "ws-alpha", component: "CLAUDE_MD", fileRef: "/private/a|b.json" };
+const SOURCE = { workspaceId: "ws-alpha", component: "CLAUDE_MD", fileRef: "CLAUDE.md" };
+
+function d1Payload(scope: "workspace" | "global" = "workspace"): string {
+  return JSON.stringify({
+    version: 1,
+    template_id: "D1_CONTEXT_ALWAYS_LOADED",
+    facts: {
+      component: "CLAUDE_MD",
+      source_tokens: 2_000,
+      source_target: 1_000,
+      delta_context_tokens: 1_000,
+      turns_per_week: 10,
+      scope,
+      workspace_multiplier: 1,
+    },
+  });
+}
 
 let db: Database.Database;
 
@@ -102,8 +119,7 @@ function addOpenRec(target: Database.Database, recId: string, options: OpenRecOp
       recId,
       options.legacy === true ? "legacy" : "D1",
       source.workspaceId,
-      options.evidenceJson ??
-        JSON.stringify({ component: source.component, file_ref: source.fileRef }),
+      options.evidenceJson ?? d1Payload(),
       options.legacy === true ? `CONTEXT_TOKENS:${source.component}` : "avg_context_per_turn",
       options.state ?? "MEASURING",
       adoptedAt.toISOString(),
@@ -133,6 +149,14 @@ function addProposedSourceRec(
   createdAt: Date,
   legacy = false,
 ): void {
+  if (!legacy) {
+    seedValidatedRecommendation(target, {
+      recId,
+      scope: source.workspaceId,
+      createdAt: createdAt.toISOString(),
+    });
+    return;
+  }
   target
     .prepare(
       `INSERT INTO recommendations
@@ -144,7 +168,7 @@ function addProposedSourceRec(
       recId,
       legacy ? "legacy" : "D1",
       source.workspaceId,
-      JSON.stringify({ component: source.component, file_ref: source.fileRef }),
+      d1Payload(),
       legacy ? `CONTEXT_TOKENS:${source.component}` : "avg_context_per_turn",
       createdAt.toISOString(),
     );
@@ -307,12 +331,7 @@ describe("context history retention planner", () => {
         modeled_formula_json, evidence_json, target_metric, state, created_at, adopted_at)
        VALUES ('completed', 'RULE', 'D1', 'CONTEXT', ?, 'test', '{}', ?,
                'avg_context_per_turn', 'MEASURED_EFFECTIVE', ?, ?)`,
-    ).run(
-      SOURCE.workspaceId,
-      JSON.stringify({ component: SOURCE.component, file_ref: SOURCE.fileRef }),
-      adoptedAt.toISOString(),
-      adoptedAt.toISOString(),
-    );
+    ).run(SOURCE.workspaceId, d1Payload(), adoptedAt.toISOString(), adoptedAt.toISOString());
     db.prepare(
       `INSERT INTO recommendation_effects
        (rec_id, measured_at, before_from, before_to, after_from, after_to, verdict)
@@ -350,12 +369,7 @@ describe("context history retention planner", () => {
         modeled_formula_json, evidence_json, target_metric, state, created_at, adopted_at)
        VALUES ('completed-only', 'RULE', 'D1', 'CONTEXT', ?, 'test', '{}', ?,
                'avg_context_per_turn', 'MEASURED_EFFECTIVE', ?, ?)`,
-    ).run(
-      SOURCE.workspaceId,
-      JSON.stringify({ component: SOURCE.component, file_ref: SOURCE.fileRef }),
-      adoptedAt.toISOString(),
-      adoptedAt.toISOString(),
-    );
+    ).run(SOURCE.workspaceId, d1Payload(), adoptedAt.toISOString(), adoptedAt.toISOString());
     db.prepare(
       `INSERT INTO recommendation_effects
        (rec_id, measured_at, before_from, before_to, after_from, after_to, verdict)
@@ -745,9 +759,9 @@ describe("context history compaction", () => {
         resetQueryDb();
         addHistory(target, SOURCE, new Date(firstAdoptedMs + DAY), "overlap-day-1", 900);
 
-        addProposedSourceRec(target, "overlap-legacy", SOURCE, new Date(secondAdoptedMs), true);
+        addProposedSourceRec(target, "overlap-second", SOURCE, new Date(secondAdoptedMs));
         setQueryDb(target);
-        adoptRecommendation("overlap-legacy", secondAdoptedMs);
+        adoptRecommendation("overlap-second", secondAdoptedMs);
         resetQueryDb();
         addHistory(target, SOURCE, new Date(firstAdoptedMs + 3 * DAY), "overlap-day-3", 700);
         addHistory(target, SOURCE, new Date(firstAdoptedMs + 10 * DAY), "overlap-day-10", 400);
@@ -762,7 +776,7 @@ describe("context history compaction", () => {
       ).toMatchObject({ ok: true, summary: { rows_deleted: 1 } });
       runMeasurementPass(dbA, measuredAt, { force: true });
       runMeasurementPass(dbB, measuredAt, { force: true });
-      const recIds = ["overlap-d1", "overlap-legacy"];
+      const recIds = ["overlap-d1", "overlap-second"];
       expect(readMeasurementOutcomes(dbB, recIds)).toEqual(readMeasurementOutcomes(dbA, recIds));
       expect(readMeasurementOutcomes(dbB, recIds)).toMatchObject([
         {
@@ -771,7 +785,7 @@ describe("context history compaction", () => {
           effect: { before_value: 1000, after_value: 400, verdict: "EFFECTIVE" },
         },
         {
-          rec_id: "overlap-legacy",
+          rec_id: "overlap-second",
           state: "MEASURED_EFFECTIVE",
           effect: { before_value: 900, after_value: 300, verdict: "EFFECTIVE" },
         },
@@ -797,19 +811,7 @@ describe("context history compaction", () => {
         target.prepare("DELETE FROM context_inventory_history").run();
         addHistory(target, SOURCE, new Date(adoptedMs - 100 * DAY), "noise", 2000);
         addHistory(target, SOURCE, new Date(adoptedMs - DAY), "baseline", 1000);
-        target
-          .prepare(
-            `INSERT INTO recommendations
-             (rec_id, provenance, detector_id, category, scope_workspace_id, lever,
-              modeled_formula_json, evidence_json, target_metric, state, created_at)
-             VALUES ('twin-rec', 'RULE', 'D1', 'CONTEXT', ?, 'test', '{}', ?,
-                     'avg_context_per_turn', 'PROPOSED', ?)`,
-          )
-          .run(
-            SOURCE.workspaceId,
-            JSON.stringify({ component: SOURCE.component, file_ref: SOURCE.fileRef }),
-            new Date(adoptedMs).toISOString(),
-          );
+        addProposedSourceRec(target, "twin-rec", SOURCE, new Date(adoptedMs));
         setQueryDb(target);
         adoptRecommendation("twin-rec", adoptedMs);
         resetQueryDb();

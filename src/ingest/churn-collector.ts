@@ -1,14 +1,21 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Db } from "../db/open.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
 
 const WINDOW_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const PORCELAIN_HEADER = /^([0-9a-f]{40})\s/;
 
-export type GitRunner = (args: string[]) => { status: number | null; stdout: string } | null;
+const execFileAsync = promisify(execFile);
+type GitResult = { status: number | null; stdout: string } | null;
+export type GitRunner = (args: string[]) => GitResult | Promise<GitResult>;
 
-export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner } = {}): void {
+export async function collectSessionChurn(
+  db: Db,
+  opts: { now?: Date; git?: GitRunner } = {},
+): Promise<void> {
   const now = opts.now ?? new Date();
   const measuredAt = now.toISOString();
   const sessions = db
@@ -22,6 +29,9 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
     `SELECT DISTINCT commit_sha
      FROM tool_events
      WHERE session_id = ? AND commit_sha IS NOT NULL`,
+  );
+  const previousMeasurement = db.prepare(
+    "SELECT status, commit_shas FROM session_churn WHERE session_id = ?",
   );
   const upsert = db.prepare(
     `INSERT INTO session_churn
@@ -40,6 +50,27 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
   );
 
   for (const session of sessions) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await awaitDbWriteGate(); // the NO_REPO upsert below follows without another await
+    const commits = authoredCommits.all(session.session_id) as Array<{ commit_sha: string }>;
+    const prior = previousMeasurement.get(session.session_id) as
+      | { status: string; commit_shas: string }
+      | undefined;
+    if (prior?.status === "MEASURED") {
+      let savedShas: unknown;
+      try {
+        savedShas = JSON.parse(prior.commit_shas);
+      } catch {
+        savedShas = null;
+      }
+      const currentShas = commits.map(({ commit_sha }) => commit_sha).sort();
+      if (
+        Array.isArray(savedShas) &&
+        savedShas.every((sha) => typeof sha === "string") &&
+        JSON.stringify([...savedShas].sort()) === JSON.stringify(currentShas)
+      )
+        continue;
+    }
     if (session.repo_path === null || session.repo_path === "") {
       upsert.run(session.session_id, "NO_REPO", WINDOW_DAYS, 0, 0, null, 0, "[]", measuredAt);
       continue;
@@ -50,14 +81,14 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
     let churnedLines = 0;
     let immature = false;
     const maturedShas: string[] = [];
-    const commits = authoredCommits.all(session.session_id) as Array<{ commit_sha: string }>;
 
     for (const { commit_sha: sha } of commits) {
-      if (!SHA_PATTERN.test(sha) || git(["cat-file", "-e", `${sha}^{commit}`]) === null) continue;
-      const merge = git(["rev-list", "--no-walk", "--merges", sha]);
+      if (!SHA_PATTERN.test(sha) || (await git(["cat-file", "-e", `${sha}^{commit}`])) === null)
+        continue;
+      const merge = await git(["rev-list", "--no-walk", "--merges", sha]);
       if (merge === null || merge.stdout.trim() !== "") continue;
 
-      const timestamp = git(["show", "-s", "--format=%cI", sha]);
+      const timestamp = await git(["show", "-s", "--format=%cI", sha]);
       if (timestamp === null) continue;
       const committedAt = new Date(timestamp.stdout.trim());
       if (Number.isNaN(committedAt.getTime())) continue;
@@ -67,7 +98,7 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
         continue;
       }
 
-      const numstat = git(["show", "--numstat", "--no-renames", "--format=", sha]);
+      const numstat = await git(["show", "--numstat", "--no-renames", "--format=", sha]);
       if (numstat === null) continue;
       let authoredForCommit = 0;
       const touchedPaths = new Set<string>();
@@ -81,7 +112,7 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
         }
       }
 
-      const horizon = git([
+      const horizon = await git([
         "rev-list",
         "-1",
         "--first-parent",
@@ -94,7 +125,7 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
       if (horizonSha !== sha) {
         survivedForCommit = 0;
         for (const filePath of touchedPaths) {
-          const blame = git(["blame", "-w", "--line-porcelain", horizonSha, "--", filePath]);
+          const blame = await git(["blame", "-w", "--line-porcelain", horizonSha, "--", filePath]);
           if (blame === null) continue;
           for (const line of blame.stdout.split(/\r?\n/)) {
             if (PORCELAIN_HEADER.exec(line)?.[1]?.toLowerCase() === sha.toLowerCase()) {
@@ -109,6 +140,7 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
       maturedShas.push(sha);
     }
 
+    await awaitDbWriteGate();
     upsert.run(
       session.session_id,
       immature ? "PARTIAL" : "MEASURED",
@@ -123,18 +155,21 @@ export function collectSessionChurn(db: Db, opts: { now?: Date; git?: GitRunner 
   }
 }
 
-function createGitRunner(repoPath: string, injected?: GitRunner): GitRunner {
+export function createGitRunner(
+  repoPath: string,
+  injected?: GitRunner,
+): (args: string[]) => Promise<GitResult> {
   if (injected !== undefined) {
-    return (args) => injected(["-C", repoPath, ...args]);
+    return async (args) => injected(["-C", repoPath, ...args]);
   }
-  return (args) => {
+  return async (args) => {
     try {
-      const result = spawnSync("git", ["-C", repoPath, ...args], {
+      const result = await execFileAsync("git", ["-C", repoPath, ...args], {
         encoding: "utf8",
         windowsHide: true,
+        maxBuffer: 32 * 1024 * 1024,
       });
-      if (result.error !== undefined || result.status !== 0) return null;
-      return { status: result.status, stdout: result.stdout };
+      return { status: 0, stdout: result.stdout };
     } catch {
       return null;
     }

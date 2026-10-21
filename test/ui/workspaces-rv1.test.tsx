@@ -7,6 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseHash } from "../../src/ui/App";
 import * as client from "../../src/ui/api/client";
+import * as esfClient from "../../src/ui/api/esf-client";
 import {
   mockClosureProxy,
   mockContextComposition,
@@ -19,6 +20,7 @@ import {
 import WorkspaceDetailPage from "../../src/ui/workspaces/WorkspaceDetailPage";
 
 vi.mock("../../src/ui/api/client");
+vi.mock("../../src/ui/api/esf-client");
 
 afterEach(() => {
   cleanup();
@@ -36,6 +38,8 @@ function setupDetailMocks(workspaceId = "ws-1") {
   vi.mocked(client.fetchCostPerSuccess).mockResolvedValue(
     mockCostPerSuccess({ preset: "7d" }, workspaceId),
   );
+  // Cohort evidence stays pending; these tests cover the data sections above it.
+  vi.mocked(esfClient.fetchEsfObservations).mockReturnValue(new Promise(() => {}));
 }
 
 // ---------------------------------------------------------------------------
@@ -87,10 +91,10 @@ describe("WorkspaceDetailPage", () => {
   it("renders KPI headers and workspace label", async () => {
     render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
     await waitFor(() => {
-      expect(screen.getByText("SPEND (7d)")).toBeTruthy();
+      expect(screen.getByText("Spend (7d)")).toBeTruthy();
     });
-    expect(screen.getByText("$/TURN")).toBeTruthy();
-    expect(screen.getByText("SESSIONS (7d)")).toBeTruthy();
+    expect(screen.getByText("Cost per turn")).toBeTruthy();
+    expect(screen.getByText("Sessions (7d)")).toBeTruthy();
   });
 
   it("renders the top sessions table", async () => {
@@ -103,29 +107,50 @@ describe("WorkspaceDetailPage", () => {
   });
 
   it("renders context composition panel", async () => {
-    render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
+    const { container } = render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
     await waitFor(() => {
-      expect(screen.getByText("Context composition")).toBeTruthy();
+      // OV-11 item 12: "Where tokens went" is the only visible heading; the panel keeps its region name.
+      expect(screen.getByRole("region", { name: "Context composition" })).toBeTruthy();
     });
+    const whereTokensCard = screen
+      .getByRole("heading", { name: "Where tokens went" })
+      .closest(".card");
+    const outcomesCard = screen.getByRole("heading", { name: "Outcomes" }).closest(".card");
+    expect(whereTokensCard?.querySelector(":scope > .card-body-padded")).not.toBeNull();
+    expect(outcomesCard?.querySelector(":scope > .card-body-padded")).not.toBeNull();
+    expect(
+      container.querySelectorAll("[data-testid='workspace-outcome-stat-cards'] > .card.kpi").length,
+    ).toBe(3);
   });
 
-  it("navigates to session detail on session row click", async () => {
+  it("uses a real session detail link in the primary cell", async () => {
     render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
     // Wait for sessions to load
     await waitFor(() => {
       expect(screen.getByRole("columnheader", { name: "Session" })).toBeTruthy();
     });
-    // Find and click a session row
-    const sessionRows = screen
-      .getAllByRole("row")
-      .filter((r) => r.getAttribute("aria-label")?.startsWith("Open session"));
-    const firstSessionRow = sessionRows[0];
-    if (firstSessionRow !== undefined) {
-      fireEvent.click(firstSessionRow);
-      await waitFor(() => {
-        expect(window.location.hash).toContain("#/sessions/");
-      });
-    }
+    // OV-11 item 11: the cell shows a short id; the full id stays in the link title.
+    const sessionLink = screen.getAllByTitle(/ua11-session-.*-ws-1-/)[0];
+    expect(sessionLink?.textContent).toMatch(/…$/);
+    expect(sessionLink).toBeDefined();
+    expect(sessionLink?.getAttribute("href")).toMatch(/^#\/sessions\//);
+    fireEvent.click(sessionLink as Element);
+    await waitFor(() => expect(window.location.hash).toContain("#/sessions/"));
+  });
+
+  it("requests cohort evidence only after the top-sessions request settles (OV-11 perf)", async () => {
+    let release!: (value: ReturnType<typeof mockWorkspaceSessions>) => void;
+    vi.mocked(client.fetchWorkspaceSessions).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(<WorkspaceDetailPage workspaceId="ws-1" onBack={() => {}} />);
+    await waitFor(() => expect(client.fetchCostPerSuccess).toHaveBeenCalledTimes(1));
+    expect(esfClient.fetchEsfObservations).not.toHaveBeenCalled();
+    release(mockWorkspaceSessions("ws-1", { preset: "7d" }));
+    await waitFor(() => expect(esfClient.fetchEsfObservations).toHaveBeenCalledTimes(1));
   });
 
   it("calls onBack when back button is clicked", async () => {

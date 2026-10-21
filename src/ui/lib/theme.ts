@@ -23,6 +23,7 @@ export function getStoredTheme(): Theme | null {
 
 export function applyTheme(theme: Theme): void {
   document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
 }
 
 export function setTheme(theme: Theme): void {

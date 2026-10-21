@@ -27,6 +27,7 @@ export { PARSER_VERSION } from "./types.js";
 export { PricingSnapshotStore, seedListPrices, LIST_PRICES } from "./pricing.js";
 export { reconcileSessions, DEFAULT_RECONCILE_OPTIONS } from "./reconcile.js";
 export { discoverFiles, registerWorkspace } from "./discovery.js";
+export { computeN, type NComputability } from "./n-computability.js";
 
 /** Run a single full back-scan of `roots` into `db`. Returns health counters. */
 export function runBackscan(

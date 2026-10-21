@@ -1,0 +1,14 @@
+{
+  "id": "D12",
+  "positive": {
+    "fixture": "positive",
+    "expect": "fires"
+  },
+  "near_misses": [
+    {
+      "fixture": "near-miss-sessions",
+      "target_constant": "D12_MIN_SIDECHAIN_SESSIONS",
+      "expect": "silent"
+    }
+  ]
+}

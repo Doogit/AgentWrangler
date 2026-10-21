@@ -18,6 +18,39 @@ function fact(packet: EvidencePacket, key: keyof EvidencePacket["facts"]) {
 }
 
 describe("RIQ6 frozen synthetic decision cases", () => {
+  it("isolates seeded databases and preserves foreign-key enforcement", () => {
+    const fixture = RIQ6_CASES[0];
+    if (!fixture) throw new Error("missing synthetic fixture");
+    const first = createRiq6Db(fixture);
+    const second = createRiq6Db(fixture);
+    try {
+      expect(first.pragma("foreign_keys", { simple: true })).toBe(1);
+      expect(second.pragma("foreign_keys", { simple: true })).toBe(1);
+      first.prepare("UPDATE workspaces SET project_slug = 'mutated-fixture'").run();
+      expect(
+        second.prepare("SELECT 1 FROM workspaces WHERE project_slug = 'mutated-fixture'").get(),
+      ).toBeUndefined();
+      first.exec("CREATE TABLE isolated_fixture_marker (id INTEGER)");
+      expect(
+        second.prepare("SELECT 1 FROM sqlite_master WHERE name = 'isolated_fixture_marker'").get(),
+      ).toBeUndefined();
+    } finally {
+      first.close();
+      second.close();
+    }
+    const later = createRiq6Db(fixture);
+    try {
+      expect(
+        later.prepare("SELECT 1 FROM workspaces WHERE project_slug = 'mutated-fixture'").get(),
+      ).toBeUndefined();
+      expect(
+        later.prepare("SELECT 1 FROM sqlite_master WHERE name = 'isolated_fixture_marker'").get(),
+      ).toBeUndefined();
+    } finally {
+      later.close();
+    }
+  });
+
   it("has complete frozen coverage", () => {
     // Exact counts are frozen-fixture semantics: adding a case is a deliberate
     // registry change, not a drive-by. Floors from the spec: >=12 seen, >=2 holdout.

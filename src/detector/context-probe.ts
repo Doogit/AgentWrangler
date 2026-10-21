@@ -1,8 +1,9 @@
 /**
  * src/detector/context-probe.ts — ContextInventoryProbe.
  *
- * Reads the always-loaded prefix sources, sizes each in tokens via
- * Math.ceil(utf8_bytes / 4) (attribution_version = "chars4-v1"), and writes
+ * Reads the always-loaded prefix sources, sizes each in tokens via a measured Claude count
+ * when one exists for the loaded content (attribution_version = "measured-pair-v1:<version>/
+ * <model>"), else Math.ceil(utf8_bytes / 4) (attribution_version = "chars4-v1"), and writes
  * per-source rows to context_inventory.  Never persists file content — only
  * path + sha1 hash + token count (SEC-101).
  *
@@ -13,11 +14,14 @@
  *         ~/.claude/plugins/installed_plugins.json +
  *         enabled plugin cache skills +
  *         ~/.claude/skills/ * /SKILL.md frontmatter name+description
- *                                      (component: MCP_SCHEMAS)
+ *                                      (component: MCP_SCHEMAS — skill/plugin text only;
+ *                                       no MCP server schema is measured)
+ *     - Per-item catalog rows (skill | plugin | mcp_server) → catalog_items. MCP servers
+ *       are listed by name with size_basis 'unmeasured' (schemas come from the server).
  *     - Tool-Search config state from ~/.claude/settings.json (component:
  *       SETTINGS_SYSTEM; state metadata only, never settings content)
  *   PER-WORKSPACE (real workspace_id):
- *     - ~/.claude/projects/<slug>/memory/ * .md  (component: MEMORY; sum)
+ *     - ~/.claude/projects/<slug>/memory/MEMORY.md (component: MEMORY; capped prefix)
  *     - <repo_path>/CLAUDE.md          (component: CLAUDE_MD; when set)
  *
  * probe_id = "probe-" + sha1(workspace_id|component|file_ref).slice(0, 16)
@@ -71,6 +75,40 @@ export interface ToolSearchState {
 /** tokens = ceil(utf8_bytes / 4) — standard cheap heuristic. */
 function countTokens(content: string): number {
   return Math.ceil(Buffer.byteLength(content, "utf8") / 4);
+}
+
+/**
+ * Claude token counts measured by `scripts/parity/measure-sources.ts` (controlled pairs; C1
+ * decision A), keyed by SHA-1 of the loaded content. Scoped to one Claude Code version and
+ * model, recorded in the attribution version. A source with no entry stays `chars4-v1`.
+ */
+interface MeasuredCounts {
+  attribution: string;
+  counts: Map<string, number>;
+}
+
+function readMeasuredCounts(file: string): MeasuredCounts | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as {
+      claudeVersion: string;
+      models: string[];
+      deltas: { mode: string; contentSha1: string; observed: number[] }[];
+    };
+    const counts = new Map<string, number>();
+    for (const delta of parsed.deltas) {
+      const [first, ...rest] = delta.observed;
+      // Only stable repeated counts are usable; anything else stays a chars4 estimate.
+      if (delta.mode === "M" && first !== undefined && rest.every((value) => value === first)) {
+        counts.set(delta.contentSha1, first);
+      }
+    }
+    return {
+      attribution: `measured-pair-v1:${parsed.claudeVersion}/${parsed.models.join("+")}`,
+      counts,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** SHA-1 hex of UTF-8 content. */
@@ -156,7 +194,7 @@ export function makeProbeId(workspaceId: string, component: Component, fileRef: 
 }
 
 /** Read a file, returning its UTF-8 text, or null if missing/unreadable. */
-function tryReadFile(filePath: string): string | null {
+export function tryReadFile(filePath: string): string | null {
   try {
     return fs.readFileSync(filePath, "utf8");
   } catch {
@@ -164,24 +202,24 @@ function tryReadFile(filePath: string): string | null {
   }
 }
 
-/** Read all *.md files in `dir`, sorted, and return their concatenated content. */
-function readMemoryDir(dir: string): string | null {
-  let files: string[];
-  try {
-    files = fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith(".md"))
-      .sort();
-  } catch {
-    return null;
+/** Read only MEMORY.md, capped at 200 lines and then 25,600 UTF-8 bytes. */
+export function readMemoryDir(dir: string): string | null {
+  const content = tryReadFile(path.join(dir, "MEMORY.md"));
+  if (content === null) return null;
+
+  const firstLines = content.split("\n").slice(0, 200).join("\n");
+  const maxBytes = 25_600;
+  if (Buffer.byteLength(firstLines, "utf8") <= maxBytes) return firstLines;
+
+  let bytes = 0;
+  let end = 0;
+  for (const character of firstLines) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    bytes += characterBytes;
+    end += character.length;
   }
-  if (files.length === 0) return null;
-  const parts: string[] = [];
-  for (const f of files) {
-    const content = tryReadFile(path.join(dir, f));
-    if (content !== null) parts.push(content);
-  }
-  return parts.length > 0 ? parts.join("\n") : null;
+  return firstLines.slice(0, end);
 }
 
 /**
@@ -189,7 +227,7 @@ function readMemoryDir(dir: string): string | null {
  * Returns a flat key→value map, or null if no frontmatter block is present.
  * Values `true`/`false` are returned as booleans; everything else as strings.
  */
-function parseFrontmatter(content: string): Record<string, string | boolean> | null {
+export function parseFrontmatter(content: string): Record<string, string | boolean> | null {
   if (!content.startsWith("---")) return null;
   const end = content.indexOf("---", 3);
   if (end === -1) return null;
@@ -231,7 +269,7 @@ function loadEnabledPlugins(claudeDir: string): Map<string, boolean> {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -314,6 +352,8 @@ interface CatalogBuildResult {
   content: string;
   itemCount: number;
   itemCountTruncated: boolean;
+  /** Per-item rows for catalog_items (skills, plugins, MCP servers). */
+  items: CatalogItem[];
 }
 
 interface ToolSearchStateRecord {
@@ -365,7 +405,7 @@ function buildToolSearchState(
 }
 
 /** Resolve an existing path only when its real path stays within `root`. */
-function resolveWithin(root: string, candidate: string): string | null {
+export function resolveWithin(root: string, candidate: string): string | null {
   try {
     const realRoot = fs.realpathSync(root);
     const realCandidate = fs.realpathSync(candidate);
@@ -382,12 +422,35 @@ function resolveWithin(root: string, candidate: string): string | null {
   return null;
 }
 
+/** One catalog entry recorded per item in catalog_items (U7 D10). */
+export interface CatalogItem {
+  kind: "skill" | "plugin" | "mcp_server";
+  name: string;
+  /** Owning plugin key (name@marketplace); null for user-level items. */
+  plugin: string | null;
+  /** Skill tool `skill` input, or the mcp__ tool-name prefix; null for plugins. */
+  usageKey: string | null;
+  /** Resident text sized with chars4; null when the size cannot be measured locally. */
+  text: string | null;
+  source: string;
+  /** Plugin MCP servers only: the raw server config (in memory only; never written to the DB). */
+  config?: Record<string, unknown>;
+}
+
+/** Plugin name as it prefixes its skills and MCP tools: the key before "@marketplace". */
+function pluginShortName(pluginKey: string): string {
+  const at = pluginKey.indexOf("@");
+  return at > 0 ? pluginKey.slice(0, at) : pluginKey;
+}
+
 /** Add direct child skills from a skills directory in deterministic order. */
 function appendSkills(
   parts: string[],
   skillsDir: string,
   boundaryRoot: string | null,
   seenSkillFiles: Set<string>,
+  items: CatalogItem[],
+  pluginKey: string,
 ): void {
   try {
     const entries = fs
@@ -405,12 +468,54 @@ function appendSkills(
       if (fm !== null && fm.enabled === false) continue;
       const name = fm !== null && typeof fm.name === "string" ? fm.name : entry.name;
       const desc = fm !== null && typeof fm.description === "string" ? fm.description : "";
-      parts.push(`skill:${name}${desc ? ` ${desc}` : ""}`);
+      const line = `skill:${name}${desc ? ` ${desc}` : ""}`;
+      parts.push(line);
+      // Plugin skills are invoked as "<plugin>:<skill>" (e.g. codex:rescue).
+      const qualified = `${pluginShortName(pluginKey)}:${name}`;
+      items.push({
+        kind: "skill",
+        name: qualified,
+        plugin: pluginKey,
+        usageKey: qualified,
+        text: line,
+        source: "plugin skill name+description (SKILL.md frontmatter)",
+      });
     }
   } catch {
     // Missing/unreadable skills directories are skipped.
   }
 }
+
+/** MCP server configs (name-sorted) from a `{ mcpServers: {...} }` file or a bare server map. */
+function mcpServerConfigs(
+  raw: string | null,
+  bareMapAllowed: boolean,
+): [string, Record<string, unknown>][] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return [];
+    const servers = isRecord(parsed.mcpServers)
+      ? parsed.mcpServers
+      : bareMapAllowed
+        ? parsed
+        : null;
+    if (servers === null) return [];
+    return Object.entries(servers)
+      .filter((e): e is [string, Record<string, unknown>] => isRecord(e[1]))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  } catch {
+    return [];
+  }
+}
+
+/** MCP server names from a `{ mcpServers: {...} }` file or a bare server map. */
+export function mcpServerNames(raw: string | null, bareMapAllowed: boolean): string[] {
+  return mcpServerConfigs(raw, bareMapAllowed).map(([name]) => name);
+}
+
+const MCP_UNMEASURED_SOURCE =
+  "tool schemas come from the running server and are not measurable from local files";
 
 /**
  * Build the plugin/skill catalog text (ESTIMATE).
@@ -424,12 +529,33 @@ function appendSkills(
  * are excluded. Frontmatter `enabled: false` skill entries are also skipped.
  * The resulting string is sized in tokens; its content is never stored.
  */
-function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
+function buildPluginCatalog(claudeDir: string, claudeJsonPath: string): CatalogBuildResult {
   const parts: string[] = [];
+  const items: CatalogItem[] = [];
   const enabledPlugins = loadEnabledPlugins(claudeDir);
+  // Installed is not enabled. Once settings.json switches any plugin on, a plugin it does not
+  // list is off too (U9 D10: an installed-but-unlisted plugin was counted as loaded). With no
+  // plugin switched on at all the map says nothing, so only an explicit false excludes.
+  const anyEnabled = [...enabledPlugins.values()].some((on) => on);
+  const pluginEnabled = (name: string): boolean => {
+    const state = enabledPlugins.get(name);
+    return state === undefined ? !anyEnabled : state;
+  };
   const pluginCacheRoot = path.join(claudeDir, "plugins", "cache");
-  const pluginInstallPaths: string[] = [];
+  // installPath -> plugin key (first key wins for a shared install path).
+  const pluginInstallPaths = new Map<string, string>();
   const seenSkillFiles = new Set<string>();
+  const pluginItem = (name: string, line: string): void => {
+    parts.push(line);
+    items.push({
+      kind: "plugin",
+      name,
+      plugin: name,
+      usageKey: null,
+      text: line,
+      source: "installed_plugins.json entry (+ its skills; enabledPlugins in settings.json)",
+    });
+  };
 
   // Plugins from installed_plugins.json
   const pluginsPath = path.join(claudeDir, "plugins", "installed_plugins.json");
@@ -444,8 +570,8 @@ function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
             const desc = p.description;
             if (typeof name === "string") {
               // Exclude plugins explicitly disabled in settings.json enabledPlugins
-              if (enabledPlugins.get(name) === false) continue;
-              parts.push(`plugin:${name}${typeof desc === "string" ? ` ${desc}` : ""}`);
+              if (!pluginEnabled(name)) continue;
+              pluginItem(name, `plugin:${name}${typeof desc === "string" ? ` ${desc}` : ""}`);
             }
           }
         }
@@ -458,13 +584,15 @@ function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
         for (const [name, installs] of Object.entries(parsed.plugins).sort(([a], [b]) =>
           a < b ? -1 : a > b ? 1 : 0,
         )) {
-          if (enabledPlugins.get(name) === false) continue;
-          parts.push(`plugin:${name}`);
+          if (!pluginEnabled(name)) continue;
+          pluginItem(name, `plugin:${name}`);
           if (!Array.isArray(installs)) continue;
           for (const install of installs) {
             if (!isRecord(install) || typeof install.installPath !== "string") continue;
             const resolvedInstall = resolveWithin(pluginCacheRoot, install.installPath);
-            if (resolvedInstall !== null) pluginInstallPaths.push(resolvedInstall);
+            if (resolvedInstall !== null && !pluginInstallPaths.has(resolvedInstall)) {
+              pluginInstallPaths.set(resolvedInstall, name);
+            }
           }
         }
       } else if (isRecord(parsed)) {
@@ -472,9 +600,9 @@ function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
           a < b ? -1 : a > b ? 1 : 0,
         )) {
           // Exclude plugins explicitly disabled in settings.json enabledPlugins
-          if (enabledPlugins.get(name) === false) continue;
+          if (!pluginEnabled(name)) continue;
           const desc = isRecord(info) ? info.description : undefined;
-          parts.push(`plugin:${name}${typeof desc === "string" ? ` ${desc}` : ""}`);
+          pluginItem(name, `plugin:${name}${typeof desc === "string" ? ` ${desc}` : ""}`);
         }
       }
     } catch {
@@ -485,15 +613,41 @@ function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
 
   // Plugin skills: traverse only cache installs named by installed_plugins.json.
   // Canonical-file deduplication prevents repeated installation records from counting the same skill.
-  for (const installPath of [...new Set(pluginInstallPaths)].sort()) {
-    appendSkills(parts, path.join(installPath, "skills"), installPath, seenSkillFiles);
+  for (const installPath of [...pluginInstallPaths.keys()].sort()) {
+    const pluginKey = pluginInstallPaths.get(installPath) as string;
+    appendSkills(
+      parts,
+      path.join(installPath, "skills"),
+      installPath,
+      seenSkillFiles,
+      items,
+      pluginKey,
+    );
+    // Plugin-bundled MCP servers: tools are named mcp__plugin_<plugin>_<server>__*.
+    const pluginMcp = resolveWithin(installPath, path.join(installPath, ".mcp.json"));
+    const pluginServers = mcpServerConfigs(
+      pluginMcp === null ? null : tryReadFile(pluginMcp),
+      true,
+    );
+    for (const [server, config] of pluginServers) {
+      const short = pluginShortName(pluginKey);
+      items.push({
+        kind: "mcp_server",
+        name: `${short}:${server}`,
+        plugin: pluginKey,
+        usageKey: `mcp__plugin_${short}_${server}__`,
+        text: null,
+        source: `plugin .mcp.json; ${MCP_UNMEASURED_SOURCE}`,
+        config,
+      });
+    }
   }
 
   // Standalone skills from ~/.claude/skills/*/SKILL.md frontmatter.
   const skillsDir = path.join(claudeDir, "skills");
   try {
     // Sort by name so the catalog string (and thus file_hash) is deterministic across
-    // machines/re-probes — readdirSync order is filesystem-dependent (matches readMemoryDir).
+    // machines/re-probes — readdirSync order is filesystem-dependent.
     const entries = fs
       .readdirSync(skillsDir, { withFileTypes: true })
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -507,10 +661,36 @@ function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
       if (fm !== null && fm.enabled === false) continue;
       const name = fm !== null && typeof fm.name === "string" ? fm.name : entry.name;
       const desc = fm !== null && typeof fm.description === "string" ? fm.description : "";
-      parts.push(`skill:${name}${desc ? ` ${desc}` : ""}`);
+      const line = `skill:${name}${desc ? ` ${desc}` : ""}`;
+      parts.push(line);
+      items.push({
+        kind: "skill",
+        name,
+        plugin: null,
+        usageKey: name,
+        text: line,
+        source: "~/.claude/skills SKILL.md frontmatter name+description",
+      });
     }
   } catch {
     // skills directory missing or unreadable — skip
+  }
+
+  // User-level MCP servers (names only — never config content). Not part of the
+  // catalog text: their schema size is not measurable from local files.
+  const userServers = new Set([
+    ...mcpServerNames(tryReadFile(path.join(claudeDir, "settings.json")), false),
+    ...mcpServerNames(tryReadFile(claudeJsonPath), false),
+  ]);
+  for (const server of [...userServers].sort()) {
+    items.push({
+      kind: "mcp_server",
+      name: server,
+      plugin: null,
+      usageKey: `mcp__${server}__`,
+      text: null,
+      source: `user mcpServers config; ${MCP_UNMEASURED_SOURCE}`,
+    });
   }
 
   // Canonical-file and repeated-install deduplication happen above. Preserve distinct
@@ -520,7 +700,59 @@ function buildPluginCatalog(claudeDir: string): CatalogBuildResult {
     content: parts.sort().join("\n"),
     itemCount: Math.min(parts.length, MAX_CATALOG_ITEMS),
     itemCountTruncated,
+    items: items.slice(0, MAX_CATALOG_ITEMS),
   };
+}
+
+/** Enabled plugins' bundled MCP servers ("<plugin>:<server>") with their raw config. */
+export function pluginMcpServers(
+  claudeDir: string,
+  claudeJsonPath: string,
+): { name: string; config: Record<string, unknown> }[] {
+  return buildPluginCatalog(claudeDir, claudeJsonPath).items.flatMap((i) =>
+    i.kind === "mcp_server" && i.config !== undefined ? [{ name: i.name, config: i.config }] : [],
+  );
+}
+
+/**
+ * Rewrite catalog_items with the current catalog. A plugin row's size is its own entry
+ * plus every skill it ships (what disabling it would remove); MCP server rows are unmeasured.
+ */
+function writeCatalogItems(db: Db, items: CatalogItem[], probedAt: string): void {
+  const pluginSkillBytes = new Map<string, number>();
+  for (const item of items) {
+    if (item.kind === "skill" && item.plugin !== null && item.text !== null) {
+      pluginSkillBytes.set(
+        item.plugin,
+        (pluginSkillBytes.get(item.plugin) ?? 0) + Buffer.byteLength(item.text, "utf8") + 1,
+      );
+    }
+  }
+  db.prepare("DELETE FROM catalog_items").run();
+  const insert = db.prepare(
+    `INSERT OR REPLACE INTO catalog_items
+       (item_id, kind, name, plugin, usage_key, tokens, bytes, size_basis, source, probed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const item of items) {
+    let bytes: number | null = null;
+    if (item.text !== null) {
+      bytes = Buffer.byteLength(item.text, "utf8");
+      if (item.kind === "plugin") bytes += pluginSkillBytes.get(item.name) ?? 0;
+    }
+    insert.run(
+      `${item.kind}|${item.name}`,
+      item.kind,
+      item.name,
+      item.plugin,
+      item.usageKey,
+      bytes === null ? null : Math.ceil(bytes / 4),
+      bytes,
+      bytes === null ? "unmeasured" : ATTRIBUTION_VERSION,
+      item.source,
+      probedAt,
+    );
+  }
 }
 
 /** Upsert one context_inventory row. Content is discarded after sizing/hashing (SEC-101).
@@ -535,29 +767,38 @@ function upsertInventoryRow(
   fileRef: string,
   content: string,
   probedAt: string,
+  measured: MeasuredCounts | null = null,
 ): void {
-  const tokens = countTokens(content);
   const fileHash = sha1Hex(content);
+  const measuredTokens = measured?.counts.get(fileHash);
+  const tokens = measuredTokens ?? countTokens(content);
+  const attribution =
+    measuredTokens === undefined ? ATTRIBUTION_VERSION : (measured?.attribution as string);
   const probeId = makeProbeId(workspaceId, component, fileRef);
 
-  // Check whether file_hash has changed from the stored value (or this is a new source).
+  // A new version is a changed file_hash (or a new source) or a changed sizing basis for the
+  // same content, so history always carries the tokens the current row claims.
   const existing = db
-    .prepare("SELECT file_hash FROM context_inventory WHERE probe_id = ?")
-    .get(probeId) as { file_hash: string } | undefined;
+    .prepare("SELECT file_hash, attribution_version FROM context_inventory WHERE probe_id = ?")
+    .get(probeId) as { file_hash: string; attribution_version: string } | undefined;
 
-  if (existing === undefined || existing.file_hash !== fileHash) {
+  if (
+    existing === undefined ||
+    existing.file_hash !== fileHash ||
+    existing.attribution_version !== attribution
+  ) {
     db.prepare(
       `INSERT INTO context_inventory_history
          (workspace_id, component, file_ref, file_hash, tokens, attribution_version, observed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(workspaceId, component, fileRef, fileHash, tokens, ATTRIBUTION_VERSION, probedAt);
+    ).run(workspaceId, component, fileRef, fileHash, tokens, attribution, probedAt);
   }
 
   db.prepare(
     `INSERT OR REPLACE INTO context_inventory
        (probe_id, workspace_id, probed_at, component, file_ref, file_hash, tokens, attribution_version)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(probeId, workspaceId, probedAt, component, fileRef, fileHash, tokens, ATTRIBUTION_VERSION);
+  ).run(probeId, workspaceId, probedAt, component, fileRef, fileHash, tokens, attribution);
 }
 
 /** Upsert a bounded metadata-only inventory row (zero context tokens). */
@@ -617,6 +858,10 @@ export interface ProbeOptions {
    * Override in tests by passing a temp directory.
    */
   claudeDir?: string;
+  /** Measured token counts file. Defaults to `~/.agentwrangler/measured-token-counts.json`. */
+  measuredCountsFile?: string;
+  /** User-level Claude config (holds `claude mcp add` servers). Defaults to `~/.claude.json`. */
+  claudeJsonPath?: string;
 }
 
 /**
@@ -631,6 +876,10 @@ export interface ProbeOptions {
 export function runContextProbe(db: Db, now: Date, opts?: ProbeOptions): ProbeResult {
   const claudeDir = opts?.claudeDir ?? path.join(os.homedir(), ".claude");
   const probedAt = now.toISOString();
+  const measured = readMeasuredCounts(
+    opts?.measuredCountsFile ??
+      path.join(os.homedir(), ".agentwrangler", "measured-token-counts.json"),
+  );
   let rows = 0;
 
   db.transaction(() => {
@@ -648,12 +897,17 @@ export function runContextProbe(db: Db, now: Date, opts?: ProbeOptions): ProbeRe
         globalClaudeMdPath,
         globalClaudeMdContent,
         probedAt,
+        measured,
       );
       rows++;
     }
 
     // ── 2. Plugin/skill catalog (ESTIMATE) ──────────────────────────────────
-    const catalog = buildPluginCatalog(claudeDir);
+    const catalog = buildPluginCatalog(
+      claudeDir,
+      opts?.claudeJsonPath ?? path.join(os.homedir(), ".claude.json"),
+    );
+    writeCatalogItems(db, catalog.items, probedAt);
     const catalogRef = path.join(claudeDir, "plugins", "skill-catalog");
     if (catalog.content.length > 0) {
       // Synthetic stable file_ref — not a real file path (catalog is derived)
@@ -701,11 +955,19 @@ export function runContextProbe(db: Db, now: Date, opts?: ProbeOptions): ProbeRe
       .all(GLOBAL_WORKSPACE_ID) as WorkspaceRow[];
 
     for (const ws of workspaces) {
-      // 3a. Project memory (sum of all *.md under memory/)
+      // 3a. Project memory (capped prefix of memory/MEMORY.md)
       const memoryDir = path.join(claudeDir, "projects", ws.project_slug, "memory");
       const memoryContent = readMemoryDir(memoryDir);
       if (memoryContent !== null) {
-        upsertInventoryRow(db, ws.workspace_id, "MEMORY", memoryDir, memoryContent, probedAt);
+        upsertInventoryRow(
+          db,
+          ws.workspace_id,
+          "MEMORY",
+          memoryDir,
+          memoryContent,
+          probedAt,
+          measured,
+        );
         rows++;
       }
 
@@ -721,6 +983,7 @@ export function runContextProbe(db: Db, now: Date, opts?: ProbeOptions): ProbeRe
             projectClaudeMdPath,
             projectClaudeMdContent,
             probedAt,
+            measured,
           );
           rows++;
         }

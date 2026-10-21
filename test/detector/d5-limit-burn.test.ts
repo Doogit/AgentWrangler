@@ -117,34 +117,29 @@ describe("D5 — degraded when limit_tokens is null", () => {
     if (!r) throw new Error("expected degraded D5 rec");
     expect(r.category).toBe("LIMIT");
     expect(r.target_metric).toBe("burn_trend");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.state).toBe("DEGRADED");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
     expect(ev.forecast_state).toBe("OFF");
     expect(ev.burn_trend).toBe("RISING");
     expect(ev.recent_cap_weighted_tokens).toBe(1_000_000);
     expect(ev.baseline_cap_weighted_tokens_per_day).toBeGreaterThan(0);
-    expect(ev.calibration_nudge).toBe("Calibrate to get a real limit");
-    expect(ev.limit_tokens).toBeNull();
-    expect(ev.projected_exhaustion_jd).toBeNull();
     expect(JSON.stringify(ev)).not.toMatch(/%/);
   });
 
   it("keeps the calibrated WARNING output unchanged", () => {
     setLimit(10_000);
+    // U7: the stored-limit path reads a 7-day burn, so drop the seeded week of turns.
+    db.prepare("DELETE FROM turns").run();
     insTurnInWindow("msg-d5-calibrated-1", 9_000);
 
     runDetectors(db, { now: NOW });
     const r = d5Recs()[0];
     if (!r) throw new Error("expected calibrated D5 rec");
     expect(r.target_metric).toBe("forecast_margin");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.title).toBe("Rate-limit warning: reduce burn before weekly reset");
-    expect(ev.state).toBe("WARNING");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.forecast_state).toBe("WARNING");
     expect(ev.tokens_used).toBe(9_000);
     expect(ev.limit_tokens).toBe(10_000);
     expect(ev.projected_exhaustion_jd).toEqual(expect.any(Number));
-    expect(ev.burn_trend).toBeUndefined();
-    expect(ev.calibration_nudge).toBeUndefined();
   });
 });
 
@@ -199,7 +194,7 @@ describe("D5 — ACTIVE when forecast is WARNING", () => {
     expect(r.modeled_savings_u_per_wk).toBeNull();
   });
 
-  it("formula.model = 'none', formula.kind = 'WARNING'", () => {
+  it("uses the registered warning formula", () => {
     setLimit(10_000);
     insTurnInWindow("msg-d5-formula-1", 9_000);
 
@@ -207,19 +202,28 @@ describe("D5 — ACTIVE when forecast is WARNING", () => {
     const r = d5Recs()[0];
     if (!r) throw new Error("expected D5 rec");
     const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-    expect(formula.model).toBe("none");
-    expect(formula.kind).toBe("WARNING");
+    expect(formula.formula_id).toBe("D5_LIMIT_BURN_FORECAST_V1");
+    expect(formula.estimate).toMatchObject({ basis: "X", rank_value_u_per_wk: null });
+    const evidence = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(evidence.session_ids).toEqual(["sess-d5"]);
+    expect(
+      db
+        .prepare("SELECT COUNT(*) AS n FROM sessions WHERE session_id = ?")
+        .get((evidence.session_ids as string[])[0]),
+    ).toEqual({ n: 1 });
   });
 
   it("evidence carries state, tokens_used, limit_tokens, projected_exhaustion_jd", () => {
     setLimit(10_000);
+    // U7: the stored-limit path reads a 7-day burn, so drop the seeded week of turns.
+    db.prepare("DELETE FROM turns").run();
     insTurnInWindow("msg-d5-ev-1", 9_000);
 
     runDetectors(db, { now: NOW });
     const r = d5Recs()[0];
     if (!r) throw new Error("expected D5 rec");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.state).toBe("WARNING");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.forecast_state).toBe("WARNING");
     expect(typeof ev.tokens_used).toBe("number");
     expect(ev.limit_tokens).toBe(10_000);
     expect(typeof ev.projected_exhaustion_jd).toBe("number");
@@ -238,10 +242,8 @@ describe("D5 — legacy limit-scale evidence", () => {
     runDetectors(db, { now: NOW });
     const r = d5Recs()[0];
     if (!r) throw new Error("expected D5 rec");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
     expect(ev.limit_scale_legacy).toBe(true);
-    expect(ev.limit_scale_note).toMatch(/full-weight/);
-    expect(ev.limit_scale_note).toMatch(/re-run Calibrate/i);
   });
 
   it("carries limit_scale_legacy=false for fresh cap-weighted provenance (no note)", () => {
@@ -254,7 +256,7 @@ describe("D5 — legacy limit-scale evidence", () => {
     runDetectors(db, { now: NOW });
     const r = d5Recs()[0];
     if (!r) throw new Error("expected D5 rec");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
     expect(ev.limit_scale_legacy).toBe(false);
     expect(ev.limit_scale_note).toBeUndefined();
   });
@@ -273,8 +275,8 @@ describe("D5 — ACTIVE when forecast is EXCEEDED", () => {
 
     const r = d5Recs()[0];
     if (!r) throw new Error("expected D5 rec");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.state).toBe("EXCEEDED");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.forecast_state).toBe("EXCEEDED");
     // Past-ETA is clamped to null (C-02).
     expect(ev.projected_exhaustion_jd).toBeNull();
   });
@@ -315,6 +317,8 @@ describe("D5 — INACTIVE when forecast is COLD_START", () => {
   it("does not fire when elapsed < 0.25 days (too little history)", () => {
     // Turn at 2026-01-07T19:00Z → anchor = 19:00, elapsed = 5h/24 ≈ 0.208d < 0.25 → COLD_START.
     setLimit(10_000);
+    // U7: the stored-limit path reads a 7-day burn, so drop the seeded week of turns.
+    db.prepare("DELETE FROM turns").run();
     insTurnInWindow("msg-d5-cold-1", 5_000, 0, COLD_START_TS);
 
     const statuses = runDetectors(db, { now: NOW });
@@ -363,5 +367,135 @@ describe("D5 — determinism", () => {
     const r = d5Recs()[0];
     if (!r) throw new Error("expected D5 rec");
     expect(r.created_at).toBe(NOW.toISOString());
+  });
+});
+
+// ── Snapshot forecast (U7): used_pct + pace to the reset ─────────────────────
+
+/**
+ * Replay shaped like the real 09-18..09-24 week: the weekly limit reset on 09-25 09:00Z and
+ * was hit on 09-24 about 09:00Z, after use climbed ~18 points a day. The old 1-day-burn
+ * check warned about 9h before the hit; the readings can warn two days before.
+ */
+const REPLAY_RESET = "2026-09-25T09:00:00.000Z";
+const REPLAY_READINGS: Array<[string, number]> = [
+  ["2026-09-18T12:00:00.000Z", 4],
+  ["2026-09-19T12:00:00.000Z", 18],
+  ["2026-09-20T12:00:00.000Z", 30],
+  ["2026-09-21T12:00:00.000Z", 48],
+  ["2026-09-22T12:00:00.000Z", 66],
+  ["2026-09-23T12:00:00.000Z", 85],
+];
+
+function seedReadings(readings: Array<[string, number]>, resetsAt = REPLAY_RESET): void {
+  for (const [ts, pct] of readings) {
+    db.prepare(
+      "INSERT INTO limit_snapshots (ts, resets_at, used_pct, source) VALUES (?, ?, ?, 'api')",
+    ).run(ts, resetsAt, pct);
+  }
+}
+
+describe("D5 — forecast from limit_snapshots", () => {
+  it("warns on 09-22, about two days before the limit was hit (not 9h before)", () => {
+    seedReadings(REPLAY_READINGS.filter(([ts]) => ts <= "2026-09-22T12:00:00.000Z"));
+    const now = new Date("2026-09-22T13:00:00.000Z");
+
+    const statuses = runDetectors(db, { now });
+    expect(statuses.find((s) => s.detector_id === "D5")?.status).toBe("ACTIVE");
+    const r = d5Recs()[0];
+    if (!r) throw new Error("expected D5 rec");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.forecast_state).toBe("WARNING");
+    expect(ev.severity).toBe("high");
+    expect(ev.used_pct).toBe(66);
+    expect(ev.projected_pct as number).toBeGreaterThan(100);
+    expect(ev.resets_at).toBe(REPLAY_RESET);
+    // The projected hit is readable ISO time, on 09-24, 40+ hours after this warning.
+    const hit = Date.parse(ev.projected_limit_hit_at as string);
+    expect(new Date(hit).toISOString().slice(0, 10)).toBe("2026-09-24");
+    expect(hit - now.getTime()).toBeGreaterThan(40 * 3_600_000);
+    expect(ev.required_cut_pct as number).toBeGreaterThan(0);
+  });
+
+  it("stays quiet for a steady week that ends well under the limit", () => {
+    seedReadings([
+      ["2026-09-19T12:00:00.000Z", 8],
+      ["2026-09-20T12:00:00.000Z", 16],
+      ["2026-09-21T12:00:00.000Z", 24],
+    ]);
+    const statuses = runDetectors(db, { now: new Date("2026-09-21T13:00:00.000Z") });
+    expect(statuses.find((s) => s.detector_id === "D5")?.status).toBe("INACTIVE");
+    expect(d5Recs()).toHaveLength(0);
+  });
+
+  it("is EXCEEDED once a reading is at 100%", () => {
+    seedReadings([
+      ["2026-09-23T12:00:00.000Z", 90],
+      ["2026-09-24T12:00:00.000Z", 100],
+    ]);
+    runDetectors(db, { now: new Date("2026-09-24T13:00:00.000Z") });
+    const r = d5Recs()[0];
+    if (!r) throw new Error("expected D5 rec");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.forecast_state).toBe("EXCEEDED");
+    expect(ev.projected_exhaustion_jd).toBeNull();
+  });
+
+  it("falls back to the week-to-date average when there is only one reading", () => {
+    seedReadings([["2026-09-22T12:00:00.000Z", 66]]);
+    runDetectors(db, { now: new Date("2026-09-22T13:00:00.000Z") });
+    const r = d5Recs()[0];
+    if (!r) throw new Error("expected D5 rec");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    // 66% in 4.1 days = about 16 points a day; 2.9 days left projects past 100%.
+    expect(ev.pace_pct_per_day as number).toBeGreaterThan(14);
+    expect(ev.pace_pct_per_day as number).toBeLessThan(18);
+    expect(ev.forecast_state).toBe("WARNING");
+  });
+
+  // Live 10-19 shape: the week reset 10-16 06:00Z; readings 13% → 27% in the last 5h. The old
+  // 3h-minimum gap read that 5h burst as "the pace of the last day" and projected 247%.
+  const BURST_RESET = "2026-10-23T06:00:00.000Z";
+  const BURST_READINGS: Array<[string, number]> = [
+    ["2026-10-19T19:10:13.874Z", 13],
+    ["2026-10-19T20:41:45.493Z", 16],
+    ["2026-10-19T22:52:34.394Z", 24],
+    ["2026-10-20T00:06:59.282Z", 27],
+  ];
+  const BURST_NOW = new Date("2026-10-20T00:23:00.000Z");
+
+  it("reads pace over the last full day, not a 5-hour burst (no local burn: by time)", () => {
+    seedReadings(BURST_READINGS, BURST_RESET);
+    const statuses = runDetectors(db, { now: BURST_NOW });
+    // Day-start used ≈ 13% × 66h/85h ≈ 10% → ~17 pts/day → ~82% by the reset: under the line.
+    expect(statuses.find((s) => s.detector_id === "D5")?.status).toBe("INACTIVE");
+    expect(d5Recs()).toHaveLength(0);
+  });
+
+  it("splits the reading gap by local burn: last day ~25 pts/day → ~108%, not 247%", () => {
+    seedReadings(BURST_READINGS, BURST_RESET);
+    insTurnInWindow("msg-d5-burst-1", 6_800, 0, "2026-10-17T02:00:00.000Z");
+    insTurnInWindow("msg-d5-burst-2", 37_000, 0, "2026-10-19T12:00:00.000Z");
+    runDetectors(db, { now: BURST_NOW });
+    const r = d5Recs()[0];
+    if (!r) throw new Error("expected D5 rec");
+    const ev = JSON.parse(r.evidence_json as string).facts as Record<string, unknown>;
+    expect(ev.pace_window_hours).toBe(24);
+    expect(ev.pace_pct_per_day as number).toBeGreaterThan(24);
+    expect(ev.pace_pct_per_day as number).toBeLessThan(26);
+    expect(ev.projected_pct as number).toBeGreaterThan(105);
+    expect(ev.projected_pct as number).toBeLessThan(111);
+    expect((ev.projected_limit_hit_at as string).slice(0, 10)).toBe("2026-10-22");
+  });
+
+  it("with a stored token limit but no readings, compares a 7-day burn, not 1 day", () => {
+    // 45,000 tokens over the week against a 100,000 weekly limit ends well under it; the old
+    // 1-day window read the last day's 30,000 burst as the whole rate and warned.
+    setLimit(100_000);
+    for (let d = 2; d <= 6; d++)
+      insTurnInWindow(`msg-d5-week-${d}`, 3_000, 0, `2026-01-0${d}T12:00:00.000Z`);
+    insTurnInWindow("msg-d5-week-7", 30_000, 0, "2026-01-07T12:00:00.000Z");
+    const statuses = runDetectors(db, { now: NOW });
+    expect(statuses.find((s) => s.detector_id === "D5")?.status).toBe("INACTIVE");
   });
 });

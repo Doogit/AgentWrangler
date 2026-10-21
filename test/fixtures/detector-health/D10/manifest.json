@@ -1,0 +1,14 @@
+{
+  "id": "D10",
+  "positive": {
+    "fixture": "positive",
+    "rows": "positive.rows.json",
+    "expect": "fires"
+  },
+  "near_miss": {
+    "fixture": "near-miss",
+    "rows": "near-miss.rows.json",
+    "target_constant": "D10_MIN_CONTEXT_SHARE",
+    "expect": "silent"
+  }
+}

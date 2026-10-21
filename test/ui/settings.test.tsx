@@ -85,6 +85,20 @@ describe("SettingsPage — UIR-10 grouping", () => {
     expect(await screen.findByLabelText("Auto-derived workspace names")).toBeTruthy();
     expect(screen.queryByText("sess-live-interactive")).toBeNull();
   });
+
+  it("describes the persisted cache-read coefficient instead of a hard-coded default", async () => {
+    const response = mockSettings();
+    if (response.data === null) throw new Error("expected settings fixture data");
+    response.data.cap_read_coeff = 0.25;
+    vi.mocked(client.fetchSettings).mockResolvedValue(response);
+
+    render(<SettingsPage />);
+
+    expect(await screen.findByText("0.25×")).toBeTruthy();
+    expect((screen.getByLabelText("Cache-read cap coefficient") as HTMLInputElement).value).toBe(
+      "0.25",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -110,8 +124,10 @@ describe("SettingsPage — parser health", () => {
     await waitFor(() => {
       expect(document.body.textContent).toMatch(/124 parsed files/);
     });
+    // Raw version id stays out of the always-visible DOM; it lives in an
+    // InfoTip whose body mounts only while open (ST-6: title= → InfoTip).
     expect(document.body.textContent).not.toMatch(/ingest-1/);
-    expect(document.querySelector("[title='Parser versions: ingest-1: 124']")).not.toBeNull();
+    expect(document.querySelector("button[aria-label='Parser version breakdown']")).not.toBeNull();
   });
 });
 
@@ -294,6 +310,56 @@ describe("SettingsPage — workspace names summary", () => {
     expect(summary.textContent).not.toContain(
       "Workspace names appear after AgentWrangler observes a working directory.",
     );
+  });
+
+  it("restores editable workspace paths and saves the complete mapping set", async () => {
+    __resetWorkspaceNamesCache();
+    setupSuccess();
+    render(<SettingsPage />);
+
+    const pathInput = await screen.findByLabelText("Repo path for orbit-api");
+    fireEvent.change(pathInput, { target: { value: "/checkout/orbit-api" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save workspace mappings" }));
+
+    await waitFor(() =>
+      expect(client.saveSettings).toHaveBeenCalledWith({
+        workspace_mappings: expect.arrayContaining([
+          expect.objectContaining({
+            workspace_id: "ws-1",
+            repo_path: "/checkout/orbit-api",
+            repo_canonical: "acme-corp/orbit-api",
+          }),
+        ]),
+      }),
+    );
+  });
+});
+
+describe("SettingsPage — DNU control and disclosure placement", () => {
+  it("uses the shared primary button class for settings save controls", async () => {
+    setupSuccess();
+    render(<SettingsPage />);
+
+    const mappingSave = await screen.findByRole("button", { name: "Save workspace mappings" });
+    expect(mappingSave.className).toContain("btn-primary");
+    expect(mappingSave.className).not.toContain("settings-save-btn");
+
+    fireEvent.click(screen.getByText("Advanced and diagnostics"));
+    const coefficientSave = screen.getByRole("button", { name: "Save cap coefficient" });
+    expect(coefficientSave.className).toContain("btn-primary");
+    expect(coefficientSave.className).not.toContain("settings-save-btn");
+  });
+
+  it("keeps the raw local database path inside Advanced", async () => {
+    setupSuccess();
+    render(<SettingsPage />);
+
+    const database = await screen.findByTestId("settings-local-database");
+    expect(database.textContent).toContain("/home/user/.agentwrangler/db.sqlite");
+    expect(database.closest("details")?.querySelector("summary")?.textContent).toContain(
+      "Advanced and diagnostics",
+    );
+    expect(database.closest("#settings-essentials")).toBeNull();
   });
 });
 
@@ -486,6 +552,69 @@ describe("Settings section navigation", () => {
   afterEach(() => {
     window.location.hash = "";
   });
+
+  it("selects Integrations for the outcomes-sync dashboard deep link", async () => {
+    window.location.hash = "#/settings?section=outcomes-sync";
+    setupSuccess();
+    render(<SettingsPage />);
+
+    const integrations = await screen.findByRole("link", { name: "Integrations" });
+    expect(integrations.getAttribute("aria-current")).toBe("page");
+    expect(
+      screen.getByRole("link", { name: "Essentials" }).getAttribute("aria-current"),
+    ).toBeNull();
+  });
+
+  it("selects In-session guards for the in-session-guards deep link", async () => {
+    window.location.hash = "#/settings?section=in-session-guards";
+    setupSuccess();
+    render(<SettingsPage />);
+
+    const guards = await screen.findByRole("link", { name: "In-session guards" });
+    expect(guards.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("selects Advanced for the parser-health dashboard deep link", async () => {
+    window.location.hash = "#/settings?section=parser-health";
+    setupSuccess();
+    render(<SettingsPage />);
+
+    const advanced = await screen.findByRole("link", { name: "Advanced" });
+    expect(advanced.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("selects Integrations after an outcomes-sync hashchange", async () => {
+    window.location.hash = "#/settings?section=essentials";
+    setupSuccess();
+    render(<SettingsPage />);
+    await screen.findByRole("link", { name: "Essentials", current: "page" });
+
+    window.location.hash = "#/settings?section=outcomes-sync";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("aria-current")).toBe(
+        "page",
+      );
+    });
+  });
+
+  it("selects Advanced after a parser-health hashchange", async () => {
+    window.location.hash = "#/settings?section=essentials";
+    setupSuccess();
+    render(<SettingsPage />);
+    await screen.findByRole("link", { name: "Essentials", current: "page" });
+
+    window.location.hash = "#/settings?section=parser-health";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Advanced" }).getAttribute("aria-current")).toBe(
+        "page",
+      );
+    });
+  });
+
   it("focuses the visible calibration action from dashboard deep links", async () => {
     window.location.hash = "#/settings?section=calibration";
     setupSuccess();

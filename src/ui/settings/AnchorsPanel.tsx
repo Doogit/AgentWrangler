@@ -21,6 +21,8 @@ import {
   DAILY_P90_USD,
 } from "../../detector/benchmark-anchors";
 import { fetchTrends } from "../api/client";
+import InfoTip from "../shell/InfoTip";
+import { SkeletonLine } from "../shell/Skeleton";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,7 +92,13 @@ export default function AnchorsPanel() {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Average */}
         <div className="settings-health-row" aria-label="benchmark avg per day">
-          <span className="settings-health-label">Average daily API bill (enterprise)</span>
+          <span className="settings-health-label">
+            Average daily API bill (enterprise){" "}
+            <InfoTip
+              label="What the average daily bill means"
+              content="A published reference: the mean daily API bill across enterprise Claude Code users. It is context for your own spend, not a target — your work mix differs, so treat it as a rough yardstick."
+            />
+          </span>
           <span className="settings-health-value">${DAILY_AVG_USD.daily_usd}/day</span>
           <span className="section-meta">
             Source:{" "}
@@ -108,7 +116,13 @@ export default function AnchorsPanel() {
 
         {/* P90 */}
         <div className="settings-health-row" aria-label="benchmark p90 per day">
-          <span className="settings-health-label">90th-percentile daily API bill (enterprise)</span>
+          <span className="settings-health-label">
+            90th-percentile daily API bill (enterprise){" "}
+            <InfoTip
+              label="What the 90th-percentile bill means"
+              content="A published reference: nine in ten enterprise Claude Code users spend less than this per day. A high-usage yardstick, not a limit or a goal for your own spend."
+            />
+          </span>
           <span className="settings-health-value">${DAILY_P90_USD.daily_usd}/day</span>
           <span className="section-meta">
             Source:{" "}
@@ -126,7 +140,13 @@ export default function AnchorsPanel() {
 
         {/* Cap impact claim */}
         <div className="settings-health-row" aria-label="cap impact claim">
-          <span className="settings-health-label">Reached a usage limit</span>
+          <span className="settings-health-label">
+            Reached a usage limit{" "}
+            <InfoTip
+              label="What the usage-limit claim means"
+              content="A published reference for how often Claude Code users reach a usage limit. It describes the wider population, not your account, and does not predict when you will reach yours."
+            />
+          </span>
           <span className="settings-health-value">{CAP_IMPACT_CLAIM.claim}</span>
           <span className="section-meta">{CAP_IMPACT_CLAIM.source}</span>
         </div>
@@ -134,19 +154,26 @@ export default function AnchorsPanel() {
         {/* Own $/active-day */}
         <div className="settings-health-row" aria-label="own cost per active day">
           <span className="settings-health-label">
-            Your estimated value per active day (30 days)
+            Your estimated value per active day (30 days){" "}
+            <InfoTip
+              label="What your value per active day means"
+              content="Your mean estimated value on days you actually used Claude Code in the last 30 days, at public list prices. Compare it to the published references above, not to your subscription bill."
+            />
           </span>
           <span className="settings-health-value" aria-label="own active day cost value">
-            {ownUsd === "loading"
-              ? "…"
-              : ownError
-                ? "unavailable"
-                : ownUsd === null
-                  ? "no data"
-                  : fmtUsd(ownUsd)}
+            {ownUsd === "loading" ? (
+              <SkeletonLine width="70px" />
+            ) : ownError ? (
+              "unavailable"
+            ) : ownUsd === null ? (
+              "no data"
+            ) : (
+              fmtUsd(ownUsd)
+            )}
           </span>
           <span className="section-meta">
-            Mean over active days (turns &gt; 0) in the last 30 days. LIST_EQUIV estimate.
+            Mean over active days (turns &gt; 0) in the last 30 days.{" "}
+            <a href="#/glossary">public list-price estimate</a>.
           </span>
         </div>
       </div>

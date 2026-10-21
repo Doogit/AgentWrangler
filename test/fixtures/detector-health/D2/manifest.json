@@ -1,0 +1,21 @@
+{
+  "id": "D2",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss-turns",
+      "target_constant": "D2_TURN_COUNT_THRESHOLD",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-avg",
+      "target_constant": "D2_AVG_CONTEXT_THRESHOLD",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-sessions",
+      "target_constant": "D2_MIN_QUALIFYING_SESSIONS",
+      "expect": "silent"
+    }
+  ]
+}

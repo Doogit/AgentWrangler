@@ -96,6 +96,7 @@ export function isolatedEnvironment(root: string, dbPath: string): NodeJS.Proces
     AW_UI_ROOT: uiRoot,
     AW_PORT: "0",
     AW_NO_OPEN: "1",
+    AW_USAGE_CLI: "off",
     AW_GITHUB_TOKEN: "",
     GH_PROMPT_DISABLED: "1",
     NO_PROXY: "*",

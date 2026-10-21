@@ -26,6 +26,11 @@ export function openDb(dbPath: string): Db {
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
+  db.pragma("busy_timeout = 5000");
+  db.pragma("cache_size = -20000"); // 20 MB page cache
+  db.pragma("mmap_size = 268435456"); // 256 MiB memory-mapped reads
+  db.pragma("journal_size_limit = 67108864"); // 64 MiB: -wal does not stay at its backfill high-water mark
+  // temp_store = MEMORY is deliberately not set: large sorts in builds would grow memory without bound.
 
   const fk = (db.pragma("foreign_keys") as Array<{ foreign_keys: number }>)[0]?.foreign_keys;
   if (fk !== 1) {
@@ -34,4 +39,13 @@ export function openDb(dbPath: string): Db {
   }
 
   return db;
+}
+
+/**
+ * Pragmas for the short-lived read-only worker connections (recs, diagnostics). They open a fresh
+ * connection per build, so a cache_size would start cold and be discarded; mmap_size shares the OS
+ * page cache with the main connection.
+ */
+export function applyReadPragmas(db: Db): void {
+  db.pragma("mmap_size = 268435456");
 }

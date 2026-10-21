@@ -11,6 +11,7 @@
 
 import { LONG_GAP_THRESHOLD_S } from "../../ingest/types.js";
 import Chip from "../shell/Chip";
+import { type SignalRow, SignalRows } from "./SignalRows";
 
 // ---------------------------------------------------------------------------
 // Thresholds (named in every tooltip — required by spec)
@@ -186,7 +187,7 @@ export function FrictionCell({
     // Compact: band dot + chip + non-zero counts on one line
     const parts: string[] = [];
     if (counts.api_error_count > 0) parts.push(`api-err ${counts.api_error_count}`);
-    if (counts.tool_error_count > 0) parts.push(`err ${counts.tool_error_count}`);
+    if (counts.tool_error_count > 0) parts.push(`tool-err ${counts.tool_error_count}`);
     if (counts.test_fail_count > 0) parts.push(`fail ${counts.test_fail_count}`);
     if (counts.compaction_count > 0) parts.push(`compact ${counts.compaction_count}`);
     if (counts.test_outcome === "FAILED_THEN_PASSED") parts.push("test fail then pass");
@@ -203,7 +204,7 @@ export function FrictionCell({
       >
         <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 2 }}>
           {bandDot}
-          <Chip kind="DIRECTIONAL" label={`LEGACY ${band}`} title={FRICTION_TOOLTIP} />
+          <Chip kind="DIRECTIONAL" label={band} title={FRICTION_TOOLTIP} />
         </div>
         {parts.length > 0 && (
           <div style={{ color: "var(--text-muted)", lineHeight: 1.4 }}>{parts.join(" · ")}</div>
@@ -212,61 +213,94 @@ export function FrictionCell({
     );
   }
 
-  // Strip variant: show all components with labels
+  // Strip variant: one expandable row per signal, worst level first. Signals with no data are
+  // hidden. The band dot + chip live in the caller's .sec-h (OV-11 item 28).
+  const rows: SignalRow[] = [
+    {
+      label: "Operational: API errors",
+      value: String(counts.api_error_count),
+      ...levelOf(counts.api_error_count, THRESHOLDS.api_errors),
+      found: `${plural(counts.api_error_count, "API error")} recorded. ${thresholdText(THRESHOLDS.api_errors)}`,
+      why: "An API error means a request to the model failed, for example from overload or a rate limit. Claude Code retries some of these automatically; each one costs waiting time and may send the input again.",
+    },
+    {
+      label: "Operational: tool errors",
+      value: String(counts.tool_error_count),
+      ...levelOf(counts.tool_error_count, THRESHOLDS.tool_errors),
+      found: `${plural(counts.tool_error_count, "tool call")} returned an error.${
+        counts.tool_error_rate == null ? "" : ` Tool error rate: ${toolRateFmt}.`
+      } ${thresholdText(THRESHOLDS.tool_errors)}`,
+      why: "Each failed tool call costs a turn, and the agent often retries the same thing. Repeated messages usually share one cause you can fix once, such as a wrong path or an edit to a stale file.",
+    },
+    {
+      label: "Recorded test failure signals",
+      value: String(counts.test_fail_count),
+      ...levelOf(counts.test_fail_count, THRESHOLDS.test_fails),
+      found: `${plural(counts.test_fail_count, "test failure signal")} recorded.${
+        /^unavailable/i.test(completedTestOutcomeFmt)
+          ? ""
+          : ` Completed-test outcome: ${completedTestOutcomeFmt}.`
+      } ${thresholdText(THRESHOLDS.test_fails)}`,
+      why: "A failure followed by a later pass is normal while building. Failures with no later pass can mean the work was left broken. A signal does not say which test failed or whether that same test passed later.",
+    },
+    {
+      label: "Context: compactions",
+      value: String(counts.compaction_count),
+      ...levelOf(counts.compaction_count, THRESHOLDS.compactions),
+      found: `${
+        counts.compaction_count === 0
+          ? "No compactions recorded."
+          : `${plural(counts.compaction_count, "compaction")} recorded: the conversation was summarized, automatically when the context window filled or by a manual /compact.`
+      } ${thresholdText(THRESHOLDS.compactions)}`,
+      why: "After a compaction the agent works from a summary, so it loses detail and often re-reads files, which costs tokens. Splitting long work into smaller sessions can avoid it.",
+    },
+    {
+      label: "Interaction: user-message share",
+      // Floor, not round: 39.6% must not read "40%" while its level is Normal.
+      value: `${Math.floor(density * 100)}%`,
+      ...levelOf(density, THRESHOLDS.reprompt),
+      found: `${counts.user_turn_count.toLocaleString("en-US")} of ${counts.turn_count.toLocaleString("en-US")} turns were your messages. Elevated at ${THRESHOLDS.reprompt.elevated * 100}% or more, high at ${THRESHOLDS.reprompt.high * 100}% or more.`,
+      why: "A high share means a lot of back-and-forth. That can be normal pairing or repeated corrections; clear instructions or a written plan up front can cut turns. It does not measure corrections directly.",
+    },
+  ];
+  if (hasGaps && counts.gap_median_s != null) {
+    rows.push({
+      label: "Time between your messages",
+      value: `median ${gapMedianFmt}`,
+      rank: 3,
+      found: (
+        <>
+          Median gap <span data-testid="gap-median">{gapMedianFmt}</span>, 90th percentile{" "}
+          <span data-testid="gap-p90">{gapP90Fmt}</span>,{" "}
+          <span data-testid="long-gap-count">{longGapFmt}</span>{" "}
+          {counts.long_gap_count === 1 ? "gap" : "gaps"} longer than {LONG_GAP_THRESHOLD_S}s.
+        </>
+      ),
+      why: "Context only, not part of the band. A gap includes time the agent spent working, so a long gap is not always time you were away. When no request runs for longer than the prompt cache lifetime (5 minutes by default), the next message writes the whole context to the cache again.",
+    });
+  }
   return (
-    <div
-      data-testid="friction-cell"
-      data-band={band}
-      title={FRICTION_TOOLTIP}
-      style={{ fontSize: 12 }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-        {bandDot}
-        <Chip kind="DIRECTIONAL" label={`LEGACY ${band}`} title={FRICTION_TOOLTIP} />
-      </div>
-      <dl
-        style={{
-          display: "grid",
-          gridTemplateColumns: "max-content 1fr",
-          gap: "3px 16px",
-          margin: 0,
-          fontSize: 11,
-          color: "var(--text-muted)",
-        }}
-      >
-        <dt>Operational: API errors</dt>
-        <dd style={{ margin: 0 }}>{counts.api_error_count}</dd>
-        <dt>API error rate</dt>
-        <dd style={{ margin: 0 }}>Unavailable (request exposure not recorded)</dd>
-        <dt>Operational: tool errors</dt>
-        <dd style={{ margin: 0 }}>{counts.tool_error_count}</dd>
-        <dt>Tool error rate</dt>
-        <dd style={{ margin: 0 }}>{toolRateFmt}</dd>
-        <dt>Recorded test failure signals</dt>
-        <dd style={{ margin: 0 }}>{counts.test_fail_count}</dd>
-        <dt>Completed-test outcome</dt>
-        <dd style={{ margin: 0 }}>{completedTestOutcomeFmt}</dd>
-        <dt>Context: compactions</dt>
-        <dd style={{ margin: 0 }}>{counts.compaction_count}</dd>
-        <dt>Interrupts</dt>
-        <dd style={{ margin: 0 }}>Unavailable (legacy zero is unsupported)</dd>
-        <dt>Interaction: user-message share</dt>
-        <dd style={{ margin: 0 }}>{Math.round(density * 100)}%</dd>
-        <dt>Gap median</dt>
-        <dd style={{ margin: 0 }} data-testid="gap-median">
-          {gapMedianFmt}
-        </dd>
-        <dt>Longer gap (90th percentile)</dt>
-        <dd style={{ margin: 0 }} data-testid="gap-p90">
-          {gapP90Fmt}
-        </dd>
-        <dt title={`Long gap = >${LONG_GAP_THRESHOLD_S}s`}>Long gaps</dt>
-        <dd style={{ margin: 0 }} data-testid="long-gap-count">
-          {longGapFmt}
-        </dd>
-      </dl>
+    <div data-testid="friction-cell" data-band={band} title={FRICTION_TOOLTIP}>
+      <SignalRows rows={rows} />
     </div>
   );
+}
+
+function plural(n: number, word: string): string {
+  return `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function thresholdText(t: { elevated: number; high: number }): string {
+  return `Elevated at ${t.elevated} or more, high at ${t.high} or more.`;
+}
+
+function levelOf(
+  value: number,
+  t: { elevated: number; high: number },
+): Pick<SignalRow, "level" | "tone" | "rank"> {
+  if (value >= t.high) return { level: "High", tone: "red", rank: 0 };
+  if (value >= t.elevated) return { level: "Elevated", tone: "amber", rank: 1 };
+  return { level: "Normal", rank: 2 };
 }
 
 export default FrictionCell;

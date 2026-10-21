@@ -78,6 +78,7 @@ import * as path from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../../src/db/migrate.js";
 import { openDb } from "../../src/db/open.js";
+import { DEFAULT_CAP_READ_COEFF, capWeightForTurn } from "../../src/query/cap-weighted.js";
 
 // ── Fixed base timestamp (2026-01-01T00:00:00Z) ──────────────────────────────
 const BASE_TS = "2026-01-01T00:00:00.000Z";
@@ -470,6 +471,198 @@ export function seedFixtureDb(db: Database.Database): void {
   insertConfig.run("last_warned_jd", null, BASE_TS);
 }
 
+// ── RR U3 user profiles (reused by U4) ──────────────────────────────────────
+// Synthetic: invented titles/slugs, token counts only (SEC-101). Times are offsets before `now`,
+// so these seeders take `now` (the base seed above is pinned to 2026-01-01).
+
+/** Cap-weighted tokens per limit-% point in the Pro profile's snapshots (so the weekly check passes). */
+export const PRO_PROFILE_TOKENS_PER_PCT = 100_000;
+/** Limit % already used this week before any local turn (claude.ai web use): readings sit this far above local usage. */
+export const PRO_PROFILE_UNSEEN_PCT = 13.1;
+
+interface ProfileTurn {
+  session: string;
+  hoursAgo: number;
+  model: string;
+  sidechain: 0 | 1;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+function seedProfile(
+  db: Database.Database,
+  prefix: string,
+  slug: string,
+  sessions: { id: string; title: string }[],
+  turns: ProfileTurn[],
+  now: Date,
+): void {
+  const ws = `ws-${prefix}`;
+  db.prepare(
+    "INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at) VALUES (?,?,?)",
+  ).run(ws, slug, now.toISOString());
+  const at = (h: number) => new Date(now.getTime() - h * 36e5).toISOString();
+  for (const s of sessions) {
+    const mine = turns.filter((t) => t.session === s.id);
+    db.prepare(
+      `INSERT OR IGNORE INTO sessions
+       (session_id, workspace_id, file_path, first_turn_at, last_turn_at, state, turn_count, cost_equiv_u, hygiene_flags, title)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      s.id,
+      ws,
+      `/fake/${prefix}/${s.id}.jsonl`,
+      at(Math.max(...mine.map((t) => t.hoursAgo))),
+      at(Math.min(...mine.map((t) => t.hoursAgo))),
+      "RECONCILED",
+      mine.length,
+      0,
+      "[]",
+      s.title,
+    );
+  }
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO turns
+     (message_id, session_id, workspace_id, ts, model, is_sidechain, input_tokens, output_tokens,
+      cache_read_tokens, cache_write_5m, cache_write_1h, cache_write_other, cost_equiv_u,
+      cost_claim, provisional, parser_version)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  turns.forEach((t, i) => {
+    const prices = t.model.includes("haiku") ? HAIKU_PRICES : SONNET_PRICES;
+    insert.run(
+      `msg-${prefix}-${i}`,
+      t.session,
+      ws,
+      at(t.hoursAgo),
+      t.model,
+      t.sidechain,
+      t.input,
+      t.output,
+      t.cacheRead,
+      t.cacheWrite,
+      0,
+      0,
+      costU(t.input, t.output, t.cacheRead, t.cacheWrite, 0, prices),
+      "LIST_EQUIV",
+      0,
+      "test-v1",
+    );
+  });
+  db.prepare(
+    "UPDATE sessions SET cost_equiv_u = (SELECT COALESCE(SUM(cost_equiv_u),0) FROM turns WHERE turns.session_id = sessions.session_id) WHERE workspace_id = ?",
+  ).run(ws);
+}
+
+/**
+ * Profile 1 — Pro user, no subagents. Three sessions over ~5 days, all main-thread, one model, plus
+ * weekly limit_snapshots (source "api") at 100k cap-weighted tokens per % point (offset by a
+ * constant 13.1 pts of use outside this machine) so the weekly tracking check passes. Limit week resets 40 h after `now`.
+ */
+export function seedProProfile(db: Database.Database, now: Date): { resetsAt: string } {
+  const sessions = [
+    { id: "pro-s1", title: "Draft the onboarding checklist" },
+    { id: "pro-s2", title: "Tidy the weekly report script" },
+    { id: "pro-s3", title: "Plan the research reading list" },
+  ];
+  const m = "claude-sonnet-5";
+  const turn = (
+    session: string,
+    hoursAgo: number,
+    input: number,
+    cacheWrite: number,
+  ): ProfileTurn => ({
+    session,
+    hoursAgo,
+    model: m,
+    sidechain: 0,
+    input,
+    output: input / 5,
+    cacheRead: input * 2,
+    cacheWrite,
+  });
+  const turns = [
+    turn("pro-s1", 110, 300_000, 400_000),
+    turn("pro-s1", 100, 200_000, 300_000),
+    turn("pro-s2", 70, 250_000, 350_000),
+    turn("pro-s2", 40, 150_000, 200_000),
+    turn("pro-s3", 20, 350_000, 450_000),
+    turn("pro-s3", 3, 100_000, 100_000),
+  ];
+  seedProfile(db, "pro", "pro-notes", sessions, turns, now);
+  const resetsAt = new Date(Math.round((now.getTime() + 40 * 36e5) / 36e5) * 36e5).toISOString();
+  const capOf = (t: ProfileTurn) =>
+    capWeightForTurn(
+      {
+        input_tokens: t.input,
+        output_tokens: t.output,
+        cache_read_tokens: t.cacheRead,
+        cache_write_5m: t.cacheWrite,
+        cache_write_1h: 0,
+        cache_write_other: 0,
+      },
+      DEFAULT_CAP_READ_COEFF,
+    );
+  const insertSnap = db.prepare(
+    "INSERT OR IGNORE INTO limit_snapshots (ts, resets_at, used_pct, source) VALUES (?,?,?,?)",
+  );
+  // A reading 1 h after each of turns 2, 4, 5 and 6 (hoursAgo 100, 40, 20, 3 -> 99, 39, 19, 2 h ago).
+  for (const upTo of [100, 40, 20, 3]) {
+    const cum = turns.filter((t) => t.hoursAgo >= upTo).reduce((a, t) => a + capOf(t), 0);
+    insertSnap.run(
+      new Date(now.getTime() - (upTo - 1) * 36e5).toISOString(),
+      resetsAt,
+      cum / PRO_PROFILE_TOKENS_PER_PCT + PRO_PROFILE_UNSEEN_PCT,
+      "api",
+    );
+  }
+  return { resetsAt };
+}
+
+/**
+ * Profile 2 — API-key user, no OAuth. Two sessions with heavy subagent (sidechain) use across two
+ * models, and no limit_snapshots, so only rolling windows and tokens/$ can be shown.
+ */
+export function seedApiKeyProfile(db: Database.Database, now: Date): void {
+  const sessions = [
+    { id: "api-s1", title: "Batch-process the nightly exports" },
+    { id: "api-s2", title: "Investigate flaky integration job" },
+  ];
+  const t = (
+    session: string,
+    hoursAgo: number,
+    model: string,
+    sidechain: 0 | 1,
+    input: number,
+  ): ProfileTurn => ({
+    session,
+    hoursAgo,
+    model,
+    sidechain,
+    input,
+    output: input / 4,
+    cacheRead: input * 3,
+    cacheWrite: input,
+  });
+  seedProfile(
+    db,
+    "api",
+    "api-batch",
+    sessions,
+    [
+      t("api-s1", 100, "claude-sonnet-5", 0, 100_000),
+      t("api-s1", 99, "claude-haiku-4", 1, 300_000),
+      t("api-s1", 98, "claude-haiku-4", 1, 300_000),
+      t("api-s2", 4, "claude-sonnet-5", 0, 200_000),
+      t("api-s2", 3, "claude-sonnet-5", 1, 400_000),
+      t("api-s2", 1, "claude-haiku-4", 1, 100_000),
+    ],
+    now,
+  );
+}
+
 /**
  * Create a fresh in-memory fixture database, run migrations, and seed it.
  * Returns the open database (caller is responsible for closing).
@@ -495,4 +688,229 @@ export function createFixtureDb(dbPath: string): Database.Database {
   runMigrations(db);
   seedFixtureDb(db);
   return db;
+}
+
+// ── RR U4 "waste" profile (held-out oracle for the audit CLI) ───────────────
+// Synthetic and invented (SEC-101). Plants exactly five wastes, each >= 5% of the profile's $:
+//   W1 oversized subagent    one general-purpose agent, 150 turns, ~400k context each (session w-s1)
+//   W2 Opus reviewer fan-out 12 sidechain `reviewer` agents on Opus doing short review turns (session w-s2)
+//   W3 idle cache rebuilds   14 main turns, each after a 2 h gap, each rewriting ~200k of 1h cache (session w-s3)
+//   W4 broken hook path      a settings hook pointing at a missing script; its non-blocking errors are in the
+//                            JSONL (scan.mjs), and the session pays for a 30-error shell retry loop (session w-s4)
+//   W5 Opus mechanical turns 60 Opus main-thread turns, each one git/npm call with ~2.5k output (session w-s5)
+// Plus a normal Sonnet baseline session (w-s0) that is NOT a waste.
+
+export const WASTE_PROFILE = {
+  workspaceId: "ws-waste",
+  slug: "waste-ledger-app",
+  sessions: [
+    { id: "w-s0", title: "Add the monthly summary export" },
+    { id: "w-s1", title: "Sweep the legacy importer for dead branches" },
+    { id: "w-s2", title: "Review the settings refactor" },
+    { id: "w-s3", title: "Draft the quarterly planning notes" },
+    { id: "w-s4", title: "Get the release build passing" },
+    { id: "w-s5", title: "Tidy commits and rerun the checks" },
+  ],
+} as const;
+
+const OPUS_PRICES = [15, 75, 1.5, 18.75, 30] as const;
+const SONNET_W_PRICES = [3, 15, 0.3, 3.75, 6] as const;
+
+export function seedWasteProfile(db: Database.Database, now: Date): void {
+  const P = WASTE_PROFILE;
+  const snap = (id: string, tier: string, prices: readonly number[]) =>
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO pricing_snapshots (snapshot_id, model_tier, unit_prices_json, captured_at, stale_after)
+         VALUES (?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        tier,
+        JSON.stringify(prices),
+        now.toISOString(),
+        new Date(now.getTime() + 30 * 864e5).toISOString(),
+      );
+  snap("snap-w-opus", "opus", OPUS_PRICES);
+  snap("snap-w-sonnet", "sonnet", SONNET_W_PRICES);
+  db.prepare(
+    "INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at, discovered_cwd) VALUES (?,?,?,?)",
+  ).run(P.workspaceId, P.slug, now.toISOString(), "/work/waste-ledger-app");
+
+  const at = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 36e5).toISOString();
+  const insertSession = db.prepare(
+    `INSERT OR IGNORE INTO sessions
+     (session_id, workspace_id, file_path, first_turn_at, last_turn_at, state, turn_count, cost_equiv_u, hygiene_flags, title)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const insertTurn = db.prepare(
+    `INSERT OR IGNORE INTO turns
+     (message_id, session_id, workspace_id, ts, model, is_sidechain, input_tokens, output_tokens,
+      cache_read_tokens, cache_write_5m, cache_write_1h, cache_write_other, pricing_snapshot_id, cost_equiv_u,
+      cost_claim, provisional, parser_version, thinking_tokens, agent_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const insertTool = db.prepare(
+    `INSERT OR IGNORE INTO tool_events (event_id, session_id, ts, tool_name, exit_class, bash_command_family)
+     VALUES (?,?,?,?,?,?)`,
+  );
+  const insertMeta = db.prepare(
+    "INSERT OR IGNORE INTO tool_event_metadata (event_id, owner_message_id, block_index, is_test_command) VALUES (?,?,0,0)",
+  );
+  const insertAgent = db.prepare(
+    "INSERT OR IGNORE INTO subagent_meta (agent_id, session_id, agent_type, tool_use_id, spawn_depth, description_len) VALUES (?,?,?,?,1,40)",
+  );
+
+  interface T {
+    session: string;
+    h: number; // hours ago
+    opus?: boolean;
+    sonnetW?: boolean; // use the 1h-priced sonnet snapshot
+    side?: boolean;
+    agent?: string;
+    input: number;
+    output: number;
+    cr: number;
+    cw5?: number;
+    cw1?: number;
+    think?: number;
+    tool?: { name: string; family: string; exit: "OK" | "ERROR" };
+  }
+  const turns: T[] = [];
+  // w-s0 baseline: 40 ordinary Sonnet turns over ~2 days, no tools.
+  for (let i = 0; i < 40; i++)
+    turns.push({
+      session: "w-s0",
+      h: 470 - i * 1.2,
+      sonnetW: true,
+      input: 4000,
+      output: 1500,
+      cr: 150_000,
+      cw5: 3000,
+    });
+  // W1: one agent, 150 turns, huge context.
+  for (let i = 0; i < 150; i++)
+    turns.push({
+      session: "w-s1",
+      h: 400 - i * 0.05,
+      sonnetW: true,
+      side: true,
+      agent: "agent-w1-big",
+      input: 6000,
+      output: 900,
+      cr: 380_000,
+      cw5: 8000,
+    });
+  // W2: 12 Opus reviewer agents x 6 short turns, in one session.
+  for (let a = 0; a < 12; a++)
+    for (let i = 0; i < 6; i++)
+      turns.push({
+        session: "w-s2",
+        h: 300 - a * 0.5 - i * 0.02,
+        opus: true,
+        side: true,
+        agent: `agent-w2-rev${a}`,
+        input: 3000,
+        output: 600,
+        cr: 40_000,
+        cw5: 8000,
+      });
+  // W3: 14 main turns, each after a 2 h idle gap, each rebuilding ~200k of 1h cache.
+  for (let i = 0; i < 14; i++)
+    turns.push({
+      session: "w-s3",
+      h: 250 - i * 2,
+      sonnetW: true,
+      input: 5000,
+      output: 800,
+      cr: 2000,
+      cw1: 200_000,
+    });
+  // W4: 60 Sonnet turns in a retry loop; 30 shell errors.
+  for (let i = 0; i < 60; i++)
+    turns.push({
+      session: "w-s4",
+      h: 150 - i * 0.1,
+      sonnetW: true,
+      input: 5000,
+      output: 1500,
+      cr: 200_000,
+      cw5: 2000,
+      tool:
+        i % 2 === 0
+          ? { name: "Bash", family: "BASH_BUILD", exit: "ERROR" }
+          : { name: "Bash", family: "BASH_BUILD", exit: "OK" },
+    });
+  // W5: 60 Opus main-thread turns, one git/npm call each, heavy output + thinking.
+  for (let i = 0; i < 60; i++)
+    turns.push({
+      session: "w-s5",
+      h: 60 - i * 0.2,
+      opus: true,
+      input: 2000,
+      output: 2500,
+      cr: 80_000,
+      cw5: 1000,
+      think: 2000,
+      tool: { name: "Bash", family: i % 2 === 0 ? "BASH_GIT" : "BASH_NPM", exit: "OK" },
+    });
+
+  for (const s of P.sessions) {
+    const mine = turns.filter((t) => t.session === s.id);
+    insertSession.run(
+      s.id,
+      P.workspaceId,
+      `/fake/waste/${s.id}.jsonl`,
+      at(Math.max(...mine.map((t) => t.h))),
+      at(Math.min(...mine.map((t) => t.h))),
+      "RECONCILED",
+      mine.length,
+      0,
+      "[]",
+      s.title,
+    );
+  }
+  const agents = new Set<string>();
+  turns.forEach((t, i) => {
+    const prices = t.opus ? OPUS_PRICES : SONNET_W_PRICES;
+    const cost = costU(t.input, t.output, t.cr, t.cw5 ?? 0, t.cw1 ?? 0, prices);
+    const id = `msg-w-${i}`;
+    insertTurn.run(
+      id,
+      t.session,
+      P.workspaceId,
+      at(t.h),
+      t.opus ? "claude-opus-5" : "claude-sonnet-5",
+      t.side ? 1 : 0,
+      t.input,
+      t.output,
+      t.cr,
+      t.cw5 ?? 0,
+      t.cw1 ?? 0,
+      0,
+      t.opus ? "snap-w-opus" : "snap-w-sonnet",
+      cost,
+      "LIST_EQUIV",
+      0,
+      "test-v1",
+      t.think ?? null,
+      t.agent ?? null,
+    );
+    if (t.agent && !agents.has(t.agent)) {
+      agents.add(t.agent);
+      insertAgent.run(
+        t.agent,
+        t.session,
+        t.agent.startsWith("agent-w2") ? "reviewer" : "general-purpose",
+        `tu-${t.agent}`,
+      );
+    }
+    if (t.tool) {
+      insertTool.run(`te-w-${i}`, t.session, at(t.h), t.tool.name, t.tool.exit, t.tool.family);
+      insertMeta.run(`te-w-${i}`, id);
+    }
+  });
+  db.prepare(
+    "UPDATE sessions SET cost_equiv_u = (SELECT COALESCE(SUM(cost_equiv_u),0) FROM turns WHERE turns.session_id = sessions.session_id) WHERE workspace_id = ?",
+  ).run(P.workspaceId);
 }

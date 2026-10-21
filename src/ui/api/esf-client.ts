@@ -1,9 +1,11 @@
 import type { EsfObservationCohort } from "../../query/api/esf-observations";
 import type { WindowFilter } from "../../query/api/overview";
 import type { ApiResponse } from "../../query/envelope";
+import { daemonFetch } from "./daemon-fetch";
 
 async function readJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+  // P1-U6a: daemonFetch, so a down daemon surfaces as DaemonUnreachableError like other reads.
+  const response = await daemonFetch(url, { signal: AbortSignal.timeout(8_000) });
   if (!response.ok) throw new Error(`Evidence could not be loaded (HTTP ${response.status}).`);
   return response.json() as Promise<T>;
 }

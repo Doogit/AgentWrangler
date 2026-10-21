@@ -16,6 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Db } from "../db/open.js";
 import {
+  type CardLookup,
   type RecommendationCard,
   adoptRecommendation,
   getRecommendationCard,
@@ -23,6 +24,7 @@ import {
 import { getQueryDb } from "../query/db-context.js";
 import type { ApiResponse } from "../query/envelope.js";
 import { buildResponse } from "../query/envelope.js";
+import { withoutAnthropicApiKey } from "../shared/claude-child-env.js";
 import { assertValidSettingsJson, generateJobSettings } from "./settings-gen.js";
 
 export type ApplyJobStatus =
@@ -279,11 +281,11 @@ function runClaudePhase(
     phase === "dry-run" ? "Read,Bash" : "Edit,Read,Bash",
     prompt,
   ];
-  const childEnv: NodeJS.ProcessEnv = {
+  const childEnv: NodeJS.ProcessEnv = withoutAnthropicApiKey({
     ...process.env,
     ...rt.env,
     AGENTWRANGLER_FILE_REF: job.file_ref,
-  };
+  });
   // biome-ignore lint/performance/noDelete: the child must not inherit Claude's nesting guard.
   delete childEnv.CLAUDECODE;
   for (const key of Object.keys(childEnv)) {
@@ -295,6 +297,7 @@ function runClaudePhase(
     cwd: job.workspace_cwd,
     stdio: "pipe",
     env: childEnv,
+    windowsHide: true,
   });
 
   let stdout = "";
@@ -476,10 +479,11 @@ export function startApplyJob(
   recId: string,
   workspaceCwd: string,
   overrides?: ApplyRuntimeOverrides,
+  cardFor?: CardLookup,
 ): ApiResponse<{ job_id: string }> {
   const db = getQueryDb();
   const rt = runtime(overrides);
-  const rec = getRecommendationCard(recId);
+  const rec = cardFor?.(recId) ?? getRecommendationCard(recId);
   if (rec === null) throw new Error(`rec ${recId} not found`);
   if (rec.scope_workspace_id === null) {
     throw new Error("global-file recs route to Copy-prompt");
@@ -565,13 +569,14 @@ export function getApplyJob(jobId: string): ApiResponse<ApplyJobPublic> {
 export function confirmApplyJob(
   jobId: string,
   overrides?: ApplyRuntimeOverrides,
+  cardFor?: CardLookup,
 ): ApiResponse<{ job_id: string; status: "CONFIRMING" }> {
   const db = getQueryDb();
   const rt = runtime(overrides);
   const job = rowById(db, jobId);
   if (job === null) throw new Error(`job ${jobId} not found`);
   if (job.status !== "DRY_DONE") throw new Error("job is not ready for confirm");
-  const rec = getRecommendationCard(job.rec_id);
+  const rec = cardFor?.(job.rec_id) ?? getRecommendationCard(job.rec_id);
   if (rec === null) throw new Error(`rec ${job.rec_id} not found`);
 
   const backupPath = path.join(rt.tmpRoot, "backups", `${job.job_id}.bak`);

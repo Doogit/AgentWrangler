@@ -198,10 +198,13 @@ describe("GET /api/status boot fields", () => {
     expect(r.status).toBe(200);
     const body = JSON.parse(r.body) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual([
+      "data_scopes", // P2-U2: poll-first scope counters (perf plan P2-U2)
+      "data_version", // P2-U2
       "files_parsed",
       "files_seen",
       "invalid_scan_root_count",
       "lines_quarantined",
+      "loop_lag", // P0-U2: optional steady-state field (perf plan §6 P0-U2)
       "scan_state",
       "sessions",
     ]);

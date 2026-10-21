@@ -1,0 +1,9 @@
+{
+  "id": "C6",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "minimum reversal pairs",
+    "expect": "silent"
+  }
+}

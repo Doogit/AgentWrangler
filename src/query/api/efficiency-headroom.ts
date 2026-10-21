@@ -1,77 +1,89 @@
 /**
  * src/query/api/efficiency-headroom.ts — BM2 efficiency headroom.
  *
- * "How far am I from my own modeled ceiling?" — the sum of modeled weekly
- * savings across the OPEN recommendations (state PROPOSED or ADOPTED, non-null
- * savings) expressed as a fraction of the trailing-7d actual spend.
- *
- * Honesty contract: this is a MODELED ceiling built from unvalidated per-detector
- * fractions (e.g. D6's avoidance fraction is UNVALIDATED). It is "modeled headroom
- * — if every open recommendation were applied", never a "$X wasted" headline
- * (INT-5). The frozen envelope has no MODELED ClaimKind, so it rides as
- * EXPERIMENTAL with the caveat carried in the qualification note.
+ * P3.L L6: addressable spend is the WHOLE spend lane — billed spend in [from, to) owned by
+ * ANY spend-lane claim on the exclusive claim ledger, not only claims of open PROPOSED recs.
+ * Each priced token cell is counted at most once (net of overlaps). The reliability lane
+ * (failure-family detectors) is a separate lane and is never counted here.
  *
  * FR-REC-103 is respected: this is a SEPARATE surface from listRecommendations,
  * which still never sums modeled savings into an "achieved" total.
  *
- * SEC-101: sums of existing aggregates (recommendations.modeled_savings_u_per_wk,
- * turns.cost_equiv_u) only — no transcript content.
+ * SEC-101: uses billed token counts and aggregate recommendation contracts only.
  */
 
 import type { Db } from "../../db/open.js";
+import {
+  CLAIM_PRODUCERS,
+  type ClaimProducer,
+  SPEND_LANE_DETECTOR_IDS,
+  buildClaimLedger,
+} from "../../detector/claim-ledger.js";
 import type { ApiResponse } from "../envelope.js";
 import { buildResponse } from "../envelope.js";
+import {
+  type PersistedRecommendationContractRow,
+  trustedRecommendationContract,
+} from "../recommendation-contract.js";
 
 export interface EfficiencyHeadroom {
   /** Individual open modeled opportunities. They must never be summed as an attainable ceiling. */
   opportunities?: Array<{ rec_id: string; modeled_savings_u_per_wk: number }>;
-  /** Σ modeled_savings_u_per_wk over open (PROPOSED|ADOPTED) recs with non-null savings, in µUSD/wk. */
+  /** Billed spend owned by the whole spend lane in [from, to), in integer micro-USD. */
   headroom_u_per_wk: number;
   /** Trailing-window Σ turns.cost_equiv_u (LIST_EQUIV), in µUSD. */
   actual_u_per_wk: number;
-  /** Always null: modeled opportunities cannot form a combined efficiency percentage. */
+  /** headroom_u_per_wk / actual_u_per_wk as a percentage (0–100); null when actual is 0. */
   headroom_pct: number | null;
   /** Open recs contributing a non-null savings figure. */
   open_rec_count: number;
+  /** Open recs whose detector has a spend-lane producer but no claim in the window. */
+  unclaimed_rec_count: number;
   from: string;
   to: string;
-}
-
-interface HeadroomRow {
-  sum_u: number | null;
-  with_savings: number;
-  open_total: number;
 }
 
 interface SpendRow {
   actual_u: number;
 }
 
-interface OpportunityRow {
+interface OpportunityRow extends PersistedRecommendationContractRow {
   rec_id: string;
-  modeled_savings_u_per_wk: number;
+  scope_workspace_id: string | null;
+  modeled_savings_u_per_wk: number | null;
 }
 
 /**
- * Compute the efficiency-headroom ratio over [from, to). The headroom numerator
- * is window-independent (it sums the current open recommendation set); the
- * denominator is the actual spend in the window (default trailing 7d).
+ * Attribute selected-window billed spend to the current open recommendation set.
  */
 export function getEfficiencyHeadroom(
   db: Db,
   opts: { from: string; to: string },
+  producers: readonly ClaimProducer[] = CLAIM_PRODUCERS,
 ): ApiResponse<EfficiencyHeadroom> {
   const { from, to } = opts;
 
-  const recs = db
+  const recommendationRows = db
     .prepare(
-      `SELECT COALESCE(SUM(modeled_savings_u_per_wk), 0) AS sum_u,
-              COUNT(modeled_savings_u_per_wk) AS with_savings,
-              COUNT(*) AS open_total
-         FROM recommendations
-        WHERE state IN ('PROPOSED', 'ADOPTED')`,
+      `SELECT rec_id, detector_id, scope_workspace_id, category, lever, target_metric,
+              modeled_savings_u_per_wk, evidence_json,
+              contract_version, template_id, contract_status, rule_id
+        FROM recommendations
+        WHERE state = 'PROPOSED'
+          AND CASE WHEN json_valid(evidence_json) THEN
+            COALESCE(json_extract(evidence_json, '$.facts.weeks_ago'),
+                     json_extract(evidence_json, '$.recency.weeks_ago'), 0) = 0
+            AND COALESCE(json_extract(evidence_json, '$.facts.weeks_fired'),
+                         json_extract(evidence_json, '$.recency.weeks_fired'), 1) > 0
+          ELSE 0 END
+        ORDER BY rec_id`,
     )
-    .get() as HeadroomRow;
+    .all() as OpportunityRow[];
+  const opportunities = recommendationRows.flatMap((row) =>
+    trustedRecommendationContract(row) !== null && row.modeled_savings_u_per_wk !== null
+      ? [{ rec_id: row.rec_id, modeled_savings_u_per_wk: row.modeled_savings_u_per_wk }]
+      : [],
+  );
 
   const spend = db
     .prepare(
@@ -81,27 +93,35 @@ export function getEfficiencyHeadroom(
     )
     .get(from, to) as SpendRow;
 
-  const opportunities = db
-    .prepare(
-      `SELECT rec_id, modeled_savings_u_per_wk
-         FROM recommendations
-        WHERE state IN ('PROPOSED', 'ADOPTED') AND modeled_savings_u_per_wk IS NOT NULL
-        ORDER BY rec_id`,
-    )
-    .all() as OpportunityRow[];
-  const headroom_u_per_wk = recs.sum_u ?? 0;
+  const openRecIds = new Set(opportunities.map((opportunity) => opportunity.rec_id));
+  const openRecs = recommendationRows.filter(
+    (row) => openRecIds.has(row.rec_id) && row.detector_id !== null,
+  ) as Array<OpportunityRow & { detector_id: string }>;
+  const ledger = buildClaimLedger(db, { now: new Date(to), fromIso: from, toIso: to }, producers);
+  const spendLaneClaims = ledger.claims.filter((claim) => claim.lane === "spend");
+  const headroom_u_per_wk = Math.round(
+    spendLaneClaims.reduce((sum, claim) => sum + claim.value_u, 0),
+  );
+  const claimedRecIds = new Set(
+    spendLaneClaims.flatMap((claim) => (claim.recId === undefined ? [] : [claim.recId])),
+  );
+  const unclaimed_rec_count = openRecs.filter(
+    (row) => SPEND_LANE_DETECTOR_IDS.has(row.detector_id) && !claimedRecIds.has(row.rec_id),
+  ).length;
   const actual_u_per_wk = spend.actual_u;
 
-  // Individual recommendation models overlap and their weekly horizon differs from
-  // the trailing spend window, so a combined percentage would be misleading.
-  const headroom_pct: number | null = null;
+  // P3.L L6: the whole spend lane cannot exceed billed actual spend (each token counted once),
+  // so a share of trailing-window spend is a safe combined percentage.
+  const headroom_pct: number | null =
+    actual_u_per_wk > 0 ? (headroom_u_per_wk / actual_u_per_wk) * 100 : null;
 
   const data: EfficiencyHeadroom = {
     opportunities,
     headroom_u_per_wk,
     actual_u_per_wk,
     headroom_pct,
-    open_rec_count: recs.with_savings,
+    open_rec_count: opportunities.length,
+    unclaimed_rec_count,
     from,
     to,
   };
@@ -109,13 +129,13 @@ export function getEfficiencyHeadroom(
   return buildResponse(data, {
     claim_kind: "EXPERIMENTAL",
     metric_definition_version: "esf-1",
-    n: recs.with_savings,
+    n: opportunities.length,
     window: { from, to },
     qualification: {
       provisional_excluded: true,
       unpriced_turns: 0,
       claim_kinds_count: 1,
-      note: "Individual modeled weekly opportunities are not summed: recommendations can overlap and their weekly horizon differs from the trailing spend window.",
+      note: "Addressable spend: the whole spend lane on the claim ledger in this window (each token counted once, net of overlaps, so it cannot exceed actual spend) — not only claims of currently open recommendations. Recommendations without ledger claims count 0. Failure-family claims are a separate reliability lane and are not counted.",
     },
   });
 }

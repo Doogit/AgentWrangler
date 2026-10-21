@@ -1,0 +1,21 @@
+{
+  "id": "C1",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss-calls",
+      "target_constant": "C1_MIN_TOOL_CALLS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-errors",
+      "target_constant": "C1_MIN_TOOL_ERRORS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-multiplier",
+      "target_constant": "C1_BASELINE_MULTIPLIER",
+      "expect": "silent"
+    }
+  ]
+}

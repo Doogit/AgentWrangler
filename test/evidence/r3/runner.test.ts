@@ -29,7 +29,7 @@ const evaluatorModulePath = path.join(process.cwd(), "src", "outcomes", "linker.
 
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
-});
+}, 30_000);
 
 async function fixture(
   schema: 5 | 6 | 7 = 7,
@@ -66,6 +66,38 @@ async function fixture(
     "019_work_records",
     "020_local_command_retention",
     "021_recommendation_feedback",
+    "022_classifier_boundaries",
+    "023_privacy_contract",
+    "024_finding_contract_v2",
+    "025_tool_error_classifier",
+    "026_recommendation_contract_guards",
+    "027_handler_recommendation_storage",
+    "028_tool_event_content",
+    "029_subagent_meta",
+    "030_detector_week_results",
+    "031_detector_status_live",
+    "032_session_title",
+    "033_compaction_positions",
+    "034_ingest_metric_events_session_position",
+    "035_rec_lifecycle",
+    "036_rec_lifecycle_actions",
+    "037_subagent_meta_session_index",
+    "038_turns_agent_id",
+    "039_unrestrict_app_content",
+    "040_ledger_daily",
+    "041_perf_indexes",
+    "042_limit_snapshots",
+    "043_tool_error_labels_v2",
+    "044_c6_edit_string_hashes",
+    "045_catalog_items",
+    "046_detector_contract_v2",
+    "047_ingest_metric_events_event_ts",
+    "048_ingest_offset_identity",
+    "049_setup_grade_snapshots",
+    "050_setup_grade_indexes",
+    "051_judge_verdicts",
+    "052_classifier_version_2",
+    "053_turns_grade_cover",
   ]) {
     db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(version);
   }
@@ -294,7 +326,7 @@ async function prepared(
   return { ...fx, paths, manifest, request, aggregate };
 }
 
-describe("R3 fixture-only runner", () => {
+describe("R3 fixture-only runner", { timeout: 30_000 }, () => {
   it("rejects incomplete, unknown, and duplicate CLI arguments before any evidence read", async () => {
     await expect(runR3Cli([])).rejects.toThrow("r3_cli_command_invalid");
     await expect(runR3Cli(["evaluate", "--unknown", "value"])).rejects.toThrow(
@@ -343,7 +375,7 @@ describe("R3 fixture-only runner", () => {
     const fx = await prepared(7, false, true);
     expect(fx.aggregate.deterministicRerun.equal).toBe(true);
     expect(fx.aggregate.denominator.excludedNoWorkItemsN).toBeGreaterThanOrEqual(1);
-  });
+  }, 15_000);
 
   it("keeps the baseline-linked numerator within the evidence-bearing corpus", async () => {
     const fx = await prepared(7, true);

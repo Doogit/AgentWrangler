@@ -44,6 +44,52 @@ describe("GhCliClient — disabled state", () => {
   });
 });
 
+describe("GhCliClient repository access probe", () => {
+  it("uses a bounded read for a selected repository", async () => {
+    const calls: Array<{ args: string[]; options: Parameters<GhRunner>[1] }> = [];
+    const runner: GhRunner = async (args, options) => {
+      calls.push({ args, options });
+      return { ok: true, stdout: "[]", stderr: "", code: 0 };
+    };
+    await expect(
+      new GhCliClient({ ok: true, data: "secret" }, runner).testRepositoryAccess("owner", "repo"),
+    ).resolves.toEqual({ ok: true, data: "accessible" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.args).toEqual(["api", "repos/owner/repo/pulls?per_page=1"]);
+    expect(calls[0]?.options).toMatchObject({ timeoutMs: 20_000, maxStdoutBytes: 512 * 1024 });
+  });
+
+  it.each([
+    [{ httpStatus: 401 }, "github-api-error:401"],
+    [{ httpStatus: 403 }, "github-api-error:403"],
+    [{ httpStatus: 404 }, "github-api-error:404"],
+    [{ httpStatus: 429 }, "github-api-error:429"],
+    [{ failure: "timeout" }, "github-api-error:timeout"],
+  ] as const)("classifies a failed probe without exposing stderr: %s", async (failure, reason) => {
+    const { runner } = makeRunner(() => ({
+      ok: false,
+      code: 1,
+      stderr: "private details",
+      ...failure,
+    }));
+    const result = await new GhCliClient({ ok: true, data: "secret" }, runner).testRepositoryAccess(
+      "o",
+      "r",
+    );
+    expect(result).toEqual({ ok: false, reason });
+    expect(JSON.stringify(result)).not.toContain("private details");
+  });
+
+  it("rejects malformed JSON and malformed PR rows", async () => {
+    for (const stdout of ["{", "{}", "[{}]"]) {
+      const { runner } = makeRunner(() => ({ stdout }));
+      await expect(
+        new GhCliClient({ ok: true, data: "secret" }, runner).testRepositoryAccess("o", "r"),
+      ).resolves.toEqual({ ok: false, reason: "github-pr-payload-invalid" });
+    }
+  });
+});
+
 describe("GhCliClient — listPRs", () => {
   it("parses the PR list from gh api stdout", async () => {
     const fakePRs = [

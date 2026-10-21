@@ -52,10 +52,12 @@ function input(overrides: Record<string, unknown> = {}) {
 describe("scratch approval candidate builder", () => {
   it("builds deterministic exact-schema canonical bytes in binary workspace order", async () => {
     const result = await createScratchApprovalCandidate(input(), { repositoryRoot });
+    // The manifest records canonical paths; tmpdir may sit under a symlink (macOS /var).
+    const realRoot = fs.realpathSync.native(root);
     const expected = buildScratchApprovalManifest({
       sourceDbPath: fs.realpathSync.native(sourceDbPath),
-      scratchDbPath,
-      scratchStatePath,
+      scratchDbPath: path.join(realRoot, "evidence", "db.sqlite"),
+      scratchStatePath: path.join(realRoot, "evidence", "state"),
       repositories,
       privateArtifactParentAcknowledged: true,
     });

@@ -1,0 +1,16 @@
+{
+  "id": "E1",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss-min-sessions",
+      "target_constant": "E1_MIN_EDITING_SESSIONS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-p75",
+      "target_constant": "p75 pre-edit count",
+      "expect": "silent"
+    }
+  ]
+}

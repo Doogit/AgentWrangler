@@ -7,7 +7,11 @@
 
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_RECHECK_TTL_MS, extractFindings } from "../../src/outcomes/findings.js";
+import {
+  DEFAULT_RECHECK_TTL_MS,
+  extractAllFindings,
+  extractFindings,
+} from "../../src/outcomes/findings.js";
 import { GithubSyncClient } from "../../src/outcomes/github/client.js";
 import type { FetchFn } from "../../src/outcomes/github/client.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
@@ -99,6 +103,24 @@ beforeEach(() => {
 
 afterEach(() => {
   db.close();
+});
+
+describe("findings stage summary", () => {
+  it("reports a swallowed GraphQL failure with only an allowlisted category", async () => {
+    seedWorkItem(db, "gh:acme/repo-alpha#88", 88, "OPEN");
+    const client = makeClient();
+    client.getReviewThreads = async () => ({
+      ok: false,
+      reason: "private-detail github-graphql-error:403",
+    });
+    const summary = await extractAllFindings(db, client);
+    expect(summary).toMatchObject({
+      eligibleRepositories: 1,
+      failedReads: 1,
+      categories: { "access-ambiguous": 1 },
+    });
+    expect(JSON.stringify(summary)).not.toContain("private-detail");
+  });
 });
 
 // ---------------------------------------------------------------------------

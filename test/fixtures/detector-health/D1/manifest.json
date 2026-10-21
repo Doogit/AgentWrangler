@@ -1,0 +1,24 @@
+{
+  "id": "D1",
+  "positive": { "fixture": "positive", "rows": "rows-positive.json", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss-target",
+      "rows": "rows-near-miss-target.json",
+      "target_constant": "D1_SOURCE_TARGETS.CLAUDE_MD",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-share",
+      "rows": "rows-near-miss-share.json",
+      "target_constant": "D1_MIN_CONTEXT_SHARE",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-spend",
+      "rows": "rows-near-miss-spend.json",
+      "target_constant": "D1_MIN_PCT_OF_SPEND",
+      "expect": "silent"
+    }
+  ]
+}

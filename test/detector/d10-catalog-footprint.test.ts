@@ -1,8 +1,10 @@
 /**
- * test/detector/d10-catalog-footprint.test.ts - D10 CATALOG_FOOTPRINT.
+ * test/detector/d10-catalog-footprint.test.ts - D10 CATALOG_FOOTPRINT (U7).
  *
- * D10 is config-aware but intentionally estimate-only: the probe does not
- * observe which deferred definitions entered a particular turn.
+ * D10 reads per-item catalog rows and lists plugins/skills with no recorded use in the
+ * window, largest first. Audit evidence (U7): the old fixed 40k target was unreachable for
+ * a ~4.9k catalog, and savings were nulled under deferred Tool Search even though skill
+ * descriptions are always resident. Fixtures are synthetic (SEC-101).
  */
 
 import type Database from "better-sqlite3";
@@ -12,13 +14,15 @@ import {
   type ToolSearchState,
   encodeToolSearchState,
 } from "../../src/detector/context-probe.js";
-import { D10_CATALOG_FOOTPRINT_TARGET_TOKENS } from "../../src/detector/detectors/d10_catalog_footprint.js";
+import { D10_MIN_CONTEXT_SHARE } from "../../src/detector/detectors/d10_catalog_footprint.js";
 import { runDetectors } from "../../src/detector/index.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 const NOW = new Date("2026-01-08T00:00:00.000Z");
+const FROM = "2026-01-01T00:00:00.000Z";
 
 let db: Database.Database;
+let meanContext: number;
 
 beforeEach(() => {
   db = createInMemoryFixtureDb();
@@ -26,26 +30,16 @@ beforeEach(() => {
     `INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at)
      VALUES (?, ?, ?)`,
   ).run(GLOBAL_WORKSPACE_ID, "__global__", "2026-01-01T00:00:00.000Z");
+  meanContext = (
+    db
+      .prepare(
+        "SELECT AVG(context_tokens) AS m FROM turns WHERE ts >= ? AND ts < ? AND provisional = 0",
+      )
+      .get(FROM, NOW.toISOString()) as { m: number }
+  ).m;
 });
 
 afterEach(() => db.close());
-
-function insInventory(component: string, fileRef: string, tokens: number): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO context_inventory
-       (probe_id, workspace_id, probed_at, component, file_ref, file_hash, tokens, attribution_version)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    `probe-d10-${component}-${tokens}`,
-    GLOBAL_WORKSPACE_ID,
-    "2026-01-07T00:00:00.000Z",
-    component,
-    fileRef,
-    "abc123",
-    tokens,
-    component === "SETTINGS_SYSTEM" ? "settings-state-hash" : "chars4-v1",
-  );
-}
 
 function insState(overrides: Partial<ToolSearchState> = {}): void {
   const state: ToolSearchState = {
@@ -55,7 +49,7 @@ function insState(overrides: Partial<ToolSearchState> = {}): void {
     always_load_flags: [],
     always_load_count: 0,
     always_load_flags_truncated: false,
-    catalog_item_count: 2,
+    catalog_item_count: 5,
     catalog_item_count_truncated: false,
     catalog_hash: "c".repeat(40),
     ...overrides,
@@ -76,128 +70,171 @@ function insState(overrides: Partial<ToolSearchState> = {}): void {
   );
 }
 
-function d10Recs(): Array<Record<string, unknown>> {
-  return db
-    .prepare("SELECT * FROM recommendations WHERE detector_id='D10' ORDER BY rec_id")
-    .all() as Array<Record<string, unknown>>;
+function insItem(
+  kind: "skill" | "plugin" | "mcp_server",
+  name: string,
+  tokens: number | null,
+  plugin: string | null = null,
+  usageKey: string | null = kind === "plugin" ? null : name,
+): void {
+  db.prepare(
+    `INSERT INTO catalog_items
+       (item_id, kind, name, plugin, usage_key, tokens, bytes, size_basis, source, probed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'synthetic', '2026-01-07T00:00:00.000Z')`,
+  ).run(
+    `${kind}|${name}`,
+    kind,
+    name,
+    plugin,
+    usageKey,
+    tokens,
+    tokens === null ? null : tokens * 4,
+    tokens === null ? "unmeasured" : "chars4-v1",
+  );
 }
 
-function d10Evidence(): Record<string, unknown> {
-  const rec = d10Recs()[0];
+let eventSeq = 0;
+function useTool(toolName: string, ts: string, skillName: string | null = null): void {
+  const eventId = `d10-ev-${eventSeq++}`;
+  db.prepare(
+    "INSERT INTO tool_events (event_id, session_id, ts, tool_name) VALUES (?, 'sess-a1', ?, ?)",
+  ).run(eventId, ts, toolName);
+  if (skillName !== null) {
+    db.prepare("INSERT INTO tool_event_skills (event_id, skill_name) VALUES (?, ?)").run(
+      eventId,
+      skillName,
+    );
+  }
+}
+
+/** The audit-shaped catalog: ~4.9k tokens, well under the old 40k target. */
+function seedRealShapedCatalog(bigPluginTokens: number): void {
+  insItem("plugin", "big@market", bigPluginTokens, "big@market");
+  insItem("skill", "big:draw", bigPluginTokens - 10, "big@market");
+  insItem("plugin", "busy@market", 800, "busy@market");
+  insItem("skill", "busy:go", 790, "busy@market");
+  insItem("skill", "solo", 120);
+  insItem("skill", "daily", 200);
+  insItem("mcp_server", "srv", null, null, "mcp__srv__");
+  useTool("Skill", "2026-01-05T00:00:00.000Z", "busy:go");
+  useTool("Skill", "2026-01-06T00:00:00.000Z", "daily");
+  useTool("Skill", "2025-12-20T00:00:00.000Z", "solo"); // before the window
+}
+
+function d10Status() {
+  return runDetectors(db, { now: NOW }).find((s) => s.detector_id === "D10");
+}
+
+function d10Rec(): Record<string, unknown> {
+  const rec = db.prepare("SELECT * FROM recommendations WHERE detector_id='D10'").get() as
+    | Record<string, unknown>
+    | undefined;
   if (rec === undefined) throw new Error("expected D10 recommendation");
-  return JSON.parse(rec.evidence_json as string) as Record<string, unknown>;
+  return rec;
+}
+
+function d10Facts(): Record<string, unknown> {
+  return JSON.parse(d10Rec().evidence_json as string).facts as Record<string, unknown>;
 }
 
 describe("D10 - CATALOG_FOOTPRINT", () => {
-  it("stays NOT_EVALUATED when only catalog inventory is available", () => {
-    insInventory(
-      "MCP_SCHEMAS",
-      "/home/.claude/plugins/skill-catalog",
-      D10_CATALOG_FOOTPRINT_TARGET_TOKENS + 15_000,
-    );
-
-    const statuses = runDetectors(db, { now: NOW });
-    expect(statuses.find((s) => s.detector_id === "D10")?.status).toBe("NOT_EVALUATED");
-    expect(statuses.find((s) => s.detector_id === "D10")?.note).toContain(
-      "config state is not measured",
-    );
-    expect(d10Recs()).toHaveLength(0);
+  it("stays NOT_EVALUATED until the probe has written per-item rows", () => {
+    insState();
+    expect(d10Status()?.status).toBe("NOT_EVALUATED");
+    expect(d10Status()?.note).toContain("no per-item catalog rows");
   });
 
-  it("emits a deferred-state estimate with no economic savings claim", () => {
-    insInventory(
-      "MCP_SCHEMAS",
-      "/home/.claude/plugins/skill-catalog",
-      D10_CATALOG_FOOTPRINT_TARGET_TOKENS + 15_000,
-    );
+  it("fires on a ~4.9k catalog (old 40k target unreachable) and prices skills under deferred Tool Search", () => {
+    const big = Math.max(3_000, Math.ceil(meanContext * D10_MIN_CONTEXT_SHARE) + 1);
+    seedRealShapedCatalog(big);
+    insState(); // deferred
+
+    const status = d10Status();
+    expect(status?.status).toBe("ACTIVE");
+    expect(status?.note).toContain("defers MCP tool definitions");
+
+    const facts = d10Facts();
+    // Unused in the window, largest first; used items (busy plugin, daily) are excluded,
+    // and an MCP server is not listed while Tool Search defers its schemas.
+    expect(facts.disable_list).toEqual([
+      `plugin big@market (~${big} tokens; no recorded use)`,
+      "skill solo (~120 tokens; last used 2025-12-20)",
+    ]);
+    expect(facts.removable_tokens).toBe(big + 120);
+    expect(facts.catalog_tokens).toBe(big + 800 + 120 + 200);
+    expect(facts.unmeasured_mcp_server_count).toBe(1);
+    expect(facts.skill_use_untracked_count).toBe(0);
+    // Skill descriptions are always resident: savings are priced even under deferred.
+    expect(d10Rec().modeled_savings_u_per_wk).toBeGreaterThan(0);
+  });
+
+  it("does not say 'no recorded use' while Skill calls with no skill name are in the window", () => {
+    const big = Math.max(3_000, Math.ceil(meanContext * D10_MIN_CONTEXT_SHARE) + 1);
+    seedRealShapedCatalog(big);
+    useTool("Skill", "2026-01-05T12:00:00.000Z"); // ingested before skill names were tracked
     insState();
 
-    const statuses = runDetectors(db, { now: NOW });
-    const d10 = statuses.find((s) => s.detector_id === "D10");
-    expect(d10?.status).toBe("ACTIVE");
-    expect(d10?.note).toContain("defers MCP tool definitions");
-    expect(d10?.note).not.toContain("alwaysLoad keeps");
-
-    const rec = d10Recs()[0];
-    expect(rec?.modeled_savings_u_per_wk).toBeNull();
-    const evidence = d10Evidence();
-    expect(evidence.tool_search_mode).toBe("deferred");
-    expect(evidence.effective_catalog_state).toBe("deferred");
-    expect(evidence.estimate).toBe(true);
-    expect(evidence.priority).toBe("down-ranked");
-    expect(evidence.loaded_tool_telemetry).toBe("unavailable");
+    d10Status();
+    const facts = d10Facts();
+    expect(facts.skill_use_untracked_count).toBe(1);
+    expect(facts.disable_list).toEqual([
+      `plugin big@market (~${big} tokens; not seen in tracked skill calls)`,
+      "skill solo (~120 tokens; last used 2025-12-20)",
+    ]);
   });
 
-  it("emits a distinct alwaysLoad note and evidence for the same catalog", () => {
-    insInventory(
-      "MCP_SCHEMAS",
-      "/home/.claude/plugins/skill-catalog",
-      D10_CATALOG_FOOTPRINT_TARGET_TOKENS + 15_000,
-    );
-    insState({
-      effective_catalog_state: "alwaysLoad",
-      always_load_flags: [{ server_id_hash: "a".repeat(16), always_load: true }],
-      always_load_count: 1,
-    });
+  it("lists an unused MCP server only when its schemas load upfront, without a size", () => {
+    const big = Math.max(3_000, Math.ceil(meanContext * D10_MIN_CONTEXT_SHARE) + 1);
+    seedRealShapedCatalog(big);
+    insState({ tool_search_mode: "disabled", effective_catalog_state: "upfront" });
 
-    const statuses = runDetectors(db, { now: NOW });
-    const d10 = statuses.find((s) => s.detector_id === "D10");
-    expect(d10?.status).toBe("ACTIVE");
-    expect(d10?.note).toContain("alwaysLoad keeps 1 MCP server(s) upfront");
-    expect(d10?.note).not.toContain("defers MCP tool definitions");
-
-    const evidence = d10Evidence();
-    expect(evidence.effective_catalog_state).toBe("alwaysLoad");
-    expect(evidence.always_load_count).toBe(1);
-    expect(evidence.catalog_item_count).toBe(2);
-    expect(evidence.catalog_hash).toBe("c".repeat(40));
+    expect(d10Status()?.status).toBe("ACTIVE");
+    const facts = d10Facts();
+    expect(facts.disable_list).toContain("mcp_server srv (size not measured; no recorded use)");
+    expect(facts.removable_tokens).toBe(big + 120);
   });
 
-  it.each([
-    ["threshold", "threshold", "threshold loading"],
-    ["disabled", "upfront", "load upfront"],
-  ] as const)("records %s config as an estimate", (mode, effective, note) => {
-    insInventory(
-      "MCP_SCHEMAS",
-      "/home/.claude/plugins/skill-catalog",
-      D10_CATALOG_FOOTPRINT_TARGET_TOKENS + 1,
-    );
-    insState({
-      tool_search_mode: mode,
-      effective_catalog_state: effective,
-      configured_value: mode === "threshold" ? "auto:5" : "false",
-    });
+  it("an MCP server used in the window is not listed", () => {
+    const big = Math.max(3_000, Math.ceil(meanContext * D10_MIN_CONTEXT_SHARE) + 1);
+    seedRealShapedCatalog(big);
+    useTool("mcp__srv__query", "2026-01-04T00:00:00.000Z");
+    insState({ tool_search_mode: "disabled", effective_catalog_state: "upfront" });
 
-    const statuses = runDetectors(db, { now: NOW });
-    expect(statuses.find((s) => s.detector_id === "D10")?.note).toContain(note);
-    expect(d10Recs()[0]?.modeled_savings_u_per_wk).toBeNull();
+    d10Status();
+    expect((d10Facts().disable_list as string[]).some((l) => l.includes("srv"))).toBe(false);
   });
 
-  it("does not fire when the catalog is at the threshold boundary", () => {
-    insInventory(
-      "MCP_SCHEMAS",
-      "/home/.claude/plugins/skill-catalog",
-      D10_CATALOG_FOOTPRINT_TARGET_TOKENS,
-    );
+  it("stays INACTIVE when unused items are below both gates", () => {
+    insItem("skill", "tiny", 1);
     insState();
 
-    const statuses = runDetectors(db, { now: NOW });
-    expect(statuses.find((s) => s.detector_id === "D10")?.status).toBe("INACTIVE");
-    expect(statuses.find((s) => s.detector_id === "D10")?.note).toContain("is within");
-    expect(d10Recs()).toHaveLength(0);
+    const status = d10Status();
+    expect(status?.status).toBe("INACTIVE");
+    expect(status?.note).toContain("below gate");
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM recommendations WHERE detector_id='D10'").get(),
+    ).toEqual({ n: 0 });
+  });
+
+  it("counts Skill calls ingested before skill names were tracked", () => {
+    const big = Math.max(3_000, Math.ceil(meanContext * D10_MIN_CONTEXT_SHARE) + 1);
+    seedRealShapedCatalog(big);
+    useTool("Skill", "2026-01-03T00:00:00.000Z", null);
+    insState();
+
+    d10Status();
+    expect(d10Facts().skill_use_untracked_count).toBe(1);
   });
 
   it("two passes over the same frozen DB remain deterministic", () => {
-    insInventory(
-      "MCP_SCHEMAS",
-      "/home/.claude/plugins/skill-catalog",
-      D10_CATALOG_FOOTPRINT_TARGET_TOKENS + 15_000,
-    );
+    seedRealShapedCatalog(Math.max(3_000, Math.ceil(meanContext * D10_MIN_CONTEXT_SHARE) + 1));
     insState();
 
     runDetectors(db, { now: NOW });
-    const first = d10Recs();
+    const first = db.prepare("SELECT * FROM recommendations WHERE detector_id='D10'").all();
     runDetectors(db, { now: NOW });
-    expect(d10Recs()).toEqual(first);
+    expect(db.prepare("SELECT * FROM recommendations WHERE detector_id='D10'").all()).toEqual(
+      first,
+    );
   });
 });

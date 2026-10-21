@@ -10,8 +10,34 @@
  */
 
 import type { Db } from "../db/open.js";
-import type { GithubClient } from "./github/client.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
+import type { GhPR, GhResult, GithubClient } from "./github/client.js";
+import type { GhPRPage, GhPagePR, PassPrPages } from "./github/pr-page.js";
 import { DEFAULT_CONCURRENCY, mapWithConcurrency } from "./pool.js";
+import {
+  type OutcomeFailureCode,
+  type OutcomeStageSummary,
+  failureCode,
+  newStageSummary,
+  observeGithubClient,
+} from "./stage-summary.js";
+
+/** Conclusions that cannot change without the PR's head/state changing. */
+const SETTLED_CHECKS = new Set(["SUCCESS", "FAILURE", "NONE"]);
+const REPO_WIDE_FAILURES = new Set<OutcomeFailureCode>([
+  "unauthorized",
+  "access-ambiguous",
+  "rate-limited",
+]);
+
+interface StoredWorkItem {
+  state: string;
+  final_commit: string | null;
+  checks_conclusion: string | null;
+  merged_at: string | null;
+  closed_at: string | null;
+  head_ref_key: string | null;
+}
 
 export interface WorkspaceRef {
   workspace_id: string;
@@ -24,10 +50,72 @@ export interface WorkspaceRef {
  * Idempotent — ON CONFLICT DO UPDATE safe to call repeatedly.
  * Skips workspace silently if client is disabled.
  */
+/** Stored non-terminal conclusions on terminal PRs re-read by alias per pass. */
+const STALE_CHECK_ALIAS_CAP = 20;
+/** Pages (50 PRs each) walked per pass once a FORBIDDEN rollup is seen: the pre-S3 100-PR window. */
+const FORBIDDEN_PAGE_CAP = 2;
+
+/**
+ * P0-U13 S3: read GraphQL PR pages (MERGED and CLOSED only — OPEN PRs are never
+ * requested) newest-updated first until a page reaches the watermark (all of
+ * them on a cold backfill). The first page also carries the PRs whose stored
+ * conclusion is not settled, so they re-resolve every pass even when their
+ * updatedAt did not move.
+ * Returns null when any page read fails (nothing is written for the repo).
+ */
+async function readPRPages(
+  db: Db,
+  client: GithubClient,
+  listPRPage: NonNullable<GithubClient["listPRPage"]>,
+  workspace: WorkspaceRef,
+  since: string | undefined,
+): Promise<Map<number, GhPagePR> | null> {
+  const numbers = (
+    db
+      .prepare(
+        `SELECT number FROM work_items
+          WHERE workspace_id = ? AND state != 'OPEN' AND checks_conclusion IS NOT NULL
+            AND checks_conclusion NOT IN ('SUCCESS', 'FAILURE', 'NONE')
+          ORDER BY number LIMIT ?`,
+      )
+      .all(workspace.workspace_id, STALE_CHECK_ALIAS_CAP) as Array<{ number: number }>
+  ).map((r) => r.number);
+
+  const prs = new Map<number, GhPagePR>();
+  let cursor: string | null = null;
+  let pagesRead = 0;
+  for (let first = true; ; first = false) {
+    const result: GhResult<GhPRPage> = await listPRPage.call(
+      client,
+      workspace.repo_owner,
+      workspace.repo_name,
+      {
+        cursor,
+        numbers: first ? numbers : [],
+      },
+    );
+    if (!result.ok) return null;
+    const page: GhPRPage = result.data;
+    for (const pr of [...page.prs, ...page.extras]) {
+      if (!prs.has(pr.pr.number)) prs.set(pr.pr.number, pr);
+    }
+    const oldest = page.prs.at(-1)?.pr.updated_at;
+    if (!page.hasNextPage || page.endCursor === null) break;
+    // Unreadable checks hold the watermark, so a cold-style walk would repeat
+    // every pass: bound it to the pre-S3 100-PR listing window.
+    pagesRead++;
+    if (pagesRead >= FORBIDDEN_PAGE_CAP && [...prs.values()].some((p) => p.checksForbidden)) break;
+    if (since !== undefined && (oldest === undefined || oldest <= since)) break;
+    cursor = page.endCursor;
+  }
+  return prs;
+}
+
 export async function syncWorkItems(
   db: Db,
   client: GithubClient,
   workspace: WorkspaceRef,
+  pages?: PassPrPages,
 ): Promise<void> {
   if (!client.enabled) return;
 
@@ -40,13 +128,25 @@ export async function syncWorkItems(
     | undefined;
   const since = wmRow?.value ?? undefined;
 
-  const listResult = await client.listPRs(repo_owner, repo_name, since);
-  if (!listResult.ok) {
-    console.warn(`syncWorkItems: listPRs failed — ${listResult.reason}`);
-    return;
+  let prs: GhPR[];
+  let paged: ReadonlyMap<number, GhPagePR> | undefined;
+  if (client.listPRPage === undefined) {
+    const listResult = await client.listPRs(repo_owner, repo_name, since);
+    if (!listResult.ok) {
+      console.warn("syncWorkItems: listPRs failed");
+      return;
+    }
+    prs = listResult.data;
+  } else {
+    const listed = await readPRPages(db, client, client.listPRPage, workspace, since);
+    if (listed === null) {
+      console.warn("syncWorkItems: PR page read failed");
+      return;
+    }
+    paged = listed;
+    pages?.set(repo_owner, repo_name, paged);
+    prs = [...paged.values()].map((p) => p.pr);
   }
-
-  const prs = listResult.data;
   if (prs.length === 0) return;
 
   const upsert = db.prepare(`
@@ -78,21 +178,75 @@ export async function syncWorkItems(
   `);
   const deleteBranchKey = db.prepare("DELETE FROM work_item_branch_keys WHERE work_item_id = ?");
 
+  const selectStored = db.prepare(`
+    SELECT wi.state, wi.final_commit, wi.checks_conclusion, wi.merged_at, wi.closed_at,
+           bk.head_ref_key
+      FROM work_items wi
+      LEFT JOIN work_item_branch_keys bk ON bk.work_item_id = wi.work_item_id
+     WHERE wi.work_item_id = ?
+  `);
+
   const now = new Date().toISOString();
   let newestUpdated = since ?? "1970-01-01T00:00:00Z";
 
   // Compute per-PR row fields synchronously, then fetch check conclusions with
   // bounded concurrency (~0.77s per call; serially that was ~97s across a
   // 126-PR page — pooled at DEFAULT_CONCURRENCY it drops proportionally).
-  const rows = prs.map((pr) => {
+  const listed = prs.map((pr) => {
     const workItemId = `gh:${repo_owner}/${repo_name}#${pr.number}`;
     const state = pr.merged_at !== null ? "MERGED" : pr.state === "closed" ? "CLOSED" : "OPEN";
     const finalCommit = pr.merge_commit_sha ?? pr.head.sha;
+    // Watermark: GitHub's updated_at when projected; the old proxy otherwise.
+    const updatedAt = pr.updated_at ?? pr.merged_at ?? pr.closed_at ?? pr.created_at;
+    if (updatedAt > newestUpdated) newestUpdated = updatedAt;
     return { pr, workItemId, state, finalCommit };
   });
 
-  const conclusions = await mapWithConcurrency(rows, DEFAULT_CONCURRENCY, (row) =>
-    client.getCheckConclusion(repo_owner, repo_name, row.pr.head.sha),
+  // P0-U13: the listing has no working `since` filter, so every pass returns the
+  // same ≤100 PRs. A terminal PR whose stored projection already matches and
+  // whose checks settled is skipped: no check read, no rewrite (so synced_at —
+  // which findings/linker use as their change signal — only moves on change).
+  const rows = listed.filter(({ pr, workItemId, state, finalCommit }) => {
+    if (state === "OPEN") return true;
+    if (pr.updated_at !== undefined && (since === undefined || pr.updated_at > since)) return true;
+    const stored = selectStored.get(workItemId) as StoredWorkItem | undefined;
+    return (
+      stored === undefined ||
+      // Unknown checks are retried, unless this pass already knows the token
+      // cannot read them (FORBIDDEN rollup): then only a real change re-syncs.
+      (stored.checks_conclusion === null
+        ? paged?.get(pr.number)?.checksForbidden !== true
+        : !SETTLED_CHECKS.has(stored.checks_conclusion)) ||
+      stored.state !== state ||
+      stored.final_commit !== finalCommit ||
+      stored.merged_at !== pr.merged_at ||
+      stored.closed_at !== pr.closed_at ||
+      stored.head_ref_key !== pr.head.refKey
+    );
+  });
+
+  // A 401/403/429 answer is repo-wide (token scope or rate limit): stop issuing
+  // this repo's remaining check reads for the pass. Skipped reads count as
+  // failed, so the rows and watermark stay retryable exactly as before.
+  let denied = false;
+  const conclusions = await mapWithConcurrency<(typeof rows)[number], GhResult<string | null>>(
+    rows,
+    DEFAULT_CONCURRENCY,
+    async (row) => {
+      const page = paged?.get(row.pr.number);
+      if (page !== undefined) {
+        // FORBIDDEN rollup: checks are unknown. Exactly the pre-S3 403 path: the
+        // row is skipped (a new head must not inherit the old head's checks, and
+        // MERGED with unknown checks would derive a false OBSERVED_SUCCESS) and
+        // the watermark holds. No per-PR REST read: it would 403 the same way.
+        if (page.checksForbidden) return { ok: false as const, reason: "github-checks-forbidden" };
+        if (page.checks !== null) return { ok: true, data: page.checks };
+      }
+      if (denied) return { ok: false as const, reason: "github-checks-skipped" };
+      const result = await client.getCheckConclusion(repo_owner, repo_name, row.pr.head.sha);
+      if (!result.ok && REPO_WIDE_FAILURES.has(failureCode(result.reason))) denied = true;
+      return result;
+    },
   );
 
   const writePR = db.transaction(
@@ -117,6 +271,7 @@ export async function syncWorkItems(
     },
   );
 
+  await awaitDbWriteGate(); // the writes below run without another await
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] as (typeof rows)[number];
     // Get check conclusion for the HEAD SHA.
@@ -124,20 +279,21 @@ export async function syncWorkItems(
     // COALESCE in the upsert preserves any previously-correct value rather than
     // overwriting it — preventing a false OBSERVED_SUCCESS from a transient failure.
     const checkResult = conclusions[i];
-    const checksConclusion = checkResult?.ok === true ? checkResult.data : null;
+    // A new head cannot inherit the old head's successful checks. Leave the
+    // previous projection untouched until this read can be retried.
+    if (checkResult?.ok !== true) continue;
+    const checksConclusion = checkResult.data;
 
     // The work-item projection and privacy-safe branch key are one unit: a
     // changed head SHA can never commit alongside a stale branch key.
     writePR(row, checksConclusion, now);
-
-    // Track newest updated_at for watermark
-    const updatedAt = row.pr.merged_at ?? row.pr.closed_at ?? row.pr.created_at;
-    if (updatedAt > newestUpdated) newestUpdated = updatedAt;
   }
 
-  // Advance watermark
-  ensureConfig.run(watermarkKey, newestUpdated, now);
-  updateConfig.run(newestUpdated, now, watermarkKey);
+  // A failed checks read must remain retryable; preserve the previous watermark.
+  if (conclusions.every((result) => result?.ok === true)) {
+    ensureConfig.run(watermarkKey, newestUpdated, now);
+    updateConfig.run(newestUpdated, now, watermarkKey);
+  }
 }
 
 export interface BranchKeyBackfillOptions {
@@ -405,8 +561,13 @@ export async function backfillMissingWorkItemBranchKeys(
 /**
  * Sync all mapped workspaces (those with repo_owner and repo_name set).
  */
-export async function syncAllWorkspaces(db: Db, client: GithubClient): Promise<void> {
-  if (!client.enabled) return;
+export async function syncAllWorkspaces(
+  db: Db,
+  client: GithubClient,
+  pages?: PassPrPages,
+): Promise<OutcomeStageSummary> {
+  const summary = newStageSummary();
+  if (!client.enabled) return summary;
 
   const workspaces = db
     .prepare(
@@ -414,7 +575,10 @@ export async function syncAllWorkspaces(db: Db, client: GithubClient): Promise<v
     )
     .all() as Array<{ workspace_id: string; repo_owner: string; repo_name: string }>;
 
+  summary.eligibleRepositories = workspaces.length;
+  const observedClient = observeGithubClient(client, summary);
   for (const ws of workspaces) {
-    await syncWorkItems(db, client, ws);
+    await syncWorkItems(db, observedClient, ws, pages);
   }
+  return summary;
 }

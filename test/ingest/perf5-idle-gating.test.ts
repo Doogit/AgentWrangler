@@ -51,6 +51,7 @@ function makeIngestor(
     discoveryIntervalMs: DISCOVERY_MS,
     reconcileIdleFloorMs: RECONCILE_FLOOR_MS,
     detectorIdleFloorMs: DETECTOR_FLOOR_MS,
+    detectorMinIntervalMs: DETECTOR_FLOOR_MS,
     now: () => new Date(), // mocked Date — tracks fake-timer time
     ...overrides,
   });
@@ -145,7 +146,11 @@ describe("idle reconcile floor", () => {
   });
 
   it("floors of 0 restore ungated per-tick reconcile", async () => {
-    const ing = makeIngestor({ reconcileIdleFloorMs: 0, detectorIdleFloorMs: 0 });
+    const ing = makeIngestor({
+      reconcileIdleFloorMs: 0,
+      detectorIdleFloorMs: 0,
+      detectorMinIntervalMs: 0,
+    });
     handle = ing.startTail();
     expect(reconcileSpy).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(3 * TAIL_MS); // three idle ticks
@@ -166,7 +171,7 @@ describe("idle detector-pass floor", () => {
     expect(detectorPasses).toBe(2);
   });
 
-  it("runs detectors on the next discovery tick after new lines were parsed", async () => {
+  it("keeps new data pending until the minimum walk interval elapses", async () => {
     const ing = makeIngestor();
     handle = ing.startTail();
     expect(detectorPasses).toBe(1);
@@ -175,14 +180,18 @@ describe("idle detector-pass floor", () => {
     await vi.advanceTimersByTimeAsync(TAIL_MS); // tail tick parses the append
     expect(detectorPasses).toBe(1); // detectors wait for the discovery cadence
     await vi.advanceTimersByTimeAsync(DISCOVERY_MS - TAIL_MS); // t=5s: discovery tick
-    expect(detectorPasses).toBe(2);
+    expect(detectorPasses).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(DISCOVERY_MS); // t=10s: idle again
+    await vi.advanceTimersByTimeAsync(DETECTOR_FLOOR_MS - DISCOVERY_MS); // t=20s
     expect(detectorPasses).toBe(2);
   });
 
   it("floors of 0 restore the ungated per-discovery-tick pass", async () => {
-    const ing = makeIngestor({ reconcileIdleFloorMs: 0, detectorIdleFloorMs: 0 });
+    const ing = makeIngestor({
+      reconcileIdleFloorMs: 0,
+      detectorIdleFloorMs: 0,
+      detectorMinIntervalMs: 0,
+    });
     handle = ing.startTail();
     expect(detectorPasses).toBe(1);
     await vi.advanceTimersByTimeAsync(2 * DISCOVERY_MS); // two idle discovery ticks

@@ -1,0 +1,9 @@
+{
+  "id": "C5",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "C5_MIN_IDENTICAL_ERRORS",
+    "expect": "silent"
+  }
+}

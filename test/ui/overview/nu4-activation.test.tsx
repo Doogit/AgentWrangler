@@ -19,6 +19,8 @@ import {
   mockHeadroomTrend,
   mockHookConfigResponse,
   mockHotSessions,
+  mockLimits,
+  mockLinkageRate,
   mockLiveSessions,
   mockRecommendations,
   mockStatus,
@@ -29,27 +31,36 @@ import {
 import OverviewPage from "../../../src/ui/overview/OverviewPage";
 import RateLimitGauges from "../../../src/ui/overview/RateLimitGauges";
 
+import {
+  fetchCacheWriteTrend,
+  fetchFlavorDecomposition,
+  fetchGlobalOverview,
+  fetchLiveSessions,
+  serveOverviewViewFromLegacyMocks,
+} from "./overview-view-from-legacy";
+
 vi.mock("../../../src/ui/api/client");
+beforeEach(serveOverviewViewFromLegacyMocks);
 
 afterEach(() => cleanup());
 
 /** Base mocks: first-run (0 sessions), nothing activated. */
 function primeFirstRun() {
   vi.clearAllMocks();
-  vi.mocked(client.fetchGlobalOverview).mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
   vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
   vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
   vi.mocked(client.fetchSuccessRate).mockResolvedValue(mockSuccessRate());
   vi.mocked(client.fetchBurnStatus).mockResolvedValue(mockBurnStatus());
   vi.mocked(client.fetchHookConfig).mockResolvedValue(mockHookConfigResponse(false));
   vi.mocked(client.fetchHotSessions).mockResolvedValue(mockHotSessions());
+  vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
+  vi.mocked(client.fetchLinkageRate).mockResolvedValue(mockLinkageRate());
   vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
-  vi.mocked(client.fetchFlavorDecomposition).mockResolvedValue(
-    mockFlavorDecomposition({ preset: "7d" }),
-  );
-  vi.mocked(client.fetchCacheWriteTrend).mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
+  fetchFlavorDecomposition.mockResolvedValue(mockFlavorDecomposition({ preset: "7d" }));
+  fetchCacheWriteTrend.mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
   vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
-  vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
+  fetchLiveSessions.mockResolvedValue(mockLiveSessions());
   vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue(mockGithubTokenStatus());
   vi.mocked(client.fetchStatus).mockResolvedValue(
     mockStatus({ sessions: 0, files_seen: 10, files_parsed: 4 }),
@@ -93,7 +104,7 @@ describe("NU4 — first-run activation CTAs", () => {
   });
 
   it("hides the calibrate item once the weekly limit is calibrated", async () => {
-    vi.mocked(client.fetchGlobalOverview).mockResolvedValue(calibratedOverview());
+    fetchGlobalOverview.mockResolvedValue(calibratedOverview());
 
     render(<OverviewPage />);
 
@@ -123,7 +134,7 @@ describe("NU4 — first-run activation CTAs", () => {
   });
 
   it("omits the activation section entirely when every feature is active", async () => {
-    vi.mocked(client.fetchGlobalOverview).mockResolvedValue(calibratedOverview());
+    fetchGlobalOverview.mockResolvedValue(calibratedOverview());
     vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({
       configured: true,
       source: "env",

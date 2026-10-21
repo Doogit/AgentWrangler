@@ -16,6 +16,7 @@ function rec(): RecommendationCard {
     scope_workspace_id: "workspace-1",
     lever: "Trim workspace instructions",
     modeled_savings_u_per_wk: null,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: { model: "D1", inputs: {}, expression: "none" },
     evidence: {},
@@ -499,10 +500,10 @@ describe("ESF4 evaluation disclosures", () => {
     render(<HistoryHarness />);
     expect(screen.getByRole("button", { name: /#3 FINALIZED.*target improved/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /#2 STOPPED.*target worsened/i })).toBeTruthy();
-    expect(screen.getByText("esf-effect-3")).toBeTruthy();
+    expect(screen.getByText(/Contract version: esf-effect-3\./)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /#2 STOPPED.*target worsened/i }));
-    expect(screen.getByText("esf-effect-2")).toBeTruthy();
+    expect(screen.getByText(/Contract version: esf-effect-2\./)).toBeTruthy();
     expect(
       screen.getByText(/Follow-up evidence: observed aggregate value: 90 tokens\./),
     ).toBeTruthy();

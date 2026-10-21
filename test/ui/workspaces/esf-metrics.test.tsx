@@ -98,7 +98,8 @@ describe("ESF metric labels on WorkspaceDetailPage", () => {
   it("renders delivery as denominator-bearing stat cards without a composite score or data-row table", async () => {
     render(<WorkspaceDetailPage workspaceId={WS} onBack={() => {}} />);
 
-    const card = await screen.findByTestId("workspace-delivery-card");
+    await screen.findByText("Bash/edit activity without an observed commit");
+    const card = screen.getByTestId("workspace-delivery-card");
     expect(card.textContent).toContain("Bash/edit activity without an observed commit");
     expect(card.textContent).toContain("2/4");
     expect(card.textContent).toContain("1/4");

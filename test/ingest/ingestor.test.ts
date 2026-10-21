@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getPerfSnapshot, resetErroredFiles } from "../../src/daemon/perf-monitor.js";
 import type { Db } from "../../src/db/open.js";
 import { Ingestor, runBackscan } from "../../src/ingest/index.js";
 import { reconcileSessions } from "../../src/ingest/reconcile.js";
@@ -170,6 +171,50 @@ describe("back-scan aggregates over the committed corpus", () => {
           .prepare("SELECT COUNT(*) AS n FROM ingest_metric_events WHERE session_id = ?")
           .get("metric-uuid"),
       ).toEqual({ n: 1 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("persists an unrecognised CC-version denial for drift review without storing its text", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-version-drift-"));
+    try {
+      const file = path.join(tmp, "proj-version-drift", "s.jsonl");
+      writeCorpus(tmp, {
+        "proj-version-drift": {
+          "s.jsonl": [
+            {
+              type: "user",
+              uuid: "version-drift-source",
+              timestamp: "2026-01-03T00:00:00.000Z",
+              sessionId: "version-drift-session",
+              version: "3.0.0",
+              toolDenialKind: "user-rejected",
+              message: {
+                content: [
+                  {
+                    type: "tool_result",
+                    is_error: true,
+                    content: "SYNTH_UNRECOGNISED_DENIAL_TEXT_DO_NOT_STORE",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-version-drift");
+
+      expect(
+        db
+          .prepare(
+            "SELECT cc_version, classifier_label FROM ingest_metric_events WHERE session_id = ?",
+          )
+          .all("version-drift-session"),
+      ).toEqual([{ cc_version: "3.0.0", classifier_label: null }]);
+      expect(JSON.stringify(db.prepare("SELECT * FROM ingest_metric_events").all())).not.toContain(
+        "SYNTH_UNRECOGNISED_DENIAL_TEXT_DO_NOT_STORE",
+      );
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -356,19 +401,46 @@ describe("back-scan aggregates over the committed corpus", () => {
     const health = runBackscan(db, [FIXTURE_ROOT], OPTS);
 
     expect(perWorkspace(db)).toEqual([
+      // Phase-2 golden-set spend fixtures (one session per workspace, ORDER BY workspace_id):
+      // cache-read collapse (B1/B2/B4), cache-write churn (D8), large-context, negative controls.
+      // U7: the collapse turns now re-create the context (a prefix break always does), so the
+      // shared collapse predicate fires: +40,000 1h-tier writes ($6/MTok = 240,000 µ$) on b1 and
+      // b2, and b4's second turn writes 29,000 instead of 22,000 (+26,250 µ$).
+      { workspace_id: "gs-b1-severe", cost: 271_515, turns: 2 },
+      { workspace_id: "gs-b2-ttlgap", cost: 272_010, turns: 2 },
+      { workspace_id: "gs-b4-prefix", cost: 152_280, turns: 2 },
+      // Gauge-1 friction fixtures (C/D/H detectors; 1 turn each except gs-h1-destructive):
+      { workspace_id: "gs-c11-mcpcap", cost: 8_400, turns: 1 },
+      { workspace_id: "gs-c2-notfound", cost: 8_400, turns: 1 },
+      { workspace_id: "gs-c3-editnoread", cost: 8_400, turns: 1 },
+      { workspace_id: "gs-c4-patchfail", cost: 8_400, turns: 1 },
+      // U7: the three identical errors sit in three turns (C5 counts distinct turns, not parallel calls).
+      { workspace_id: "gs-c5-errorloop", cost: 25_200, turns: 3 },
+      { workspace_id: "gs-c7-bashfail", cost: 8_400, turns: 1 },
+      { workspace_id: "gs-c9-denials", cost: 8_400, turns: 1 },
+      { workspace_id: "gs-clean-small", cost: 32_400, turns: 2 },
+      { workspace_id: "gs-context-heavy", cost: 1_698_600, turns: 3 },
+      { workspace_id: "gs-d14-interrupt", cost: 8_400, turns: 1 },
+      { workspace_id: "gs-d8-churn1h", cost: 1_321_200, turns: 4 },
+      { workspace_id: "gs-d8-churn5m", cost: 735_000, turns: 4 },
+      // gs-h1-destructive: 2 turns (rm-rf t1: 8_400 + git-reset-hard t2: 450 = 8_850 μUSD)
+      { workspace_id: "gs-h1-destructive", cost: 8_850, turns: 2 },
+      { workspace_id: "gs-healthy-cache", cost: 67_575, turns: 3 },
       { workspace_id: "proj-alpha", cost: 21_375, turns: 2 },
       { workspace_id: "proj-beta", cost: 5_950, turns: 3 },
+      // proj-delta: B1 cache-read-collapse fixture, 2 reconciled turns (58_500 + 18_030 μUSD)
+      { workspace_id: "proj-delta", cost: 76_530, turns: 2 },
       // proj-gamma: 2 subagent turns (msg-sub1: 200 + msg-sub2: 100 = 300 μUSD)
       { workspace_id: "proj-gamma", cost: 300, turns: 2 },
     ]);
-    expect(globalAgg(db)).toEqual({ cost: 27_625, turns: 7 });
+    expect(globalAgg(db)).toEqual({ cost: 4_747_585, turns: 43 });
 
-    expect(health.turnsIngested).toBe(7);
+    expect(health.turnsIngested).toBe(43);
     expect(health.duplicateDrops).toBe(2);
     expect(health.syntheticExcluded).toBe(1);
     expect(health.linesQuarantined).toBe(1);
-    expect(health.filesSeen).toBe(3);
-    expect(health.filesParsed).toBe(3);
+    expect(health.filesSeen).toBe(21);
+    expect(health.filesParsed).toBe(21);
     expect(health.unknownFieldKinds.experimentalX).toBe(1);
   });
 
@@ -403,7 +475,7 @@ describe("back-scan aggregates over the committed corpus", () => {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
-  });
+  }, 30_000); // 201 files; times out at 5 s under full-suite load
 
   it("produces byte-identical RECONCILED aggregates to the synchronous scan", async () => {
     runBackscan(db, [FIXTURE_ROOT], OPTS);
@@ -416,7 +488,7 @@ describe("back-scan aggregates over the committed corpus", () => {
     } finally {
       db2.close();
     }
-  });
+  }, 30_000); // two full scans of the corpus; times out at 5 s under full-suite load
 
   it("counts genuine user turns and stores nullable thinking tokens", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-user-turns-"));
@@ -609,6 +681,119 @@ describe("back-scan aggregates over the committed corpus", () => {
     expect(row.b).toBeGreaterThan(0);
   });
 
+  it("persists only the same coarse shape for distinct shell commands", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-shell-privacy-"));
+    try {
+      writeCorpus(tmp, {
+        "proj-shell-privacy": {
+          "commands.jsonl": [
+            assistant({
+              id: "shell-owner-1",
+              session: "shell-privacy-session",
+              ts: "2026-01-03T00:01:00.000Z",
+              toolUses: [{ id: "shell-event-1", name: "Bash", input: { command: "git status" } }],
+            }),
+            assistant({
+              id: "shell-owner-2",
+              session: "shell-privacy-session",
+              ts: "2026-01-03T00:02:00.000Z",
+              toolUses: [{ id: "shell-event-2", name: "Bash", input: { command: "npm test" } }],
+            }),
+          ],
+        },
+      });
+
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+      const toolRows = db
+        .prepare(
+          `SELECT event_id, session_id, ts, tool_name, input_hash
+             FROM tool_events WHERE event_id IN ('shell-event-1', 'shell-event-2')
+             ORDER BY event_id`,
+        )
+        .all() as Array<Record<string, unknown>>;
+      expect(toolRows).toHaveLength(2);
+      expect(toolRows.map((row) => row.input_hash)).toEqual([null, null]);
+
+      const metricRows = db
+        .prepare(
+          `SELECT session_id, event_ts, command_shape
+             FROM ingest_metric_events
+            WHERE session_id = 'shell-privacy-session' AND command_shape IS NOT NULL
+            ORDER BY event_ts`,
+        )
+        .all() as Array<Record<string, unknown>>;
+      expect(metricRows).toHaveLength(2);
+      expect(metricRows.map((row) => row.command_shape)).toEqual([
+        "bash:args-2-3",
+        "bash:args-2-3",
+      ]);
+      const persisted = JSON.stringify({ toolRows, metricRows });
+      expect(persisted).not.toContain("git status");
+      expect(persisted).not.toContain("npm test");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("ingests shell tool uses with alternate or missing inputs without retaining hashes", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-shell-input-shapes-"));
+    try {
+      writeCorpus(tmp, {
+        "proj-shell-input-shapes": {
+          "commands.jsonl": [
+            assistant({
+              id: "shell-empty-owner",
+              session: "shell-input-shapes-session",
+              ts: "2026-01-03T00:01:00.000Z",
+              toolUses: [{ id: "shell-empty", name: "Bash", input: {} }],
+            }),
+            assistant({
+              id: "shell-alternate-owner",
+              session: "shell-input-shapes-session",
+              ts: "2026-01-03T00:02:00.000Z",
+              toolUses: [
+                {
+                  id: "shell-alternate",
+                  name: "PowerShell",
+                  input: { script: "SYNTH_ALT_SHELL_CONTENT_DO_NOT_STORE" },
+                },
+              ],
+            }),
+            {
+              type: "assistant",
+              timestamp: "2026-01-03T00:03:00.000Z",
+              sessionId: "shell-input-shapes-session",
+              message: {
+                id: "shell-missing-owner",
+                model: "claude-sonnet-4-6",
+                usage: { input_tokens: 0, output_tokens: 0 },
+                content: [{ type: "tool_use", id: "shell-missing", name: "Shell" }],
+              },
+            },
+          ],
+        },
+      });
+
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+      const rows = db
+        .prepare(
+          `SELECT event_id, tool_name, input_hash
+             FROM tool_events
+            WHERE event_id IN ('shell-empty', 'shell-alternate', 'shell-missing')
+            ORDER BY event_id`,
+        )
+        .all() as Array<Record<string, unknown>>;
+      expect(rows).toEqual([
+        { event_id: "shell-alternate", tool_name: "PowerShell", input_hash: null },
+        { event_id: "shell-empty", tool_name: "Bash", input_hash: null },
+        { event_id: "shell-missing", tool_name: "Shell", input_hash: null },
+      ]);
+      expect(JSON.stringify(rows)).not.toContain("SYNTH_ALT_SHELL_CONTENT_DO_NOT_STORE");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("sets the COMPACT_MID_TASK hygiene flag on reconcile", () => {
     runBackscan(db, [FIXTURE_ROOT], OPTS);
     const s = db
@@ -661,8 +846,9 @@ describe("COND-4 — sidechain turns are counted exactly once", () => {
     };
     // msg-b2 deduped to 1 + msg-sub1 + msg-sub2 from the subagent fixture = 3
     expect(side.n).toBe(3);
-    // 7 total reconciled turns: 2 proj-alpha + 3 proj-beta + 2 proj-gamma subagent
-    expect(globalAgg(db).turns).toBe(7);
+    // 41 total reconciled turns: 9 base (2 proj-alpha + 3 proj-beta + 2 proj-delta + 2 proj-gamma)
+    // + 22 Phase-2 golden-set spend fixtures (gs-* workspaces) + 10 friction fixtures (gs-c/d/h).
+    expect(globalAgg(db).turns).toBe(43);
   });
 });
 
@@ -919,7 +1105,11 @@ describe("D7 privacy-safe tool-event metadata", () => {
       expect(events.find((r) => r.event_id === "d7-test")?.exit_class).toBe("TEST_FAIL");
       expect(events.find((r) => r.event_id === "d7-read")?.exit_class).toBe("OK");
       expect(events.find((r) => r.event_id === "d7-error")?.exit_class).toBe("ERROR");
-      expect(events.every((r) => typeof r.input_hash === "string")).toBe(true);
+      expect(events.find((r) => r.event_id === "d7-test")?.input_hash).toBeNull();
+      expect(events.find((r) => r.event_id === "d7-error")?.input_hash).toBeNull();
+      expect(events.find((r) => r.event_id === "d7-read")?.input_hash).toBe(
+        "7ef1702f7c924cf5bbc0d846118fbad994fc339be9c35577d1d449f1faa05f18",
+      );
       expect(events.find((r) => r.event_id === "d7-read")?.result_bytes).toBe(
         "fabricated read success".length,
       );
@@ -947,6 +1137,45 @@ describe("D7 privacy-safe tool-event metadata", () => {
       expect(persisted).not.toContain(rawPath);
       expect(persisted).not.toContain("npm test");
       expect(persisted).not.toContain("fabricated");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("persists the Skill tool's skill name (U7 D10 last-used) and nothing for other tools", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-skill-"));
+    try {
+      writeCorpus(tmp, {
+        "proj-skill": {
+          "skill.jsonl": [
+            assistant({
+              id: "sk-owner",
+              session: "sk-session",
+              ts: "2026-01-03T00:00:00.000Z",
+              toolUses: [
+                { id: "sk-1", name: "Skill", input: { skill: "demo-plugin:helper", args: "x" } },
+                { id: "sk-2", name: "Skill", input: { skill: "  user-skill  " } },
+                { id: "sk-3", name: "Read", input: { file_path: "a.ts", skill: "not-a-skill" } },
+              ],
+            }),
+          ],
+        },
+      });
+
+      runBackscan(db, [tmp], OPTS);
+
+      const rows = db
+        .prepare(
+          `SELECT e.event_id, s.skill_name FROM tool_events e
+             LEFT JOIN tool_event_skills s ON s.event_id = e.event_id
+            WHERE e.event_id LIKE 'sk-%' ORDER BY e.event_id`,
+        )
+        .all();
+      expect(rows).toEqual([
+        { event_id: "sk-1", skill_name: "demo-plugin:helper" },
+        { event_id: "sk-2", skill_name: "user-skill" },
+        { event_id: "sk-3", skill_name: null },
+      ]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -1302,6 +1531,48 @@ describe("file-version tail reset", () => {
 });
 
 describe("tail discovery cache", () => {
+  it("does not load offsets for an unchanged file after the first tail tick", async () => {
+    vi.useFakeTimers();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-tail-fast-skip-"));
+    let handle: { stop(): void } | undefined;
+    try {
+      const dir = path.join(tmp, "proj-skip");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "s.jsonl"),
+        toJsonl([
+          assistant({
+            id: "skip-1",
+            session: "skip-session",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+      const ing = new Ingestor(db, [tmp], {
+        ...OPTS,
+        tailIntervalMs: 1_000,
+        discoveryIntervalMs: 60_000,
+      });
+      handle = ing.startTail();
+      await vi.advanceTimersByTimeAsync(1_000); // first tick warms the fast version cache
+      const prepare = vi.spyOn(db, "prepare");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(
+        prepare.mock.calls.filter(
+          ([sql]) =>
+            typeof sql === "string" && sql.includes("FROM ingest_offsets WHERE file_path = ?"),
+        ),
+      ).toEqual([]);
+      prepare.mockRestore();
+    } finally {
+      handle?.stop();
+      vi.useRealTimers();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("does not repeat the recursive walk on unchanged tail ticks", () => {
     // node:fs ESM exports can't be spied, so assert the no-re-walk behavior
     // instead: add a file but reset the slug-dir mtime to the value the cache
@@ -1420,6 +1691,434 @@ describe("tail discovery cache", () => {
     } finally {
       handle?.stop();
       vi.useRealTimers();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("P0-U13 — tail hot/cold stat lanes, stat-error backoff", () => {
+  afterEach(() => resetErroredFiles());
+
+  it("bounds the cold lane's per-tick stat count well under the full corpus size", async () => {
+    // Independent oracle: the injected file set (real mtimes this test
+    // controls) and a counting wrapper around the injected statFile — not any
+    // counter the implementation itself exposes.
+    vi.useFakeTimers();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-tail-cold-lane-"));
+    let handle: { stop(): void } | undefined;
+    try {
+      const dir = path.join(tmp, "proj-cold");
+      fs.mkdirSync(dir, { recursive: true });
+      const TOTAL = 5_000;
+      const HOT_COUNT = 5;
+      const old = new Date("2020-01-01T00:00:00.000Z");
+      for (let i = 0; i < TOTAL; i++) {
+        const fp = path.join(dir, `s${i}.jsonl`);
+        fs.writeFileSync(fp, "");
+        if (i >= HOT_COUNT) fs.utimesSync(fp, old, old);
+      }
+      let statCount = 0;
+      const ing = new Ingestor(db, [tmp], {
+        ...OPTS,
+        tailIntervalMs: 2_000,
+        discoveryIntervalMs: 60_000,
+        statFile: (p: string) => {
+          statCount++;
+          return fs.statSync(p);
+        },
+      });
+      handle = ing.startTail(); // pre-tail backscan; not routed through statFile
+      statCount = 0;
+      await vi.advanceTimersByTimeAsync(2_000); // one tail tick
+      // Formula the fix is expected to follow: HOT_COUNT hot files, plus a
+      // cold batch of ceil((TOTAL-HOT_COUNT) / floor(5min/2s)) ~= 34 — nowhere
+      // near the full 5,000-file corpus.
+      expect(statCount).toBeGreaterThanOrEqual(HOT_COUNT);
+      expect(statCount).toBeLessThan(100);
+    } finally {
+      handle?.stop();
+      vi.useRealTimers();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("A-4: a hot file is re-checked within 5s; every cold file is stat'ed within 5 min", async () => {
+    vi.useFakeTimers();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-tail-a4-"));
+    let handle: { stop(): void } | undefined;
+    try {
+      const dir = path.join(tmp, "proj-a4");
+      fs.mkdirSync(dir, { recursive: true });
+      const COLD_TOTAL = 300;
+      const old = new Date("2020-01-01T00:00:00.000Z");
+      const coldPaths = new Set<string>();
+      for (let i = 0; i < COLD_TOTAL; i++) {
+        const fp = path.join(dir, `c${i}.jsonl`);
+        fs.writeFileSync(fp, "");
+        fs.utimesSync(fp, old, old);
+        coldPaths.add(fp);
+      }
+      const hotPath = path.join(dir, "hot.jsonl");
+      fs.writeFileSync(hotPath, "");
+
+      const statAtMs = new Map<string, number>();
+      const ing = new Ingestor(db, [tmp], {
+        ...OPTS,
+        tailIntervalMs: 2_000,
+        discoveryIntervalMs: 600_000,
+        statFile: (p: string) => {
+          statAtMs.set(p, Date.now());
+          return fs.statSync(p);
+        },
+      });
+      handle = ing.startTail();
+      const bootMs = Date.now();
+
+      statAtMs.clear();
+      await vi.advanceTimersByTimeAsync(5_000); // ~2-3 ticks
+      const hotStatAt = statAtMs.get(hotPath);
+      expect(hotStatAt).toBeDefined();
+      expect((hotStatAt ?? Number.POSITIVE_INFINITY) - bootMs).toBeLessThanOrEqual(5_000);
+
+      const seenCold = new Set<string>();
+      for (let i = 0; i < 155; i++) {
+        // just over 5 min of ticks
+        statAtMs.clear();
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (const p of statAtMs.keys()) if (coldPaths.has(p)) seenCold.add(p);
+      }
+      expect(seenCold.size).toBe(COLD_TOTAL);
+    } finally {
+      handle?.stop();
+      vi.useRealTimers();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("A-4 holds under cold-list churn: every cold file is still stat'ed within 5 min when the candidate list's size fluctuates tick-to-tick", async () => {
+    // Independent oracle: same as the A-4 test above (the injected file set +
+    // a stat-call timestamp map), not any counter the implementation exposes.
+    // Review finding (P0-U13): a positional round-robin cursor into a list
+    // rebuilt fresh each tick is not robust when that list's membership
+    // shifts between ticks (files entering/leaving stat-error backoff, hot
+    // <-> cold transitions, newly-discovered files). This reproduces that
+    // shift with a disjoint "churn" file set that always fails its stat, so
+    // it cycles in and out of coldCandidates on a backoff schedule
+    // independent of, and desynchronized from, the target files' schedule —
+    // and asserts every TARGET cold file is still seen within one cycle.
+    vi.useFakeTimers();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-tail-a4-churn-"));
+    let handle: { stop(): void } | undefined;
+    try {
+      const dir = path.join(tmp, "proj-a4-churn");
+      fs.mkdirSync(dir, { recursive: true });
+      const COLD_TOTAL = 300;
+      const CHURN_TOTAL = 60;
+      const old = new Date("2020-01-01T00:00:00.000Z");
+      const coldPaths = new Set<string>();
+      const churnPaths = new Set<string>();
+      // Interleave churn files among the targets (one churn file every 5
+      // targets) so a pulse shifts EVERY subsequent target's position in the
+      // list, not just a trailing tail of it (directory enumeration order is
+      // stable for the test's duration since nothing is added/removed after
+      // setup, so interleaving at creation time controls list order here).
+      let churnIdx = 0;
+      for (let i = 0; i < COLD_TOTAL; i++) {
+        const fp = path.join(dir, `c${i}.jsonl`);
+        fs.writeFileSync(fp, "");
+        fs.utimesSync(fp, old, old);
+        coldPaths.add(fp);
+        if (i % 5 === 0 && churnIdx < CHURN_TOTAL) {
+          const xp = path.join(dir, `c${i}_x${churnIdx}.jsonl`);
+          fs.writeFileSync(xp, "");
+          fs.utimesSync(xp, old, old);
+          churnPaths.add(xp);
+          churnIdx++;
+        }
+      }
+
+      const statAtMs = new Map<string, number>();
+      const ing = new Ingestor(db, [tmp], {
+        ...OPTS,
+        tailIntervalMs: 2_000,
+        discoveryIntervalMs: 600_000,
+        statFile: (p: string) => {
+          // Churn files always fail: they cycle through the stat-error
+          // backoff schedule (4s, 8s, 16s, ... capped at 5 min) independent
+          // of the target files, repeatedly changing coldCandidates.length.
+          if (churnPaths.has(p)) throw new Error("EIO: forced churn failure");
+          statAtMs.set(p, Date.now());
+          return fs.statSync(p);
+        },
+      });
+      handle = ing.startTail();
+
+      const seenCold = new Set<string>();
+      for (let i = 0; i < 155; i++) {
+        // just over 5 min of ticks
+        statAtMs.clear();
+        await vi.advanceTimersByTimeAsync(2_000);
+        for (const p of statAtMs.keys()) if (coldPaths.has(p)) seenCold.add(p);
+      }
+      expect(seenCold.size).toBe(COLD_TOTAL);
+    } finally {
+      handle?.stop();
+      vi.useRealTimers();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("marks a file errored on /api/perf after repeated stat failures, without blocking other files", async () => {
+    vi.useFakeTimers();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-tail-stat-error-"));
+    let handle: { stop(): void } | undefined;
+    try {
+      const dir = path.join(tmp, "proj-err");
+      fs.mkdirSync(dir, { recursive: true });
+      const goodPath = path.join(dir, "good.jsonl");
+      const badPath = path.join(dir, "bad.jsonl");
+      fs.writeFileSync(
+        goodPath,
+        toJsonl([
+          assistant({
+            id: "err-good-1",
+            session: "err-good-session",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+      fs.writeFileSync(
+        badPath,
+        toJsonl([
+          assistant({
+            id: "err-bad-1",
+            session: "err-bad-session",
+            ts: "2026-01-03T00:00:00.000Z",
+            input: 100,
+            output: 10,
+          }),
+        ]),
+      );
+
+      const ing = new Ingestor(db, [tmp], {
+        ...OPTS,
+        tailIntervalMs: 2_000,
+        discoveryIntervalMs: 60_000,
+        statFile: (p: string) => {
+          if (p === badPath) throw new Error("EIO: forced test failure");
+          return fs.statSync(p);
+        },
+      });
+      handle = ing.startTail();
+
+      // The tick continues for the rest: a fresh append to the good file keeps
+      // getting picked up on later ticks despite the bad file's ongoing
+      // failures.
+      fs.appendFileSync(
+        goodPath,
+        toJsonl([
+          assistant({
+            id: "err-good-2",
+            session: "err-good-session",
+            ts: "2026-01-03T00:01:00.000Z",
+            input: 1,
+            output: 1,
+          }),
+        ]),
+      );
+      for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(2_000);
+      expect(
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM turns WHERE message_id='err-good-2'").get() as {
+            n: number;
+          }
+        ).n,
+      ).toBe(1);
+
+      // Enough further ticks for the backoff schedule (4s, 8s, 16s...) to
+      // reach the 3-failure errored threshold.
+      for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(2_000);
+
+      const snap = getPerfSnapshot();
+      expect(snap.errored?.count).toBeGreaterThanOrEqual(1);
+      expect(snap.errored?.ids.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      handle?.stop();
+      vi.useRealTimers();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe("subagent metadata ingestion", () => {
+  it("stores structural metadata and description length for a discovered subagent", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-subagent-meta-"));
+    try {
+      const sessionId = "subagent-meta-session";
+      const slug = "proj-subagent-meta";
+      const subagentsDir = path.join(tmp, slug, sessionId, "subagents");
+      const description = "fixture job";
+      fs.mkdirSync(subagentsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tmp, slug, `${sessionId}.jsonl`),
+        toJsonl([
+          assistant({
+            id: "parent-agent-message",
+            session: sessionId,
+            ts: "2026-01-03T00:00:00.000Z",
+            toolUses: [{ id: "parent-agent-tool", name: "Agent" }],
+          }),
+        ]),
+      );
+      fs.writeFileSync(path.join(subagentsDir, "agent-fork-1.jsonl"), '{"type":"system"}\n');
+      fs.writeFileSync(
+        path.join(subagentsDir, "agent-fork-1.meta.json"),
+        JSON.stringify({
+          agentType: "fork",
+          description,
+          toolUseId: "parent-agent-tool",
+          spawnDepth: 1,
+        }),
+      );
+
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+
+      expect(
+        db
+          .prepare(
+            `SELECT agent_id, session_id, agent_type, tool_use_id, spawn_depth, description_len
+             FROM subagent_meta`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          agent_id: "fork-1",
+          session_id: sessionId,
+          agent_type: "fork",
+          tool_use_id: "parent-agent-tool",
+          spawn_depth: 1,
+          description_len: description.length,
+        },
+      ]);
+      expect(
+        db.prepare("SELECT event_id FROM tool_events WHERE event_id = ?").get("parent-agent-tool"),
+      ).toEqual({ event_id: "parent-agent-tool" });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("stores metadata for a workflow-spawned subagent (S1d-F1)", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-subagent-workflow-"));
+    try {
+      const sessionId = "session-workflow";
+      const workflowDir = path.join(
+        tmp,
+        "proj-workflow",
+        sessionId,
+        "subagents",
+        "workflows",
+        "wf-1",
+      );
+      fs.mkdirSync(workflowDir, { recursive: true });
+      fs.writeFileSync(path.join(workflowDir, "agent-wf-a.jsonl"), '{"type":"system"}\n');
+      fs.writeFileSync(
+        path.join(workflowDir, "agent-wf-a.meta.json"),
+        JSON.stringify({
+          agentType: "workflow-subagent",
+          description: "workflow job",
+          spawnDepth: 2,
+          workflowPhase: "Review",
+        }),
+      );
+
+      new Ingestor(db, [tmp], OPTS).runBackscan();
+
+      expect(
+        db
+          .prepare(
+            "SELECT agent_id, session_id, agent_type, tool_use_id, spawn_depth, description_len FROM subagent_meta",
+          )
+          .all(),
+      ).toEqual([
+        {
+          agent_id: "wf-a",
+          session_id: sessionId,
+          agent_type: "workflow-subagent",
+          tool_use_id: null,
+          spawn_depth: 2,
+          description_len: "workflow job".length,
+        },
+      ]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores agent files nested under subagents/ outside the workflows layout", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-subagent-other-"));
+    try {
+      const dir = path.join(tmp, "proj-other", "session-other", "subagents", "other", "x");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "agent-4.jsonl");
+      fs.writeFileSync(file, '{"type":"system"}\n');
+      fs.writeFileSync(path.join(dir, "agent-4.meta.json"), JSON.stringify({ agentType: "fork" }));
+
+      new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-other");
+      expect(db.prepare("SELECT COUNT(*) AS n FROM subagent_meta").get()).toEqual({ n: 0 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a subagent transcript with no metadata file", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-subagent-no-meta-"));
+    try {
+      const file = path.join(tmp, "proj-no-meta", "session-no-meta", "subagents", "agent-2.jsonl");
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '{"type":"system"}\n');
+
+      expect(() => new Ingestor(db, [tmp], OPTS).ingestFile(file, "proj-no-meta")).not.toThrow();
+      expect(db.prepare("SELECT COUNT(*) AS n FROM subagent_meta").get()).toEqual({ n: 0 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("backfills metadata when a known subagent file is re-ingested", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aw-subagent-backfill-"));
+    try {
+      const subagentsDir = path.join(tmp, "proj-backfill", "session-backfill", "subagents");
+      const file = path.join(subagentsDir, "agent-3.jsonl");
+      fs.mkdirSync(subagentsDir, { recursive: true });
+      fs.writeFileSync(file, '{"type":"system"}\n');
+      const ingestor = new Ingestor(db, [tmp], OPTS);
+      ingestor.ingestFile(file, "proj-backfill");
+      expect(db.prepare("SELECT COUNT(*) AS n FROM subagent_meta").get()).toEqual({ n: 0 });
+
+      fs.writeFileSync(
+        path.join(subagentsDir, "agent-3.meta.json"),
+        JSON.stringify({ agentType: "fork", description: "later fixture", spawnDepth: 2 }),
+      );
+      ingestor.ingestFile(file, "proj-backfill");
+
+      expect(
+        db
+          .prepare(
+            "SELECT agent_id, session_id, agent_type, tool_use_id, spawn_depth, description_len FROM subagent_meta",
+          )
+          .get(),
+      ).toEqual({
+        agent_id: "3",
+        session_id: "session-backfill",
+        agent_type: "fork",
+        tool_use_id: null,
+        spawn_depth: 2,
+        description_len: "later fixture".length,
+      });
+    } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });

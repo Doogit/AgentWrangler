@@ -47,18 +47,29 @@ export function useForegroundPoll<T>(
     let controller: AbortController | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let resumePending = false;
+    let hasAttempted = false;
     const available = () => document.visibilityState !== "hidden" && navigator.onLine !== false;
 
     const poll = async () => {
-      if (disposed || controller || !available()) return;
+      if (disposed || controller) return;
+      // Always run the FIRST fetch even if the tab mounted hidden, so the UI
+      // reaches a terminal state (data or error) instead of an endless skeleton
+      // (UIC-3a/O3 stuck KPI skeleton, UIC-8/O6 daemon-status widget). Only the
+      // recurring polls pause while hidden/offline, preserving the battery win.
+      if (hasAttempted && !available()) return;
+      hasAttempted = true;
       const current = new AbortController();
       controller = current;
       try {
         const value = await request(current.signal);
         if (!disposed && !current.signal.aborted) {
-          group.lastValue = { value };
-          group.lastError = undefined;
-          for (const reader of subscribers) reader.success(value);
+          // Every cadence of this request gets the fresh value, so a subscriber that moves to another
+          // cadence is never replayed an older one (that ping-ponged the limits card 10 s ↔ 180 s).
+          for (const g of cadences.values()) {
+            g.lastValue = { value };
+            g.lastError = undefined;
+            for (const reader of g.subscribers) reader.success(value);
+          }
         }
       } catch (error) {
         if (!disposed && !current.signal.aborted) {

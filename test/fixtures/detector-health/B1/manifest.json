@@ -1,0 +1,9 @@
+{
+  "id": "B1",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "COLLAPSE_READ_FALL_SHARE",
+    "expect": "silent"
+  }
+}

@@ -142,19 +142,32 @@ describe("projectLine — turns", () => {
     expect(r.turn.isSidechain).toBe(true);
   });
 
-  it("prefers session_id over sessionId, falls back to the file stem", () => {
+  // P3.2-F6: after /clear, session_id is the launcher session; sessionId is this transcript's.
+  it("prefers sessionId over session_id, falls back to the file stem", () => {
     const withBoth = projectLine(
       line({
         type: "assistant",
         timestamp: "t",
-        session_id: "canonical",
-        sessionId: "camel",
+        session_id: "launcher",
+        sessionId: "transcript",
         message: { id: "m", model: "claude-sonnet-4-6", usage: { input_tokens: 1 } },
       }),
       ctx,
     );
     if (withBoth.kind !== "record" || withBoth.turn === null) throw new Error("turn");
-    expect(withBoth.turn.sessionId).toBe("canonical");
+    expect(withBoth.turn.sessionId).toBe("transcript");
+
+    const snakeOnly = projectLine(
+      line({
+        type: "assistant",
+        timestamp: "t",
+        session_id: "snake",
+        message: { id: "m1", model: "claude-sonnet-4-6", usage: { input_tokens: 1 } },
+      }),
+      ctx,
+    );
+    if (snakeOnly.kind !== "record" || snakeOnly.turn === null) throw new Error("turn");
+    expect(snakeOnly.turn.sessionId).toBe("snake");
 
     const withNone = projectLine(
       line({
@@ -323,13 +336,81 @@ describe("projectLine — tolerance and structural extraction", () => {
     expect(JSON.stringify(first.toolEvents[0])).not.toContain("C:/private/project/secret.ts");
   });
 
+  it("projects Edit old_string/new_string as hashes only (C6), and nothing for other tools", () => {
+    const projected = projectLine(
+      line(
+        assistant({
+          id: "owner-edit",
+          session: "s",
+          ts: "t",
+          toolUses: [
+            {
+              id: "tu-edit",
+              name: "Edit",
+              input: {
+                file_path: "/fixture/a.ts",
+                old_string: "alpha one",
+                new_string: "beta two",
+              },
+            },
+            {
+              id: "tu-write",
+              name: "Write",
+              input: { file_path: "/fixture/a.ts", old_string: "alpha one", new_string: "x" },
+            },
+          ],
+        }),
+      ),
+      ctx,
+    );
+    if (projected.kind !== "record") throw new Error("record");
+    const [edit, write] = projected.toolEvents;
+    const sha = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
+    expect(edit?.editOldStringHash).toBe(sha("alpha one"));
+    expect(edit?.editNewStringHash).toBe(sha("beta two"));
+    expect(write?.editOldStringHash).toBeNull();
+    expect(write?.editNewStringHash).toBeNull();
+    expect(JSON.stringify(edit)).not.toContain("alpha one");
+    expect(JSON.stringify(edit)).not.toContain("beta two");
+  });
+
   it("classifies only anchored, known test commands", () => {
     expect(isTestCommand("npm test -- --runInBand")).toBe(true);
     expect(isTestCommand("npx vitest run test/ingest")).toBe(true);
     expect(isTestCommand("python -m pytest -q")).toBe(true);
     expect(isTestCommand("echo npm test")).toBe(false);
-    expect(isTestCommand("cd app && npm test")).toBe(false);
     expect(isTestCommand("npm run build")).toBe(false);
+  });
+
+  // Operator 2026-10-14: a test run chained after setup, or a verify script, is still a test run.
+  it("classifies a test run in any segment of a chained command", () => {
+    expect(isTestCommand("cd app && npm test")).toBe(true);
+    expect(isTestCommand("npm run build; npx vitest run")).toBe(true);
+    expect(isTestCommand("CI=1 npm test")).toBe(true);
+    expect(isTestCommand("& npm run verify:app")).toBe(true);
+    expect(isTestCommand("npm --prefix web test")).toBe(true);
+    expect(isTestCommand("npx playwright test e2e")).toBe(true);
+    expect(isTestCommand("git log | grep 'npm test'")).toBe(false);
+    expect(isTestCommand("npx tsc --noEmit && npm run lint")).toBe(false);
+  });
+
+  it("flags a test run from the PowerShell tool", () => {
+    const projected = projectLine(
+      line(
+        assistant({
+          id: "owner-ps",
+          session: "s",
+          ts: "t",
+          toolUses: [
+            { id: "tu-ps", name: "PowerShell", input: { command: "npm run verify:app" } },
+            { id: "tu-ps2", name: "PowerShell", input: { command: "Get-ChildItem" } },
+          ],
+        }),
+      ),
+      ctx,
+    );
+    if (projected.kind !== "record") throw new Error("record");
+    expect(projected.toolEvents.map((e) => e.testCommandHint)).toEqual([true, false]);
   });
 
   it("extracts tool_result size and a commit SHA (structural, not content)", () => {
@@ -351,7 +432,51 @@ describe("projectLine — tolerance and structural extraction", () => {
     expect(r.toolResults[0]?.isError).toBe(false);
   });
 
-  it("projects tool_result is_error as a structural boolean only", () => {
+  it("extracts git's short commit form [<branch> <7-12 hex>] (O-3)", () => {
+    const shaOf = (text: string): string | null => {
+      const r = projectLine(
+        line(userToolResult({ session: "s", ts: "t", results: [{ toolUseId: "tu-1", text }] })),
+        ctx,
+      );
+      if (r.kind !== "record") throw new Error("record");
+      return r.toolResults[0]?.commitSha ?? null;
+    };
+    expect(shaOf("[main 1a2b3c4] fix: thing\n 1 file changed")).toBe("1a2b3c4");
+    expect(shaOf("[feat/x-y 1a2b3c4d5e6f] msg")).toBe("1a2b3c4d5e6f");
+    expect(shaOf("[main (root-commit) abcdef0] init")).toBe("abcdef0");
+    expect(shaOf("[detached HEAD abcdef0] wip")).toBe("abcdef0");
+    expect(shaOf("hook output\n[main abcdef0] msg")).toBe("abcdef0");
+    // Not the commit summary line: no link.
+    expect(shaOf("   abcdef0..1234567  main -> main")).toBeNull();
+    expect(shaOf("see [main abc] too short")).toBeNull();
+  });
+
+  it("flags git commit/push with -C/-c options as a git write (O-3)", () => {
+    const hints = (command: string): boolean => {
+      const r = projectLine(
+        line(
+          assistant({
+            id: "o",
+            session: "s",
+            ts: "t",
+            toolUses: [{ id: "tu", name: "Bash", input: { command } }],
+          }),
+        ),
+        ctx,
+      );
+      if (r.kind !== "record") throw new Error("record");
+      return r.toolEvents[0]?.gitCommandHint ?? false;
+    };
+    expect(hints('git -C "C:/a b/wt" commit -q -m x')).toBe(true);
+    expect(hints("git -C .worktrees/x -c core.hooksPath=h commit -m x")).toBe(true);
+    expect(hints("git commit -m x")).toBe(true);
+    expect(hints("git -C wt log --oneline")).toBe(false);
+  });
+
+  it("projects tool_result is_error structurally and retains a W-A error slice", () => {
+    // SEC-101 rescope (ADR-112): an error result now deliberately retains a
+    // bounded, secrets-filtered error excerpt (errorSlice) for C5/D7. is_error
+    // stays a structural boolean; no other field carries content.
     const r = projectLine(
       line(
         userToolResult({
@@ -364,7 +489,23 @@ describe("projectLine — tolerance and structural extraction", () => {
     );
     if (r.kind !== "record") throw new Error("record");
     expect(r.toolResults[0]?.isError).toBe(true);
-    expect(JSON.stringify(r.toolResults[0])).not.toContain("fabricated failure");
+    expect(r.toolResults[0]?.errorSlice).toBe("fabricated failure");
+  });
+
+  it("does not retain an error slice for a successful tool_result", () => {
+    const r = projectLine(
+      line(
+        userToolResult({
+          session: "s",
+          ts: "t",
+          results: [{ toolUseId: "tu-ok", text: "all good", isError: false }],
+        }),
+      ),
+      ctx,
+    );
+    if (r.kind !== "record") throw new Error("record");
+    expect(r.toolResults[0]?.errorSlice).toBeNull();
+    expect(JSON.stringify(r.toolResults[0])).not.toContain("all good");
   });
 
   it("projects a local_command system record", () => {
@@ -411,6 +552,43 @@ describe("projectLine — tolerance and structural extraction", () => {
       if (r.kind !== "record") throw new Error("record");
       expect(r.command).toBeNull();
     }
+  });
+
+  it("captures /clear and /compact from <command-name> tags in user string content", () => {
+    for (const marker of ["/clear", "/compact"] as const) {
+      const content = `<command-name>${marker}</command-name>\n<command-message>${marker.slice(1)}</command-message>\n<command-args></command-args>`;
+      const r = projectLine(line(userCommand({ session: "tag", ts: "time", content })), ctx);
+      if (r.kind !== "record" || r.command === null) throw new Error("command record");
+      expect(r.command).toEqual({
+        sessionId: "tag",
+        ts: "time",
+        eventId: legacyCommandId("tag", "time", marker),
+        command: marker,
+      });
+    }
+  });
+
+  it("emits nothing for other slash commands in <command-name> tags", () => {
+    const content = "<command-name>/model</command-name>\n<command-args>opus</command-args>";
+    const r = projectLine(line(userCommand({ session: "tag", ts: "time", content })), ctx);
+    if (r.kind !== "record") throw new Error("record");
+    expect(r.command).toBeNull();
+  });
+
+  it("does not double-count a tool_result record containing the tag text", () => {
+    const r = projectLine(
+      line(
+        userToolResult({
+          session: "tag",
+          ts: "time",
+          results: [{ toolUseId: "t1", text: "<command-name>/clear</command-name>" }],
+        }),
+      ),
+      ctx,
+    );
+    if (r.kind !== "record") throw new Error("record");
+    expect(r.command).toBeNull();
+    expect(r.toolResults).toHaveLength(1);
   });
 
   it("retains no unclassified command text while preserving its legacy identity", () => {

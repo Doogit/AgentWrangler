@@ -83,25 +83,48 @@ describe("D2 — SESSION_LONG_FULL_CONTEXT", () => {
     expect(r.state).toBe("PROPOSED");
     expect(r.created_at).toBe(NOW.toISOString());
 
-    // 3 sessions × 151 turns × cache_read 200k × sonnet cache-read price 0.3.
-    expect(r.modeled_savings_u_per_wk).toBe(8_969_400);
+    // Spend: 3 sessions × 151 turns × cache_read 200k × sonnet cache-read price 0.3 = 27,180,000.
+    // Review 3 B5, derived reduction: the base is the median first-turn context of the sessions
+    // that started this week, the shared seed's included (8,000). One split per session, halving
+    // it: calls 76–150 (75 calls, i·2/151 ≥ 1) each avoid 200,000 − 8,000 − 2,000 = 190,000 of
+    // the 151 × 200,000 = 30,200,000 read: 14,250,000 / 30,200,000 = 0.47185 → 0.4719.
+    // Gross 27,180,000 × 0.4719 = 12,826,242. Netted (P3.1-T9 S6): 3 splits × (8,000 + 2,000) ×
+    // the 5m write price 3.75 = 112,500 → 12,713,742.
+    expect(r.modeled_savings_u_per_wk).toBe(12_713_742);
 
     const formula = JSON.parse(r.modeled_formula_json as string);
-    expect(formula.model).toBe("D2_LONG_CONTEXT_CACHE_READ_V1");
+    expect(formula.formula_id).toBe("D2_LONG_CONTEXT_CACHE_READ_V1");
     expect(formula.inputs.cache_read_tokens_per_week).toBe(90_600_000);
-    expect(formula.inputs.reduction_fraction).toBe(0.33);
-    expect(formula.inputs.cache_read_price_usd_per_mtok).toBeCloseTo(0.3, 6);
+    expect(formula.inputs.cap_read_coefficient).toBe(0.1);
 
-    // Reproduce the figure from the stored expression + inputs (within rounding).
-    const reproduced =
-      (formula.inputs.cache_read_tokens_per_week / 1e6) *
-      formula.inputs.cache_read_price_usd_per_mtok *
-      formula.inputs.reduction_fraction;
-    expect(Math.round(reproduced * 1e6)).toBe(8_969_400);
-
-    const evidence = JSON.parse(r.evidence_json as string);
+    const evidence = JSON.parse(r.evidence_json as string).facts;
     expect(evidence.qualifying_session_count).toBe(3);
     expect(evidence.session_ids).toEqual(["sess-long-1", "sess-long-2", "sess-long-3"]);
+    expect(evidence).toMatchObject({
+      suggested_split_count: 3,
+      base_prefix_tokens: 8_000,
+      summary_tokens: 2_000,
+      reduction_fraction: 0.4719,
+      gross_savings_u_per_wk: 12_826_242,
+      rebuild_u_per_wk: 112_500,
+    });
+  });
+
+  // Review 4: D2 and D7 price cache reads on one basis — each turn's snapshot, else the model's
+  // list price. An unpriced turn used to count its tokens at $0, dragging D2's price down.
+  it("prices an unpriced turn's cache reads at its model's list price", () => {
+    insQualifying(1);
+    insQualifying(2);
+    insQualifying(3);
+    db.prepare(
+      "UPDATE turns SET pricing_snapshot_id = NULL WHERE session_id = 'sess-long-3'",
+    ).run();
+    runDetectors(db, { now: NOW });
+    const row = db
+      .prepare("SELECT evidence_json FROM recommendations WHERE detector_id = 'D2'")
+      .get() as { evidence_json: string };
+    // Sonnet (4) list cache-read price 0.3 matches its snapshot: 3 × 151 × 200,000 × 0.3.
+    expect(JSON.parse(row.evidence_json).facts.cache_read_spend_u_per_wk).toBe(27_180_000);
   });
 
   it("does NOT fire below the trigger (only 2 qualifying sessions)", () => {
@@ -156,6 +179,8 @@ describe("D5 — LIMIT_BURN_FORECAST", () => {
   it("fires (WARNING) when recent burn projects exhaustion within the warn window", () => {
     // limit set; a big recent burn 12h before `now` → rate high → eta ≤ 2d.
     db.prepare("UPDATE user_config SET value = '3000000000' WHERE key = 'limit_tokens'").run();
+    // U7: the stored-limit forecast reads a 7-day burn, so drop the seeded week of turns.
+    db.prepare("DELETE FROM turns").run();
     insSession("sess-burn", 1, "2026-01-07T12:00:00.000Z");
     insTurn("msg-burn", "sess-burn", "2026-01-07T12:00:00.000Z", 0, 1_000_000_000);
 
@@ -171,12 +196,21 @@ describe("D5 — LIMIT_BURN_FORECAST", () => {
     expect(r.category).toBe("LIMIT");
     expect(r.modeled_savings_u_per_wk).toBeNull(); // warning-class
     expect(JSON.parse(r.modeled_formula_json as string)).toEqual({
-      model: "none",
-      inputs: {},
-      kind: "WARNING",
+      // P2 WIRE: D5 is banner-only, basis X (unranked).
+      estimate: expect.objectContaining({ basis: "X", rank_value_u_per_wk: null }),
+      formula_id: "D5_LIMIT_BURN_FORECAST_V1",
+      inputs: {
+        forecast_state: "WARNING",
+        limit_scale_legacy: true,
+        limit_tokens: 3_000_000_000,
+        projected_exhaustion_jd: 2461049.5,
+        session_ids: ["sess-burn"],
+        tokens_used: 1_000_000_000,
+      },
+      version: 1,
     });
-    const evidence = JSON.parse(r.evidence_json as string);
-    expect(evidence.state).toBe("WARNING");
+    const evidence = JSON.parse(r.evidence_json as string).facts;
+    expect(evidence.forecast_state).toBe("WARNING");
     expect(evidence.limit_tokens).toBe(3_000_000_000);
   });
 });

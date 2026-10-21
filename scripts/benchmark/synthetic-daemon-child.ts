@@ -162,7 +162,7 @@ async function listen(server: http.Server): Promise<number> {
 
 async function sampleJob(
   name: string,
-  task: () => Promise<void>,
+  task: () => Promise<unknown>,
 ): Promise<Record<string, unknown>> {
   const beforeCpu = process.cpuUsage();
   const before = performance.now();
@@ -615,7 +615,7 @@ async function main(): Promise<void> {
         getPRDiff: async () => ({ ok: true, data: "" }),
         getReviewThreads: async () => ({ ok: true, data: [] }),
       };
-      const stepSample = async (name: string, task: () => Promise<void>): Promise<void> => {
+      const stepSample = async (name: string, task: () => Promise<unknown>): Promise<void> => {
         await nextTimer();
         jobs.push(await sampleJob(name, task));
       };

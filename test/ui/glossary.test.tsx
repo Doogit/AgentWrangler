@@ -13,15 +13,9 @@ import GlossaryPage from "../../src/ui/glossary/GlossaryPage";
 import Sidebar from "../../src/ui/nav/Sidebar";
 
 // Verbatim chip labels as rendered elsewhere in the UI (Chip.KIND_LABEL).
-const TIER_CHIP_LABELS = [
-  "MEASURED",
-  "ESTIMATED VALUE",
-  "PROJECTED",
-  "ESTIMATE",
-  "TOKEN-BASED ESTIMATE",
-  "TREND ONLY",
-  "EARLY ESTIMATE",
-];
+// LIST_EQUIV and OBS_PROXY both render as "Estimate" after the foundation relabel;
+// they share an aria-label, so they are checked separately with getAllByLabelText.
+const TIER_CHIP_LABELS = ["MEASURED", "PROJECTED", "ESTIMATE", "TREND ONLY", "EARLY ESTIMATE"];
 
 vi.mock("../../src/ui/api/client", () => ({
   fetchStatus: vi.fn().mockResolvedValue({ sessions: 3, files_seen: 1, files_parsed: 1 }),
@@ -50,12 +44,35 @@ describe("NU5 — glossary page", () => {
     expect(EXPECTED_SECTIONS).toHaveLength(8);
   });
 
+  it("returns from each definition to its specific hash-routed task surface", () => {
+    render(<GlossaryPage />);
+
+    const expectedDestinations = new Map([
+      ["glossary-list-equiv", "#/overview"],
+      ["glossary-honesty-tiers", "#/overview"],
+      ["glossary-cache", "#/overview"],
+      ["glossary-verdict", "#/overview"],
+      ["glossary-friction", "#/sessions"],
+      ["glossary-offload", "#/sessions"],
+      ["glossary-percentiles", "#/sessions"],
+      ["glossary-linkage", "#/workspaces"],
+    ]);
+
+    for (const [sectionId, href] of expectedDestinations) {
+      const section = screen.getByTestId(sectionId);
+      expect(section.querySelector("a")?.getAttribute("href")).toBe(href);
+    }
+  });
+
   it("renders the honesty-tier chips with verbatim labels", () => {
     render(<GlossaryPage />);
     // The tier chips share the same labels used everywhere else in the UI.
     for (const label of TIER_CHIP_LABELS) {
       expect(screen.getByLabelText(label)).toBeTruthy();
     }
+    // LIST_EQUIV and OBS_PROXY both render as "Estimate" after the relabel — two chips share
+    // this aria-label, so use getAllByLabelText.
+    expect(screen.getAllByLabelText("Estimate").length).toBeGreaterThanOrEqual(2);
     // LOW CONFIDENCE is a literal chip, verbatim with BurnForecastCard/Settings.
     expect(screen.getByText("LOW CONFIDENCE")).toBeTruthy();
   });
@@ -67,7 +84,8 @@ describe("NU5 — glossary page", () => {
   it("is reachable from the sidebar", () => {
     const onNavigate = vi.fn();
     render(<Sidebar active="overview" onNavigate={onNavigate} />);
-    const link = screen.getByRole("button", { name: /how to read this dashboard/i });
+    const link = screen.getByRole("link", { name: /how to read this dashboard/i });
+    expect(link.getAttribute("href")).toBe("#/glossary");
     link.click();
     expect(onNavigate).toHaveBeenCalledWith("glossary");
   });

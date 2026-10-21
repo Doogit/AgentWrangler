@@ -658,7 +658,7 @@ describe("syncWorkItems — bounded concurrency", () => {
     }
   });
 
-  it("failed check-conclusion preserves prior value; watermark advances", async () => {
+  it("failed check-conclusion retains prior projection and watermark for retry", async () => {
     const t1 = "2026-08-01T00:00:00Z";
     const t2 = "2026-08-05T00:00:00Z";
     const pr41 = {
@@ -714,23 +714,27 @@ describe("syncWorkItems — bounded concurrency", () => {
     };
     expect(wm1.value).toBe(t1);
 
-    // Pass 2: every check call fails; COALESCE must preserve PR 41's value.
-    listing = [pr41, pr42];
+    // Pass 2: the old PR moves to a new head; failed checks must not carry
+    // the old head's SUCCESS onto the new one or advance the watermark.
+    listing = [
+      { ...pr41, merge_commit_sha: "sha-41-new", head: { ...pr41.head, sha: "new-head-41" } },
+      pr42,
+    ];
     checksFail = true;
     await syncWorkItems(db, client, ws);
 
     const rows = db
-      .prepare("SELECT number, checks_conclusion FROM work_items ORDER BY number")
-      .all() as Array<{ number: number; checks_conclusion: string | null }>;
-    expect(rows).toHaveLength(2);
+      .prepare("SELECT number, final_commit, checks_conclusion FROM work_items ORDER BY number")
+      .all() as Array<{ number: number; final_commit: string; checks_conclusion: string | null }>;
+    expect(rows).toHaveLength(1);
     expect(rows[0]?.number).toBe(41);
-    expect(rows[0]?.checks_conclusion).toBe("SUCCESS"); // preserved, not nulled
-    expect(rows[1]?.checks_conclusion).toBeNull();
+    expect(rows[0]?.final_commit).toBe("sha-41");
+    expect(rows[0]?.checks_conclusion).toBe("SUCCESS");
 
     const wm2 = db.prepare("SELECT value FROM user_config WHERE key = ?").get(wmKey) as {
       value: string;
     };
-    expect(wm2.value).toBe(t2); // advanced despite failed check fetches
+    expect(wm2.value).toBe(t1);
   });
 
   it("disabled client makes zero fetch calls", async () => {

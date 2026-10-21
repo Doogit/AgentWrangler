@@ -1,9 +1,4 @@
-/**
- * test/detector/d9-idle-background.test.ts — D9 IDLE_BACKGROUND_SESSION.
- *
- * Fires per-workspace when is_sidechain turns contribute ≥ 25% of cap-weighted
- * tokens AND ≥ 100k absolute. Savings are DIRECTIONAL: no crisp $ headline.
- */
+/** D9 FORK_SUBAGENT detector tests. SEC-101 fixtures contain ids and counts only. */
 
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,144 +13,142 @@ let db: Database.Database;
 beforeEach(() => {
   db = createInMemoryFixtureDb();
   db.prepare(
-    `INSERT OR IGNORE INTO workspaces (workspace_id, project_slug, registered_at)
-     VALUES ('ws-idle','ws-idle','2027-01-01T00:00:00.000Z')`,
-  ).run();
+    `INSERT INTO workspaces (workspace_id, project_slug, registered_at)
+     VALUES ('ws-a', 'ws-a', ?)`,
+  ).run(TS);
   db.prepare(
-    `INSERT OR IGNORE INTO sessions
+    `INSERT INTO sessions
        (session_id, workspace_id, file_path, first_turn_at, last_turn_at,
         state, turn_count, cost_equiv_u, hygiene_flags, user_turn_count)
-     VALUES ('sess-idle','ws-idle','/fake/sess-idle.jsonl', ?, ?, 'RECONCILED', 0, 0, '[]', 0)`,
-  ).run(TS, TS);
+     VALUES (?, 'ws-a', ?, ?, ?, 'RECONCILED', 0, 0, '[]', 0)`,
+  ).run("parent-a-1", "/fixture/parent-a-1.jsonl", TS, TS);
+  db.prepare(
+    `INSERT INTO sessions
+       (session_id, workspace_id, file_path, first_turn_at, last_turn_at,
+        state, turn_count, cost_equiv_u, hygiene_flags, user_turn_count)
+     VALUES (?, 'ws-a', ?, ?, ?, 'RECONCILED', 0, 0, '[]', 0)`,
+  ).run("parent-a-2", "/fixture/parent-a-2.jsonl", TS, TS);
 });
 
 afterEach(() => db.close());
 
-let seq = 0;
-function insTurn(
-  inputTokens: number,
-  sidechain: number,
-  options: { provisional?: number; sessionId?: string; ts?: string } = {},
+function insertSubagent(agentId: string, sessionId: string, agentType: string | null): void {
+  db.prepare(
+    `INSERT INTO subagent_meta
+       (agent_id, session_id, agent_type, tool_use_id, spawn_depth, description_len)
+     VALUES (?, ?, ?, NULL, 1, 0)`,
+  ).run(agentId, sessionId, agentType);
+}
+
+/** A priced turn of the parent session; a fork turn when `agentId` is set. */
+function insertForkTurn(
+  messageId: string,
+  agentId: string | null,
+  sessionId: string,
+  ts: string,
+  cacheRead: number,
+  costU = 0,
 ): void {
   db.prepare(
     `INSERT INTO turns
-       (message_id, session_id, workspace_id, ts, model,
-        is_sidechain, input_tokens, output_tokens,
-        cache_read_tokens, cache_write_5m, cache_write_1h, cache_write_other,
-        tool_result_bytes, pricing_snapshot_id, cost_equiv_u, cost_claim,
-        provisional, parser_version)
-     VALUES (?, ?, 'ws-idle', ?, 'claude-sonnet',
-             ?, ?, 0, 0, 0, 0, 0, NULL, 'snap-sonnet', 0, 'LIST_EQUIV', ?, 'test-v1')`,
-  ).run(
-    `msg-idle-${seq++}`,
-    options.sessionId ?? "sess-idle",
-    options.ts ?? TS,
-    sidechain,
-    inputTokens,
-    options.provisional ?? 0,
-  );
+       (message_id, session_id, workspace_id, ts, model, is_sidechain, cache_read_tokens,
+        pricing_snapshot_id, cost_equiv_u, cost_claim, provisional, parser_version, agent_id)
+     VALUES (?, ?, 'ws-a', ?, 'claude-sonnet', ?, ?, 'snap-sonnet', ?, 'LIST_EQUIV', 0, 'test-v1', ?)`,
+  ).run(messageId, sessionId, ts, agentId === null ? 0 : 1, cacheRead, costU, agentId);
 }
 
 function d9Recs(): Array<Record<string, unknown>> {
   return db
-    .prepare("SELECT * FROM recommendations WHERE detector_id='D9' ORDER BY rec_id")
+    .prepare("SELECT * FROM recommendations WHERE detector_id = 'D9' ORDER BY rec_id")
     .all() as Array<Record<string, unknown>>;
 }
 
-describe("D9 — fires on background-heavy fan-out", () => {
-  it("fires when sidechain share ≥ 25% and ≥ 100k cap tokens", () => {
-    insTurn(120_000, 1); // sidechain: 120k cap tokens
-    insTurn(100_000, 0); // foreground: total 220k, share ≈ 0.545
+describe("D9 — fork subagents", () => {
+  it("fires once for a workspace with the fork count and parent session ids", () => {
+    insertSubagent("agent-a-1", "parent-a-1", "fork");
+    insertSubagent("agent-a-2", "parent-a-2", "fork");
 
     const statuses = runDetectors(db, { now: NOW });
-    expect(statuses.find((s) => s.detector_id === "D9")?.status).toBe("ACTIVE");
 
+    expect(statuses.find((status) => status.detector_id === "D9")?.status).toBe("ACTIVE");
     const recs = d9Recs();
-    expect(recs.length).toBe(1);
-    const r = recs[0];
-    if (!r) throw new Error("expected D9 rec");
-    expect(r.category).toBe("SESSION_HYGIENE");
-    expect(r.scope_workspace_id).toBe("ws-idle");
-    // Directional: no crisp $ headline.
-    expect(r.modeled_savings_u_per_wk).toBeNull();
+    expect(recs).toHaveLength(1);
+    const rec = recs[0];
+    if (!rec) throw new Error("expected D9 finding");
+    expect(rec.scope_workspace_id).toBe("ws-a");
+    expect(rec.modeled_savings_u_per_wk).toBeNull();
 
-    const formula = JSON.parse(r.modeled_formula_json as string) as Record<string, unknown>;
-    expect(formula.kind).toBe("DIRECTIONAL");
+    const facts = JSON.parse(rec.evidence_json as string).facts as Record<string, unknown>;
+    expect(facts.fork_count).toBe(2);
+    expect(facts.session_ids).toEqual(["parent-a-1", "parent-a-2"]);
 
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.directional).toBe(true);
-    expect(ev.sidechain_cap_weighted_tokens).toBe(120_000);
-    expect(ev.zero_user_turn_sidechain_cap).toBe(120_000);
-    expect(ev.zero_user_turn_sidechain_share).toBe(1);
-    expect(ev.zero_user_turn_session_count).toBe(1);
-    expect(typeof ev.sidechain_share).toBe("number");
-    expect(ev.thresholds_unvalidated).toBe(true);
+    // U7: these forks have no ingested turns, so their cost is unknown. The estimate used to be
+    // hard-wired to 0 (basis "E", rank 0); it now says "cost not measured" with no rank value.
+    const formula = JSON.parse(rec.modeled_formula_json as string) as Record<string, unknown>;
+    const estimate = formula.estimate as Record<string, unknown>;
+    expect(estimate.basis).toBe("X");
+    expect(estimate.rank_value_u_per_wk).toBeNull();
+    expect(estimate.label).toBe("cost not measured");
+    expect(facts.cost_basis).toBe("not_measured");
   });
 
-  it("reports no zero-user-turn facet for genuine user-turn sessions", () => {
-    db.prepare("UPDATE sessions SET user_turn_count = 1 WHERE session_id = 'sess-idle'").run();
-    insTurn(120_000, 1);
-    insTurn(100_000, 0);
+  it("estimates the fork's cache reads, priced from each turn's snapshot", () => {
+    insertSubagent("agent-a-1", "parent-a-1", "fork");
+    for (const id of ["m1", "m2"]) insertForkTurn(id, "agent-a-1", "parent-a-1", TS, 100_000);
 
     runDetectors(db, { now: NOW });
-
-    const recs = d9Recs();
-    expect(recs.length).toBe(1);
-    const r = recs[0];
-    if (!r) throw new Error("expected D9 rec");
-    expect(r.modeled_savings_u_per_wk).toBeNull();
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.zero_user_turn_sidechain_cap).toBe(0);
-    expect(ev.zero_user_turn_sidechain_share).toBe(0);
-    expect(ev.zero_user_turn_session_count).toBe(0);
+    const rec = d9Recs()[0];
+    if (!rec) throw new Error("expected D9 finding");
+    const facts = JSON.parse(rec.evidence_json as string).facts as Record<string, unknown>;
+    const estimate = (JSON.parse(rec.modeled_formula_json as string) as Record<string, unknown>)
+      .estimate as Record<string, unknown>;
+    // 200,000 cache-read tokens at the fixture snapshot's $0.30/MTok = 60,000 µUSD.
+    expect(facts.fork_cache_read_tokens).toBe(200_000);
+    expect(facts.cost_basis).toBe("measured");
+    expect(estimate.basis).toBe("E");
+    expect(estimate.rank_value_u_per_wk).toBe(60_000);
   });
 
-  it("keeps provisional and out-of-window turns out of the zero-user-turn facet", () => {
-    insTurn(120_000, 1);
-    insTurn(100_000, 0);
-    insTurn(50_000, 1, { provisional: 1 });
-    insTurn(60_000, 1, { ts: "2026-12-31T23:59:59.999Z" });
-    insTurn(70_000, 1, { ts: "2027-01-08T00:00:00.000Z" });
+  it("windows a fork by its own turn times, not its parent session's last turn", () => {
+    insertSubagent("agent-a-1", "parent-a-1", "fork");
+    // The parent session ended inside the window, but every fork turn is weeks older.
+    insertForkTurn("old1", "agent-a-1", "parent-a-1", "2026-11-01T00:00:00.000Z", 100_000);
 
-    runDetectors(db, { now: NOW });
-
-    const recs = d9Recs();
-    expect(recs.length).toBe(1);
-    const r = recs[0];
-    if (!r) throw new Error("expected D9 rec");
-    const ev = JSON.parse(r.evidence_json as string) as Record<string, unknown>;
-    expect(ev.sidechain_cap_weighted_tokens).toBe(120_000);
-    expect(ev.zero_user_turn_sidechain_cap).toBe(120_000);
-    expect(ev.zero_user_turn_sidechain_share).toBe(1);
-    expect(ev.zero_user_turn_session_count).toBe(1);
-  });
-});
-
-describe("D9 — stays quiet", () => {
-  it("does not fire when the sidechain share is below 25%", () => {
-    insTurn(120_000, 1); // sidechain ≥ 100k absolute…
-    insTurn(1_000_000, 0); // …but share ≈ 0.107 < 0.25
     const statuses = runDetectors(db, { now: NOW });
-    expect(statuses.find((s) => s.detector_id === "D9")?.status).toBe("INACTIVE");
-    expect(d9Recs().length).toBe(0);
+    expect(statuses.find((status) => status.detector_id === "D9")?.status).toBe("INACTIVE");
+    expect(d9Recs()).toHaveLength(0);
   });
 
-  it("does not fire when absolute sidechain tokens are below 100k", () => {
-    insTurn(50_000, 1); // high share but only 50k absolute
+  it("stays quiet when the estimate is under 0.25% of the workspace's 7-day spend", () => {
+    insertSubagent("agent-a-1", "parent-a-1", "fork");
+    insertForkTurn("m1", "agent-a-1", "parent-a-1", TS, 100_000);
+    insertForkTurn("big", null, "parent-a-1", TS, 0, 100_000_000_000);
+
     runDetectors(db, { now: NOW });
-    expect(d9Recs().length).toBe(0);
+    expect(d9Recs()).toHaveLength(0);
+  });
+
+  it("does not fire for non-fork subagents", () => {
+    insertSubagent("agent-a-1", "parent-a-1", "general-purpose");
+    insertSubagent("agent-a-2", "parent-a-2", null);
+
+    const statuses = runDetectors(db, { now: NOW });
+
+    expect(statuses.find((status) => status.detector_id === "D9")?.status).toBe("INACTIVE");
+    expect(d9Recs()).toHaveLength(0);
   });
 });
 
 describe("D9 — determinism", () => {
   it("two passes over the same frozen DB yield identical rows", () => {
-    insTurn(120_000, 1);
-    insTurn(100_000, 0);
+    insertSubagent("agent-a-1", "parent-a-1", "fork");
+    insertSubagent("agent-a-2", "parent-a-2", "fork");
 
     runDetectors(db, { now: NOW });
-    const first = d9Recs();
-
+    const first = d9Recs().map((r) => r.evidence_json);
     runDetectors(db, { now: NOW });
-    expect(d9Recs()).toEqual(first);
+    const second = d9Recs().map((r) => r.evidence_json);
+
+    expect(second).toEqual(first);
   });
 });

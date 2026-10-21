@@ -11,7 +11,7 @@ import type {
   LoadedApprovedEvidenceInput,
 } from "../common/approved-input.js";
 import { loadApprovedEvidenceInput, publishApprovedOutput } from "../common/approved-input.js";
-import { EvidenceBoundaryError } from "../common/boundary.js";
+import { EvidenceBoundaryError, resolveProspectivePath } from "../common/boundary.js";
 import { canonicalJson, sha256Canonical } from "../common/canonical.js";
 import { redactEvidenceExcerpt } from "../common/redaction.js";
 import type { EvidenceGithubClient, EvidenceGithubPullRequest } from "../github/client.js";
@@ -267,7 +267,10 @@ function preflightOutputs(
   const resolved = outputs.map((output) => path.resolve(output));
   if (new Set(resolved).size !== resolved.length) fail("cond1_output_paths_duplicate");
   for (const output of resolved) {
-    if (path.dirname(output) !== state) fail("cond1_output_not_direct_state_child");
+    // scratchStatePath is canonical; canonicalize the parent too (macOS /var -> /private/var).
+    if (resolveProspectivePath(path.dirname(output)) !== state) {
+      fail("cond1_output_not_direct_state_child");
+    }
     try {
       fs.lstatSync(output);
       fail("cond1_output_already_exists");

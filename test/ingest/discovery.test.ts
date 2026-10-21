@@ -10,7 +10,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { discoverFiles } from "../../src/ingest/discovery.js";
+import {
+  createDiscoveryCache,
+  discoverFiles,
+  refreshDiscoveryCache,
+} from "../../src/ingest/discovery.js";
 
 const SLUG = "proj-disc";
 const SESSION_UUID = "c3d4e5f6-0012-4567-abcd-ef9012345678";
@@ -57,5 +61,18 @@ describe("discoverFiles — recursive subagent discovery", () => {
     const found = discoverFiles([tmp]).filter((f) => f.projectSlug === "proj-flat");
     expect(found).toHaveLength(1);
     expect(found.map((f) => path.basename(f.filePath))).toEqual(["session.jsonl"]);
+  });
+
+  it("skips agentwrangler-canary workspaces (P3.1-T3)", () => {
+    const canary =
+      "C--Users-dev-AppData-Local-Temp-agentwrangler-canary-00000000-0000-4000-8000-000000000000";
+    fs.mkdirSync(path.join(tmp, canary), { recursive: true });
+    fs.writeFileSync(path.join(tmp, canary, "s.jsonl"), '{"type":"system"}\n', "utf8");
+
+    expect(discoverFiles([tmp]).some((f) => f.projectSlug === canary)).toBe(false);
+    const cache = createDiscoveryCache();
+    expect(refreshDiscoveryCache([tmp], cache).some((f) => f.projectSlug === canary)).toBe(false);
+    fs.writeFileSync(path.join(tmp, canary, "t.jsonl"), '{"type":"system"}\n', "utf8");
+    expect(refreshDiscoveryCache([tmp], cache).some((f) => f.projectSlug === canary)).toBe(false);
   });
 });

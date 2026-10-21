@@ -8,16 +8,26 @@
  */
 
 import type { PracticeEntry, PracticesResult } from "../../detector/practice-registry";
-import { d1Savings } from "../../detector/savings";
+import { D1_D10_AVOIDANCE_FRACTION, d1Savings } from "../../detector/savings";
 import type { OAuthStatus } from "../../oauth/credentials";
 import type { GithubTokenStatus } from "../../outcomes/github/credential";
 import type { BurnStatus } from "../../query/api/burn-status";
 import type { ContextComposition } from "../../query/api/context-composition";
 import type { CostPerSuccess } from "../../query/api/cost-per-success";
+import type { DecisionView } from "../../query/api/decision-view-types";
+import type { DeliveryMetrics } from "../../query/api/delivery";
+import type { DiagnosticCategory, SessionDiagnosticAnchor } from "../../query/api/diagnostics";
+import type {
+  AvoidableRow,
+  DiagnosticsPayload,
+  ReliabilityRow,
+} from "../../query/api/diagnostics-triage";
 import type { ClosureProxy } from "../../query/api/effectiveness";
 import type { EfficiencyHeadroom } from "../../query/api/efficiency-headroom";
 import type { HeadroomTrendData } from "../../query/api/headroom-trend";
 import type { HookConfigResponse } from "../../query/api/hook-config";
+import type { HotSessionsPage, HotSessionsPageQuery } from "../../query/api/hot-sessions";
+import type { JudgeSetupResponse } from "../../query/api/judge-setup";
 import type {
   LinkageRateData,
   SuccessRateData,
@@ -36,6 +46,7 @@ import type {
   WorkspaceNameRow,
   WorkspaceSummary,
 } from "../../query/api/overview";
+import type { OverviewSection } from "../../query/api/overview-view";
 import type {
   BoundedStep,
   RecommendationCard,
@@ -43,7 +54,9 @@ import type {
 } from "../../query/api/recommendations";
 import type { EffectRow, LedgerEntry, LedgerView } from "../../query/api/recommendations-ledger";
 import type { Report } from "../../query/api/reports";
+import type { SessionBreakdown } from "../../query/api/session-breakdown";
 import type { SessionDrivers } from "../../query/api/session-drivers";
+import type { SessionStory } from "../../query/api/session-story";
 import type {
   CalibrateResult,
   ParserHealth,
@@ -55,11 +68,27 @@ import type {
 import type { FlavorDecomposition, FlavorRow } from "../../query/api/spend-flavor";
 import type { CacheWriteBucketRow, CacheWriteTrend, TrendData } from "../../query/api/trends";
 import type { ApiResponse } from "../../query/envelope";
+import type { StatuslineStatus } from "../../query/limits/statusline";
+import type { StatuslinePlan } from "../../query/limits/statusline-install";
+import type { LimitsModel, WeightFit } from "../../query/limits/types";
 import type { HotSessionRow } from "../../query/spend";
-import type { DaemonStatus } from "./client";
+import type { DaemonStatus, OverviewViewResponse, PipelineStatus } from "./client";
 
 // 1 USD = 1,000,000 micro-USD
 const MICRO = 1_000_000;
+
+/** Aggregate-only history progress fixture for shell consumers. */
+export const mockHistoryPipelineStatus: PipelineStatus = {
+  phase: "history",
+  weeks_total: 11,
+  weeks_done: 3,
+  files_total: 100,
+  files_completed: 100,
+  files_with_new_data: 12,
+  detector_runs: 1,
+  failed_phase: null,
+  events: ["history — week 3 / 11 (2 new findings)"],
+};
 
 /**
  * The shared, high-volume UA11 demo scenario. Keep all selected-window
@@ -188,6 +217,7 @@ const UA11_D1 = d1Savings(
   UA11_D1_SOURCE_TOKENS - UA11_D1_TARGET_TOKENS,
   selectedUa11WorkspaceTotals("7d", "turns")[0] ?? 0,
   0.75,
+  D1_D10_AVOIDANCE_FRACTION,
 );
 
 function windowFor(preset: "24h" | "7d" | "30d"): { from: string; to: string; preset: string } {
@@ -234,6 +264,7 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
   const days = selectedUa11Days(preset);
   const totalSpend = selectedUa11Spend(preset);
   const totalTurns = days.reduce((sum, day) => sum + day.turns, 0);
+  const sessionCount = days.flatMap(ua11DailySessions).length;
 
   const forecast: BurnForecast = {
     state: "OFF",
@@ -268,6 +299,20 @@ export function mockGlobalOverview(filter: WindowFilter): ApiResponse<GlobalOver
     forecast,
     context_per_turn,
     model_mix,
+    // Invented subagent split so the Overview Sessions and Subagent spend tiles render numbers.
+    subagent_spend: {
+      total_cost_u: totalSpend,
+      sidechain_cost_u: Math.round(totalSpend * 0.124),
+      share: 0.124,
+      sessions_with_sidechain_spend: Math.round(sessionCount * 0.42),
+      sessions_in_window: sessionCount,
+      haiku_sidechain_turns: Math.round(totalTurns * 0.03),
+      by_model_family: [
+        { family: "Sonnet", cost_u: Math.round(totalSpend * 0.074) },
+        { family: "Haiku", cost_u: Math.round(totalSpend * 0.032) },
+        { family: "Opus", cost_u: Math.round(totalSpend * 0.018) },
+      ],
+    },
   };
 
   return { data, meta: baseMeta(window, 1) };
@@ -528,7 +573,7 @@ export function mockSettings(): ApiResponse<Settings> {
   const data: Settings = {
     db_path: "/home/user/.agentwrangler/db.sqlite",
     scan_roots: ["/home/user/.claude/projects"],
-    port: 47821,
+    port: 2929,
     activity_window_secs: 300,
     limit_tokens: null,
     limit_provenance: null,
@@ -541,6 +586,7 @@ export function mockSettings(): ApiResponse<Settings> {
     bytes_per_token: null,
     bytes_per_token_provenance: null,
     bytes_per_token_measured_at: null,
+    usage_cli_enabled: true,
   };
   return {
     data,
@@ -594,6 +640,54 @@ export function mockResetDatabase(): ApiResponse<Settings> {
 }
 
 // ---------------------------------------------------------------------------
+// Decision-view fixtures (RIQ4)
+// ---------------------------------------------------------------------------
+
+/** Synthetic ranked decisions for test/dev. SEC-101: all text is enum labels or structural anchors. */
+export function mockDecisionViews(): DecisionView[] {
+  return [
+    {
+      rank: 1,
+      decision_identity: "fixture:family1:ev-alpha",
+      family: "EXPLAIN_USAGE_CHANGE",
+      next_step: { kind: "INVESTIGATION", description: "Investigate context-size growth pattern" },
+      why_ranked: ["GUARDRAIL_SAFE", "MATERIALITY_LARGE", "GOAL_PRIMARY"],
+      required_caveats: ["Evidence window is seven days; longer trends may differ"],
+      alternative_explanations: ["Growth may reflect genuinely larger tasks"],
+      linked_observations: [{ family: "EXPLAIN_USAGE_CHANGE", evidence_ids: ["obs-f1-001"] }],
+      materiality_band: "LARGE",
+      cause_effect: { cause: "VOLUME_TERM_INCREASE", effect: "OBSERVED_INCREASE" },
+      projected_effect: {
+        basis: "MODELED",
+        expression: "DIRECTION",
+        label: "reduces input-token share",
+      },
+      track_capability: { mode: "MANUAL", reason: "NO_VALIDATED_METHOD" },
+      effect_cycle: null,
+    },
+    {
+      rank: 2,
+      decision_identity: "fixture:family2:ev-beta",
+      family: "TOOL_OUTPUT_RETRY_CONCENTRATION",
+      next_step: { kind: "INVESTIGATION", description: "Review tool-output byte concentration" },
+      why_ranked: ["GUARDRAIL_SAFE", "MATERIALITY_MODERATE", "GOAL_SECONDARY"],
+      required_caveats: [],
+      alternative_explanations: [],
+      linked_observations: [],
+      materiality_band: "MODERATE",
+      cause_effect: { cause: "TOOL_CONCENTRATION_HIGH_BYTE_SHARE", effect: "OBSERVED_INCREASE" },
+      projected_effect: {
+        basis: "MODELED",
+        expression: "QUALITATIVE_BAND",
+        label: "moderate reduction in tool-result byte share",
+      },
+      track_capability: { mode: "MANUAL", reason: "NO_VALIDATED_METHOD" },
+      effect_cycle: null,
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Recommendations fixtures (DetectorEngine WP)
 // ---------------------------------------------------------------------------
 
@@ -609,7 +703,24 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     category: "CONTEXT",
     scope_workspace_id: "ws-1",
     lever: "Trim stale instructions from this workspace's CLAUDE.md.",
+    actions: {
+      primary: {
+        option_id: "primary",
+        kind: "EDIT",
+        summary: "Trim stale workspace instructions",
+        detail: [],
+        copy_text: "Review this workspace's CLAUDE.md and trim stale instructions.",
+        file_ref: "CLAUDE.md",
+        target_metric: "CONTEXT_TOKENS:CLAUDE_MD:CLAUDE.md",
+      },
+      alternatives: [],
+    },
+    action_validation: { primary: { ok: true }, alternatives: {} },
     modeled_savings_u_per_wk: UA11_D1.savingsU,
+    // P3.L L6: D1 has a spend-lane producer; this fixture's allocated figure equals the
+    // standalone modeled one (no overlap to net out here).
+    allocated_u_per_wk: UA11_D1.savingsU,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: {
       ...UA11_D1.formula,
@@ -638,6 +749,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
       .flatMap(ua11DailySessions)
       .filter((session) => session.workspace_id === "ws-1").length,
     steps: [{ kind: "trim", target: "CLAUDE_MD", max_lines: 80 } satisfies BoundedStep],
+    actionability_ok: true,
     cross_workspace: false,
     workspace_multiplier: null,
     file_ref: "CLAUDE.md",
@@ -649,8 +761,22 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     category: "CONTEXT",
     scope_workspace_id: null,
     lever: "/clear between unrelated tasks; split long work; avoid mid-task /compact.",
+    actions: {
+      primary: {
+        option_id: "primary",
+        kind: "HABIT",
+        summary: "Use /clear between unrelated tasks",
+        detail: [],
+        copy_text: "Use /clear between unrelated tasks and split long work.",
+        file_ref: null,
+        target_metric: "avg_context_per_turn",
+      },
+      alternatives: [],
+    },
+    action_validation: { primary: { ok: true }, alternatives: {} },
     // D2 is directional: its cache-read exposure cannot establish avoidable USD.
     modeled_savings_u_per_wk: null,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: {
       model: "D2_LONG_CONTEXT_CACHE_READ_V1",
@@ -692,6 +818,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
         description: "/clear between unrelated tasks; split long work; avoid mid-task /compact.",
       } satisfies BoundedStep,
     ],
+    actionability_ok: false,
     cross_workspace: true,
     workspace_multiplier: null,
     file_ref: null,
@@ -716,6 +843,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     scope_workspace_id: null,
     lever: "Configure a weekly token limit.",
     modeled_savings_u_per_wk: null,
+    pct_of_weekly_spend: null,
     run_cost_u: null,
     modeled_formula: { model: "none", inputs: {}, kind: "WARNING" },
     evidence: {},
@@ -726,13 +854,90 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     headroom: null,
     sessions_per_week: null,
     steps: [{ kind: "generic", description: "Configure a weekly token limit." }],
+    actionability_ok: false,
     cross_workspace: true,
     workspace_multiplier: null,
     file_ref: null,
   };
 
+  const h1PinnedCard: RecommendationCard = {
+    rec_id: "rec-H1-global-mock000000000000",
+    detector_id: "H1",
+    category: "TOOLING",
+    scope_workspace_id: null,
+    lever:
+      "Add a destructive-operation guard to your CLAUDE.md to prevent accidental file deletion.",
+    // No effect handler measures destructive_operation_count, so the action is valid but unmeasured.
+    actions: {
+      primary: {
+        option_id: "h1-confirm-destructive-database-operation",
+        kind: "EDIT",
+        summary: "Require confirmation for 2 reported drop tables.",
+        detail: [],
+        copy_text:
+          "Add to CLAUDE.md: Stop and ask for explicit confirmation before running any drop table statement.",
+        file_ref: "CLAUDE.md",
+        target_metric: "destructive_operation_count",
+      },
+      alternatives: [],
+    },
+    action_validation: { primary: { ok: true, measured: false }, alternatives: {} },
+    modeled_savings_u_per_wk: null,
+    // P3.L L6: H1 has no spend-lane producer — "not estimated", never $0.
+    allocated_u_per_wk: null,
+    run_cost_u: null,
+    modeled_formula: { model: "H1_DESTRUCTIVE_GUARD_V1", inputs: {}, kind: "SAFETY" },
+    evidence: { guard_present: false },
+    target_metric: "destructive_operation_count",
+    state: "PROPOSED",
+    created_at: window.to,
+    dismissed_until: null,
+    headroom: null,
+    sessions_per_week: null,
+    steps: [{ kind: "generic", description: "Add a destructive-operation guard to CLAUDE.md." }],
+    actionability_ok: true,
+    cross_workspace: false,
+    workspace_multiplier: null,
+    file_ref: "CLAUDE.md",
+    pct_of_weekly_spend: null,
+  };
+
+  const frictionCard: RecommendationCard = {
+    rec_id: "rec-D2-friction-mock000000000",
+    detector_id: "D2",
+    category: "CONTEXT",
+    scope_workspace_id: null,
+    lever: "Split long tasks and use /clear between unrelated topics to reduce context size.",
+    modeled_savings_u_per_wk: null,
+    run_cost_u: null,
+    modeled_formula: {
+      model: "D2_LONG_CONTEXT_CACHE_READ_V1",
+      inputs: {
+        cache_read_tokens_per_week: 500_000_000,
+        cache_read_price_usd_per_mtok: 1.5,
+        reduction_fraction: 0.2,
+      },
+      expression:
+        "cache_read_tokens_per_week / 1e6 * cache_read_price_usd_per_mtok * reduction_fraction",
+      kind: "DIRECTIONAL",
+    },
+    evidence: { qualifying_session_count: 2, session_ids: ["s-friction-01", "s-friction-02"] },
+    target_metric: "avg_context_per_turn",
+    state: "PROPOSED",
+    created_at: window.to,
+    dismissed_until: null,
+    headroom: null,
+    sessions_per_week: 2,
+    steps: [{ kind: "generic", description: "Use /clear between unrelated tasks." }],
+    actionability_ok: false,
+    cross_workspace: true,
+    workspace_multiplier: null,
+    file_ref: null,
+    pct_of_weekly_spend: null,
+  };
+
   const data: RecommendationsView = {
-    active: [d2Card, d1Card],
+    active: [d2Card, d1Card, h1PinnedCard, frictionCard],
     active_groups: [
       {
         detector_id: "D2",
@@ -752,6 +957,7 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
     limit_warnings: [],
     adopted: [adoptedD1Card, adoptedD2Card, adoptedD5Card],
     dismissed: [],
+    history: [],
     detectors: [
       {
         detector_id: "D1",
@@ -808,6 +1014,11 @@ export function mockRecommendations(): ApiResponse<RecommendationsView> {
         note: "catalog inventory is estimated, but active/deferred tool-load state is not measured",
       },
     ],
+    rank_warnings: [],
+    overflow_count: 0,
+    excluded: [{ subject: "CONTEXT_CACHE_BEHAVIOR", reason: "HEALTHY" }],
+    ranking_goal: "PRESERVE_QUALITY",
+    packet_identity_hash: "fixture-packet-hash",
   };
 
   return {
@@ -1201,6 +1412,7 @@ function ua11SessionSummary(sessionId: string, workspaceId: string): SessionSumm
     last_turn_at: "2026-08-17T10:00:30Z",
     hygiene_flags: [],
     compaction_count: 0,
+    compaction_turn_indices: [],
     api_error_count: 0,
     interrupt_count: 0,
     interrupts_supported: false,
@@ -1238,6 +1450,215 @@ export function mockSession(sessionId: string): ApiResponse<SessionSummary> {
   };
 }
 
+export function mockSessionDiagnostics(sessionId: string): ApiResponse<SessionDiagnosticAnchor[]> {
+  return {
+    data: [
+      {
+        session_id: sessionId,
+        category: "errors",
+        label: "Tool error",
+        turn_index: 1,
+        timestamp: "2026-01-01T00:01:00Z",
+        ceu: null,
+      },
+    ],
+    meta: { ...baseMeta(windowFor("7d"), 1), drilldown_ids: { session_id: sessionId } },
+  };
+}
+
+export function mockSessionBreakdown(sessionId: string): ApiResponse<SessionBreakdown> {
+  return {
+    data: {
+      cost_rows: [
+        {
+          model: "synthetic-model",
+          is_sidechain: false,
+          turn_count: 2,
+          cost_u: 120000,
+          input_tokens: 1200,
+          output_tokens: 200,
+          cache_read_tokens: 300,
+          cache_write_5m: 40,
+          cache_write_1h: 10,
+          cache_write_other: 0,
+        },
+      ],
+      tools: [
+        {
+          tool_name: "Read",
+          calls: 2,
+          errors: 1,
+          total_result_bytes: 2048,
+          max_result_bytes: 1536,
+          first_error_at: "2026-01-01T00:01:00Z",
+          last_error_at: "2026-01-01T00:01:00Z",
+          first_error_turn_index: 1,
+          error_breakdown: [{ tool_error_class: "NOT_FOUND", bash_command_family: null, count: 1 }],
+        },
+      ],
+      tool_error_turn_indices: [1],
+      loop_turn_indices: [],
+    },
+    meta: { ...baseMeta(windowFor("7d"), 2), drilldown_ids: { session_id: sessionId } },
+  };
+}
+
+/**
+ * Synthetic session story: a main lane and two subagent lanes, an idle gap over 30 minutes
+ * (the swimlane compresses it), one compaction, tool errors with stored text, two commits.
+ */
+export function mockSessionStory(sessionId: string): SessionStory {
+  const start = Date.parse(mockSession(sessionId).data?.first_turn_at ?? "2026-08-22T10:00:00Z");
+  const at = (min: number) => new Date(start + min * 60_000).toISOString();
+  // Canonical sessions: scale the story's dollars to the session's own cost so the list row,
+  // the header and the story agree. Arbitrary test ids keep the fixed $3.62 story.
+  const k = sessionId.startsWith("ua11-session-")
+    ? (mockSession(sessionId).data?.cost_equiv_u ?? 3_620_000) / 3_620_000
+    : 1;
+  const s = (u: number) => Math.round(u * k);
+  const turns: SessionStory["turns"] = [];
+  const push = (lane: string, model: string, min: number, i: number) =>
+    turns.push({
+      ts: at(min),
+      lane_id: lane,
+      model,
+      context: 20_000 + i * 6_000,
+      cost_u: s(lane === "main" ? 90_000 : 140_000),
+      compaction: lane === "main" && i === 12,
+      error: i % 7 === 3,
+    });
+  for (let i = 0; i < 20; i++) push("main", "claude-sonnet-5", i < 10 ? i * 2 : 60 + i * 2, i);
+  for (let i = 0; i < 8; i++) push("agent-explore", "claude-opus-4-8", 4 + i, i);
+  for (let i = 0; i < 5; i++) push("agent-plan", "claude-haiku-4-5", 70 + i, i);
+  turns.sort((a, b) => a.ts.localeCompare(b.ts));
+  return {
+    session_id: sessionId,
+    title: "Add a story view to the session page",
+    first_prompt: "Show what this session did and where the money went.",
+    transcript_available: true,
+    files_touched: [
+      { path: "src/ui/sessions/SessionDetailPage.tsx", edits: 6 },
+      { path: "src/ui/api/client.ts", edits: 2 },
+    ],
+    commits: [
+      { sha: "a1b2c3d4e5f6a7b8c9d0", ts: at(18) },
+      { sha: "0f9e8d7c6b5a4f3e2d1c", ts: at(98) },
+    ],
+    total_cost_u: s(3_620_000),
+    spend: [
+      { chain: "main", model: "claude-sonnet-5", turns: 20, cost_u: s(1_800_000) },
+      { chain: "subagent", model: "claude-opus-4-8", turns: 8, cost_u: s(1_120_000) },
+      { chain: "subagent", model: "claude-haiku-4-5", turns: 5, cost_u: s(700_000) },
+    ],
+    headline: {
+      text: "Opus subagents were 31% of this session's cost.",
+      detail: "8 Explore turns ran on Opus 4.8.",
+      savings_u: s(670_000),
+    },
+    lanes: [
+      {
+        lane_id: "main",
+        label: "Main",
+        is_main: true,
+        first_ts: at(0),
+        last_ts: at(98),
+        turns: 20,
+        cost_u: s(1_800_000),
+        models: ["claude-sonnet-5"],
+      },
+      {
+        lane_id: "agent-explore",
+        label: "Explore",
+        is_main: false,
+        first_ts: at(4),
+        last_ts: at(11),
+        turns: 8,
+        cost_u: s(1_120_000),
+        models: ["claude-opus-4-8"],
+      },
+      {
+        lane_id: "agent-plan",
+        label: "Plan",
+        is_main: false,
+        first_ts: at(70),
+        last_ts: at(74),
+        turns: 5,
+        cost_u: s(700_000),
+        models: ["claude-haiku-4-5"],
+      },
+    ],
+    turns,
+    error_groups: [
+      {
+        tool: "Bash",
+        command: "npm run test",
+        other_commands: 2,
+        signature: "Error: exit code N",
+        count: 4,
+        sample_command: "npm run test -- --run",
+        sample_error: "Error: exit code 1",
+        first_ts: at(6),
+        last_ts: at(80),
+      },
+    ],
+    errors_without_text: 0,
+  };
+}
+
+/**
+ * The canonical daily split gives every session in a workspace-day the same cost and turns, which
+ * reads as clones in the workspace "Top sessions" table. Spread cost and turns unevenly (a
+ * deterministic multiplier per session id, rescaled so the list still sums to the same totals),
+ * stagger the end times, and return the rows costliest first.
+ */
+function varySessionList(items: SessionSummary[]): SessionSummary[] {
+  const mult = (id: string, salt: number): number => {
+    // FNV-1a plus a final avalanche, so ids that differ in one character get unrelated values.
+    let h = (2166136261 ^ Math.imul(salt, 0x9e3779b1)) >>> 0;
+    for (const ch of id) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    const u = h / 4294967296;
+    // Salt 1 (cost): heavy-tailed so the costliest rows differ visibly. Others: mild spread.
+    return salt === 1 ? 0.12 + 6 * u ** 3 : 0.4 + 1.6 * u;
+  };
+  // Rescale to the original total exactly (the largest entry absorbs rounding).
+  const rescale = (values: number[], total: number): number[] => {
+    const sum = values.reduce((a, b) => a + b, 0) || 1;
+    const out = values.map((v) => Math.max(1, Math.round((v / sum) * total)));
+    const big = out.indexOf(Math.max(...out));
+    if (big >= 0) out[big] = (out[big] ?? 0) + total - out.reduce((a, b) => a + b, 0);
+    return out;
+  };
+  const costs = rescale(
+    items.map((s) => s.cost_equiv_u * mult(s.session_id, 1)),
+    items.reduce((a, s) => a + s.cost_equiv_u, 0),
+  );
+  // The D2 evidence sessions keep their turns; the rest (one shared context level per
+  // workspace) trade turns among themselves, so turn-weighted context means do not move.
+  const movable = items.filter((s) => !isUa11D2Candidate(s));
+  const movedTurns = rescale(
+    movable.map((s) => s.turn_count * mult(s.session_id, 7)),
+    movable.reduce((a, s) => a + s.turn_count, 0),
+  );
+  const turnsById = new Map(movable.map((s, i) => [s.session_id, movedTurns[i] ?? s.turn_count]));
+  return items
+    .map((s, i) => {
+      const n = turnsById.get(s.session_id) ?? s.turn_count;
+      const startMs = Date.parse(s.first_turn_at ?? "");
+      return {
+        ...s,
+        cost_equiv_u: costs[i] ?? s.cost_equiv_u,
+        turn_count: n,
+        ...(Number.isNaN(startMs)
+          ? {}
+          : { last_turn_at: new Date(startMs + Math.max(0, n - 1) * 30_000).toISOString() }),
+      };
+    })
+    .sort((a, b) => b.cost_equiv_u - a.cost_equiv_u);
+}
+
 export function mockWorkspaceSessions(
   workspaceId: string,
   filter: WindowFilter,
@@ -1247,7 +1668,7 @@ export function mockWorkspaceSessions(
     .flatMap(ua11DailySessions)
     .filter((session) => session.workspace_id === workspaceId);
   return {
-    data: { items, next_cursor: null },
+    data: { items: varySessionList(items), next_cursor: null },
     meta: { ...baseMeta(windowFor(preset), items.length), metric_definition_version: "esf-1" },
   };
 }
@@ -1590,6 +2011,38 @@ export function mockCalibrateLimit(): ApiResponse<CalibrateResult> {
   };
 }
 
+/** Default mock for the statusline-limits status endpoint — not set up. */
+export function mockStatuslineStatus(): StatuslineStatus {
+  return {
+    state: "not-set-up",
+    ageSec: null,
+    snippet: "agentwrangler statusline",
+    installed: false,
+  };
+}
+
+/** Mock preview/apply result for the statusline install flow (mock mode, no existing statusLine). */
+export function mockStatuslineChange(action: "install" | "uninstall"): {
+  ok: true;
+  plan: StatuslinePlan;
+} {
+  const entry = JSON.stringify(
+    { type: "command", command: '"node" "agentwrangler.js" statusline' },
+    null,
+    2,
+  );
+  return {
+    ok: true,
+    plan: {
+      action,
+      settingsPath: "~/.claude/settings.json",
+      before: action === "install" ? null : entry,
+      after: action === "install" ? entry : null,
+      changed: true,
+    },
+  };
+}
+
 /** Default mock for the oauth/status endpoint — not authenticated. */
 export function mockOAuthStatus(): OAuthStatus {
   return {
@@ -1628,13 +2081,213 @@ export function mockBurnStatusSignedOut(): ApiResponse<BurnStatus> {
   };
 }
 
+/**
+ * Usage-limits card model fixture (overview-v2 §1). Connected state with a
+ * session row (ahead of pace), a weekly all-models row (on pace), and one
+ * per-model row (headroom), mirroring the live /api/query/limits shape.
+ */
+export function mockLimits(): LimitsModel {
+  const now = Date.now();
+  const iso = (hoursFromNow: number) => new Date(now + hoursFromNow * 3_600_000).toISOString();
+  return {
+    state: "connected",
+    asOf: new Date(now).toISOString(),
+    stale: false,
+    rows: [
+      {
+        id: "session",
+        label: "Current session",
+        windowHours: 5,
+        usedPct: 33,
+        resetsAt: iso(3.78),
+        hoursUntilReset: 3.78,
+        elapsedHours: 1.22,
+        pacePct: 24.4,
+        burnRate: 27,
+        budgetRate: 20,
+        paceState: "ahead",
+        projection: { kind: "hits-limit-in", hours: 2.48 },
+      },
+      {
+        id: "weekly",
+        label: "Weekly · all models",
+        windowHours: 168,
+        usedPct: 52,
+        resetsAt: iso(70),
+        hoursUntilReset: 70,
+        elapsedHours: 98,
+        pacePct: 58.3,
+        burnRate: 12.7,
+        budgetRate: 14.29,
+        paceState: "on",
+        projection: { kind: "ends-at", pct: 89 },
+      },
+      {
+        id: "weekly:fable",
+        label: "Weekly · Fable",
+        windowHours: 168,
+        usedPct: 20,
+        resetsAt: iso(70),
+        hoursUntilReset: 70,
+        elapsedHours: 98,
+        pacePct: 58.3,
+        burnRate: 4.9,
+        budgetRate: 14.29,
+        paceState: "on",
+        projection: { kind: "ends-at", pct: 34 },
+        headroomMultiple: 3,
+      },
+    ],
+    estimateVsActual: { modelPct: 37, actualPct: 52, deltaPts: -15 },
+    localHistory: {
+      basis: "cap-weighted",
+      fiveHourTokens: 420_000,
+      sevenDayTokens: 2_500_000,
+      tokensPerDay: 510_000,
+      weeklyLimitTokens: null,
+      weeklyUtilizationPct: null,
+      projectedExhaustionAt: null,
+      forecastState: "OFF",
+    },
+    live: { sessions: 3, runningSpendUsd: 36.98 },
+  };
+}
+
+/** Default 0.2.0 install: a fresh reading from the user's own `claude -p /usage` (background reader on). */
+export function mockLimitsCli(): LimitsModel {
+  return { ...mockLimits(), asOf: new Date(Date.now() - 2 * 60_000).toISOString(), source: "cli" };
+}
+
+/**
+ * OV-12: mockLimits() plus a weeklyMax in the given state. Opt-in, so mockLimits() keeps its
+ * exact payload for existing tests. "ok" = $40 spent at 25% → $160 / 80M; two per-model rows.
+ */
+export function mockLimitsWithWeeklyMax(
+  state: "ok" | "low-confidence" | "too-early" | "stale" | "unavailable",
+): LimitsModel {
+  const base = mockLimits();
+  const resetsAt = base.rows.find((r) => r.id === "weekly")?.resetsAt ?? base.asOf;
+  const usedPct = state === "low-confidence" ? 5 : state === "too-early" ? 1.5 : 25;
+  const maxU = state === "too-early" ? null : 40e6 / (usedPct / 100);
+  if (state === "unavailable") {
+    base.weeklyMax = {
+      weekStart: null,
+      resetsAt: null,
+      usedPct: null,
+      spendSoFarU: null,
+      impliedMaxSpendU: null,
+      impliedMaxPwTokens: null,
+      stale: false,
+      state: "unavailable",
+    };
+    return base;
+  }
+  base.weeklyMax = {
+    weekStart: new Date(Date.parse(resetsAt) - 168 * 3_600_000).toISOString(),
+    resetsAt,
+    usedPct,
+    spendSoFarU: 40e6,
+    impliedMaxSpendU: maxU,
+    impliedMaxPwTokens: maxU === null ? null : maxU / 2,
+    stale: state === "stale",
+    state: state === "stale" ? "ok" : state,
+    perModel: [
+      {
+        id: "weekly:fable",
+        label: "Fable",
+        usedPct: 20,
+        impliedMaxSpendU: 50e6,
+        impliedMaxPwTokens: 25e6,
+        state: "ok",
+      },
+      {
+        id: "weekly:opus",
+        label: "Opus",
+        usedPct: 1,
+        impliedMaxSpendU: null,
+        impliedMaxPwTokens: null,
+        state: "too-early",
+      },
+    ],
+  };
+  if (state === "stale") base.stale = true;
+  return base;
+}
+
+/**
+ * OV-12 U5: mockLimitsWithWeeklyMax(state) plus past weeks, in the live 2026-10-04 shape relative
+ * to this week's reset: last week has no reading; two weeks back $1,156 (100%, limit hit; 2 readings
+ * ≥ 50%, $1,156–$1,180); three weeks back $1,130 (20%, calibration). vsLastWeek follows the
+ * server rule (vs the latest week with a max; clear when |change| > noisePct).
+ */
+export function mockLimitsWithHistory(
+  state: "ok" | "low-confidence" | "too-early",
+  thisWeekMaxU?: number,
+): LimitsModel {
+  const base = mockLimitsWithWeeklyMax(state);
+  const wm = base.weeklyMax;
+  if (wm?.resetsAt == null) return base;
+  const H = 3_600_000;
+  const cur = Math.round(Date.parse(wm.resetsAt) / H) * H;
+  const week = (k: number) => new Date(cur - k * 7 * 24 * H).toISOString();
+  wm.history = [
+    {
+      resetsAt: week(2),
+      impliedMaxSpendU: 1156e6,
+      impliedMaxPwTokens: 578e6,
+      usedPctAtSample: 100,
+      source: "limit-hit",
+      spread: { readings: 2, pct: 2.05, minSpendU: 1156e6, maxSpendU: 1180e6 },
+    },
+    {
+      resetsAt: week(3),
+      impliedMaxSpendU: 1130e6,
+      impliedMaxPwTokens: 565e6,
+      usedPctAtSample: 20,
+      source: "calibration-backup",
+    },
+  ];
+  wm.noisePct = 3;
+  if (thisWeekMaxU !== undefined) {
+    wm.impliedMaxSpendU = thisWeekMaxU;
+    wm.impliedMaxPwTokens = thisWeekMaxU / 2;
+  }
+  if (wm.state === "ok" && wm.impliedMaxSpendU !== null) {
+    const pct = ((wm.impliedMaxSpendU - 1156e6) / 1156e6) * 100;
+    wm.vsLastWeek = { pct, clear: Math.abs(pct) > 3, resetsAt: week(2), impliedMaxSpendU: 1156e6 };
+  }
+  return base;
+}
+
+/**
+ * OV-12 U5: model weight check. "not-ready" = the live 2026-10-04 state (3 readings, 2 weeks);
+ * "ready" = an example fit (Opus 0.96×, Fable 0.72×, Haiku too little use).
+ */
+export function mockWeightFit(state: "not-ready" | "ready"): WeightFit {
+  const ready = state === "ready";
+  return {
+    readings: ready ? 7 : 3,
+    weeks: ready ? 4 : 2,
+    variedMix: true,
+    ready,
+    families: [
+      { family: "Opus", listWeight: [2, 2.5], multiplier: ready ? 0.96 : null, status: "fitted" },
+      { family: "Sonnet", listWeight: [1, 1.5], multiplier: 1, status: "reference" },
+      { family: "Fable", listWeight: [5, 5], multiplier: ready ? 0.72 : null, status: "fitted" },
+      { family: "Haiku", listWeight: [0.5, 0.5], multiplier: null, status: "too-little-use" },
+    ],
+    spreadListPct: ready ? 4.4 : 2.1,
+    spreadFittedPct: ready ? 1.9 : null,
+  };
+}
+
 /** Hook config response fixture (installed or not). */
 export function mockHookConfigResponse(installed: boolean): ApiResponse<HookConfigResponse> {
   return {
     data: {
       context_window: 200_000,
-      soft_pct: 0.6,
-      hard_pct: 0.8,
+      soft_pct: 0.2,
+      hard_pct: 0.3,
       stale_s: 300,
       d7_fail_count: 3,
       d7_window_turns: 10,
@@ -1646,21 +2299,36 @@ export function mockHookConfigResponse(installed: boolean): ApiResponse<HookConf
 }
 
 /** Three hot sessions for overview teaser. */
+const UA11_LIST_CACHE_HIT = [0.74, 0.68, 0.81] as const;
+const UA11_LIST_SIDECHAIN = [0.502, 0.18, 0.06] as const;
+
 export function mockHotSessions(filter: WindowFilter = { preset: "7d" }): HotSessionRow[] {
   return selectedUa11Days(filter.preset ?? "7d")
     .flatMap(ua11DailySessions)
     .sort((a, b) => b.cost_equiv_u - a.cost_equiv_u)
     .slice(0, 3)
-    .map((session) => ({
+    .map((session, index) => ({
       session_id: session.session_id,
       workspace_id: session.workspace_id,
+      title: null,
       turns: session.turn_count,
       cost_equiv_u: session.cost_equiv_u,
       total_output_tokens: session.turn_count * UA11_AVG_OUTPUT_TOKENS,
       avg_output_tokens: UA11_AVG_OUTPUT_TOKENS,
       total_context_tokens: session.turn_count * ua11SessionContextTokens(session),
       avg_context_tokens: ua11SessionContextTokens(session),
+      max_context_tokens: ua11SessionContextTokens(session),
+      // Row 0 is the session whose detail story shows subagents at 50% of its cost (31% + 19%).
+      sum_cache_read_tokens: Math.round(
+        session.turn_count *
+          ua11SessionContextTokens(session) *
+          (UA11_LIST_CACHE_HIT[index] ?? 0.7),
+      ),
+      sidechain_cost_u: Math.round(session.cost_equiv_u * (UA11_LIST_SIDECHAIN[index] ?? 0.05)),
+      active_time_s: Math.round(session.turn_count * 30 * 0.55),
+      wall_time_s: session.turn_count * 30,
       model: "claude-sonnet-5",
+      models: ["claude-sonnet-5"],
       last_turn_at: session.last_turn_at ?? "",
       api_error_count: 0,
       compaction_count: 0,
@@ -1674,6 +2342,50 @@ export function mockHotSessions(filter: WindowFilter = { preset: "7d" }): HotSes
       long_gap_count: 0,
       gap_n: 0,
     }));
+}
+
+/** Synthetic paged list used by the offline dashboard. */
+export function mockHotSessionsPage(query: HotSessionsPageQuery = {}): HotSessionsPage {
+  const withIssues = mockHotSessions({ preset: "30d" })
+    .filter((row) => query.workspace === undefined || row.workspace_id === query.workspace)
+    .filter((row) => query.model === undefined || row.models.includes(query.model))
+    .filter((row) => query.q === undefined || row.session_id.startsWith(query.q))
+    .map((row, index) => {
+      const categories: DiagnosticCategory[] =
+        index === 0 ? ["loops"] : index === 1 ? ["errors"] : [];
+      return {
+        ...row,
+        repo_owner: null as string | null,
+        repo_name: null as string | null,
+        spend_percentile: [0.94, 0.61, 0.27][index] ?? null,
+        spend_percentile_n: 12,
+        issues: {
+          top_driver:
+            index === 0
+              ? ({
+                  detector_id: "D7" as const,
+                  label: "LOOP_RETRY_WASTE",
+                  session_cost_u: Math.floor(row.cost_equiv_u / 3),
+                } as const)
+              : null,
+          categories,
+        },
+      };
+    });
+  const rows =
+    query.category !== undefined && query.category.length > 0
+      ? withIssues.filter((row) =>
+          row.issues.categories.some((cat) =>
+            (query.category as DiagnosticCategory[]).includes(cat),
+          ),
+        )
+      : withIssues;
+  const offset = Number(query.cursor ?? 0);
+  const limit = query.limit ?? 50;
+  return {
+    rows: rows.slice(offset, offset + limit),
+    next_cursor: offset + limit < rows.length ? String(offset + limit) : null,
+  };
 }
 
 const DRIVERS_NOTE = "Per-driver figures are observed proxies; never summed.";
@@ -1887,6 +2599,147 @@ export function mockPractices(): PracticesResult {
   return { practices, window };
 }
 
+/** JMS U5: a graded setup held at Operator by an unmet gate; one priced check, one unpriced. */
+export function mockJudgeSetup(): JudgeSetupResponse {
+  const window = { from: "2026-09-12T00:00:00.000Z", to: "2026-10-12T00:00:00.000Z" };
+  return {
+    grade: {
+      window,
+      checks: [
+        {
+          check_id: "long_session_share",
+          category: "context_hygiene",
+          severity: "important",
+          result: "FAIL",
+          value: 0.22,
+          sample: 40,
+          reason: null,
+          needs: null,
+        },
+        {
+          check_id: "verify_test_loop",
+          category: "verification_practice",
+          severity: "critical",
+          result: "PARTIAL",
+          value: 0.45,
+          sample: 30,
+          reason: null,
+          needs: null,
+        },
+      ],
+      categories: [
+        {
+          category: "context_hygiene",
+          label: "Context hygiene",
+          weight: 3,
+          status: "scored",
+          score: 62,
+          scored_checks: 4,
+          total_checks: 5,
+        },
+      ],
+      coverage: 1,
+      overall: 66,
+      tier_by_score: "Operator",
+      tier: "Operator",
+      gates: [
+        {
+          gate_id: "G-verify",
+          check_id: "verify_test_loop",
+          boundary: "Conductor",
+          satisfied: false,
+          holding: false,
+          message:
+            "Edited sessions are not reliably followed by a test run (verify_test_loop: PARTIAL)",
+        },
+      ],
+      caps: [],
+      data_needed: null,
+      next_tier: {
+        tier: "Conductor",
+        items: [
+          {
+            kind: "gate",
+            check_id: "verify_test_loop",
+            message: "Edited sessions are not reliably followed by a test run",
+          },
+          {
+            kind: "check",
+            check_id: "long_session_share",
+            message: "Too many sessions run long, so stale context is re-sent on every turn",
+          },
+        ],
+      },
+    },
+    delta: null,
+    recorded: false,
+    rubric: {
+      version: "cc-docs-2026-09",
+      tier_names: ["Drifter", "Practitioner", "Operator", "Conductor", "God-tier"],
+      tier_floors: [0, 40, 60, 75, 90],
+      min_coverage: 0.5,
+      min_category_checks: 2,
+      severity_weights: { critical: 3, important: 2, minor: 1 },
+      categories: [{ category: "context_hygiene", label: "Context hygiene", weight: 3 }],
+      gates: [
+        {
+          gate_id: "G-verify",
+          check_id: "verify_test_loop",
+          boundary: "Conductor",
+          unmet: "Edited sessions are not reliably followed by a test run",
+        },
+      ],
+      checks: [
+        {
+          check_id: "long_session_share",
+          category: "context_hygiene",
+          severity: "important",
+          statement: "Start a fresh session (or run /clear) between unrelated tasks.",
+          source_url: "https://code.claude.com/docs/en/costs",
+          source_date: "2026-09-02",
+          version_tag: "cc-docs-2026-09",
+          version_date: "2026-09-02",
+          stale_after_days: 365,
+          scoring: { direction: "lower", pass: 0.05, partial: 0.15 },
+          cap: null,
+        },
+        {
+          check_id: "verify_test_loop",
+          category: "verification_practice",
+          severity: "critical",
+          statement:
+            "Ask Claude to run the tests after every edit, and say what a pass looks like.",
+          source_url: "https://code.claude.com/docs/en/best-practices",
+          source_date: "2026-09-02",
+          version_tag: "cc-docs-2026-09",
+          version_date: "2026-09-02",
+          stale_after_days: 365,
+          scoring: { direction: "higher", pass: 0.8, partial: 0.4 },
+          cap: null,
+        },
+      ],
+    },
+    dollars: {
+      per_check: [
+        {
+          check_id: "long_session_share",
+          dollars_per_week: 18.4,
+          detector_id: "D2",
+          rec_ids: ["rec-d2-fixture"],
+        },
+        { check_id: "verify_test_loop", dollars_per_week: null, detector_id: null, rec_ids: [] },
+      ],
+      next_tier_gap: {
+        tier: "Conductor",
+        dollars_per_week: 18.4,
+        measured_items: 1,
+        total_items: 2,
+        label: "measured items only",
+      },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // BM2 — Efficiency headroom fixtures
 // ---------------------------------------------------------------------------
@@ -1905,17 +2758,19 @@ export function mockEfficiencyHeadroom(): ApiResponse<EfficiencyHeadroom> {
           },
         ],
   );
-  const headroom_u_per_wk = opportunities.reduce(
-    (sum, opportunity) => sum + opportunity.modeled_savings_u_per_wk,
-    0,
-  );
+  // P3.L L6: headroom is the whole spend lane, not only claims of these open recs — it can
+  // include spend already attributed to adopted/history recs. This open opportunity stays
+  // unclaimed here on purpose, so the honest "not yet on the claim ledger" coverage still
+  // has something real to point at.
+  const headroom_u_per_wk = 930_000_000; // 30% of UA11_SCENARIO.spend_u
   const actual_u_per_wk = UA11_SCENARIO.spend_u;
   const data: EfficiencyHeadroom = {
     opportunities,
     headroom_u_per_wk,
     actual_u_per_wk,
-    headroom_pct: null,
+    headroom_pct: (headroom_u_per_wk / actual_u_per_wk) * 100,
     open_rec_count: opportunities.length,
+    unclaimed_rec_count: opportunities.length,
     from: window.from,
     to: window.to,
   };
@@ -1928,7 +2783,7 @@ export function mockEfficiencyHeadroom(): ApiResponse<EfficiencyHeadroom> {
         provisional_excluded: true,
         unpriced_turns: 0,
         claim_kinds_count: 1,
-        note: "Individual modeled opportunities use unvalidated fractions and may overlap. Weekly estimates are not added or compared with selected-window spend.",
+        note: "Addressable spend: the whole spend lane on the claim ledger in this window (each token counted once, net of overlaps, so it cannot exceed actual spend) — not only claims of currently open recommendations. Recommendations without ledger claims count 0. Failure-family claims are a separate reliability lane and are not counted.",
       },
       metric_definition_version: "esf-1",
       claim_kind: "EXPERIMENTAL",
@@ -2024,6 +2879,7 @@ export function mockEfficiencyHeadroomNull(): ApiResponse<EfficiencyHeadroom> {
     actual_u_per_wk: 0,
     headroom_pct: null,
     open_rec_count: 0,
+    unclaimed_rec_count: 0,
     from: window.from,
     to: window.to,
   };
@@ -2036,11 +2892,231 @@ export function mockEfficiencyHeadroomNull(): ApiResponse<EfficiencyHeadroom> {
         provisional_excluded: true,
         unpriced_turns: 0,
         claim_kinds_count: 1,
-        note: "Individual modeled opportunities use unvalidated fractions and may overlap. Weekly estimates are not added or compared with selected-window spend.",
+        note: "Addressable spend: billed spend in this window owned by open recommendations on the claim ledger (each token counted once, so it cannot exceed actual spend). Recommendations without ledger claims count 0. Failure-family claims are a separate reliability lane and are not counted.",
       },
       metric_definition_version: "esf-1",
       claim_kind: "EXPERIMENTAL",
       drilldown_ids: {},
+    },
+  };
+}
+
+/**
+ * GET /api/overview-view (P1-U2) composed from the legacy fixtures above, the way the daemon
+ * composes the same query functions: each section's `data` is the legacy envelope's `.data`
+ * (`status` is the raw body; `weekly_sessions` and `top_recs` are composed).
+ */
+export function mockOverviewView(preset: "24h" | "7d" | "30d" = "7d"): OverviewViewResponse {
+  const ok = (data: unknown): OverviewSection => ({ status: "ok", data, ms: 1 });
+  const trends = mockTrends({ preset });
+  const { from, to } = trends.meta.window;
+  const prior = mockTrends({
+    from: new Date(Date.parse(from) - (Date.parse(to) - Date.parse(from))).toISOString(),
+    to: from,
+  });
+  const recs = mockRecommendations().data;
+  return {
+    data_version: 1,
+    consistent: true,
+    window: windowFor(preset),
+    sections: {
+      kpis: ok(mockGlobalOverview({ preset }).data),
+      workspaces: ok(mockWorkspaces({ preset }).data),
+      trends: ok(trends.data),
+      trends_prior: ok(prior.data),
+      flavor: ok(mockFlavorDecomposition({ preset }).data),
+      cache_write: ok(mockCacheWriteTrend({ preset }).data),
+      weekly_sessions: ok({
+        rows: mockHotSessions({ preset: "7d" }).slice(0, 5),
+        cost_equiv_u: mockGlobalOverview({ preset: "7d" }).data?.cost_equiv_u ?? 0,
+      }),
+      live: ok(mockLiveSessions().data),
+      status: ok(mockStatus()),
+      top_recs: ok({
+        active: recs?.active ?? [],
+        adopted: recs?.adopted ?? [],
+        ...(recs?.active_groups === undefined ? {} : { active_groups: recs.active_groups }),
+      }),
+      linkage: ok(mockLinkageRate().data),
+      hook_config: ok(mockHookConfigResponse(false).data),
+    },
+  };
+}
+
+/** GET /api/workspaces/:id/delivery: invented commit-session figures for the workspace detail page. */
+export function mockWorkspaceDelivery(
+  workspaceId: string,
+  filter: WindowFilter,
+): ApiResponse<DeliveryMetrics> {
+  const window = windowFor(filter.preset ?? "7d");
+  const total = 22;
+  const commits = 14;
+  const noCommit = 5;
+  const data: DeliveryMetrics = {
+    commit_session_count: commits,
+    total_session_count: total,
+    commit_session_rate: commits / total,
+    spend_per_commit_session_u: 2_350_000,
+    abandoned_spend_u: 6_200_000,
+    abandoned_spend_share: 0.11,
+    no_commit_activity_session_count: noCommit,
+    no_commit_activity_spend_u: 6_200_000,
+    no_commit_activity_spend_share: 0.11,
+    live_session_excluded_from_no_commit_activity_count: 0,
+    from: window.from,
+    to: window.to,
+    workspace_id: workspaceId,
+  };
+  return {
+    data,
+    meta: {
+      ...baseMeta(window, total),
+      claim_kind: "OBS_PROXY",
+      qualification: {
+        provisional_excluded: true,
+        unpriced_turns: 0,
+        claim_kinds_count: 1,
+        note: "Delivery is inferred from observed git commits; sessions without commit tracking count as no commit.",
+      },
+    },
+  };
+}
+
+/** GET /api/diagnostics: a ready Usage patterns snapshot with invented causes and sessions. */
+export function mockDiagnostics(windowDays: 7 | 14 | 30 = 7): ApiResponse<DiagnosticsPayload> {
+  const window = windowFor("7d");
+  const sess = (n: number, title: string | null, occurrences: number) => ({
+    session_id: `ua11-ses-demo-${n}`,
+    title,
+    occurrences,
+  });
+  const base = {
+    trend_basis: "spend_share" as const,
+    handoff: null,
+    patterns: [],
+    sessions_affected_is_lower_bound: false,
+    count_unit: "occurrences",
+  };
+  const avoidable = (
+    row: Pick<
+      AvoidableRow,
+      "cause_id" | "name" | "explanation" | "rank" | "trend" | "share" | "avoidable_u"
+    > &
+      Pick<AvoidableRow, "occurrences" | "sessions_affected" | "sessions"> &
+      Partial<AvoidableRow>,
+  ): AvoidableRow => ({
+    ...base,
+    featured: false,
+    coverage: "ALL",
+    folded: false,
+    when: { buckets: [1, 2, 3, 3, 4, 5], weight: "occurrences", heaviest: "late" },
+    example: null,
+    ...row,
+  });
+  const reliab = (
+    row: Pick<
+      ReliabilityRow,
+      "cause_id" | "name" | "explanation" | "rank" | "trend" | "share" | "occurrences"
+    > &
+      Pick<ReliabilityRow, "count_unit" | "sessions_affected" | "sessions"> &
+      Partial<ReliabilityRow>,
+  ): ReliabilityRow => ({
+    ...base,
+    trend_basis: "session_rate",
+    featured: false,
+    breakdown: [],
+    top_commands: [],
+    cost: { wait_ms: null, replan_u: null },
+    ...row,
+  });
+  const data: DiagnosticsPayload = {
+    window_days: windowDays,
+    as_of: window.to,
+    built_at: window.to,
+    partial: false,
+    tiles: {
+      spend_u: 2_450_000_000,
+      session_count: 36,
+      avoidable_u: 18_400_000,
+      avoidable_share: 0.0075,
+      friction_sessions: 5,
+      friction_share: 0.14,
+      fix_ready: { n: 2, m: 3 },
+    },
+    avoidable: {
+      banner: null,
+      causes: [
+        avoidable({
+          cause_id: "A",
+          name: "Long sessions carry stale context",
+          explanation:
+            "Context keeps growing before it is cleared, so every turn re-sends old material.",
+          rank: 1,
+          featured: true,
+          trend: "rising",
+          share: 0.0045,
+          avoidable_u: 11_000_000,
+          occurrences: 14,
+          sessions_affected: 5,
+          sessions: [sess(1, "Add a story view to the session page", 9), sess(2, null, 5)],
+          handoff: { rec_id: "rec-D1-ws-1-mock000000000000", label: "Fix: clear between tasks" },
+        }),
+        avoidable({
+          cause_id: "B",
+          name: "The cache is rebuilt mid-session",
+          explanation: "Idle gaps let the cache expire, so the same context is written again.",
+          rank: 2,
+          trend: "steady",
+          share: 0.003,
+          avoidable_u: 7_400_000,
+          occurrences: 8,
+          sessions_affected: 3,
+          sessions: [sess(3, "Refactor the billing export", 5), sess(4, null, 3)],
+        }),
+      ],
+      silent: [],
+    },
+    reliability: {
+      causes: [
+        reliab({
+          cause_id: "LOOP_RETRY",
+          name: "The agent repeats the same error",
+          explanation: "The same failing step is retried several times in a row.",
+          rank: 1,
+          featured: true,
+          trend: "steady",
+          share: 0.09,
+          occurrences: 11,
+          count_unit: "loops",
+          sessions_affected: 3,
+          sessions: [
+            sess(1, "Add a story view to the session page", 6),
+            sess(3, "Refactor the billing export", 5),
+          ],
+        }),
+        reliab({
+          cause_id: "SHELL_BURST",
+          name: "Shell commands fail in bursts",
+          explanation: "Several commands fail one after another in the same stretch.",
+          rank: 2,
+          trend: "falling",
+          share: 0.05,
+          occurrences: 6,
+          count_unit: "bursts",
+          sessions_affected: 2,
+          sessions: [sess(2, null, 4), sess(4, null, 2)],
+        }),
+      ],
+      risk: null,
+      silent: [],
+    },
+  };
+  return {
+    data,
+    meta: {
+      ...baseMeta(window, 0),
+      claim_kind: "OBS_PROXY",
+      window: { ...window, from: "2026-08-17T00:00:00.000Z" },
     },
   };
 }

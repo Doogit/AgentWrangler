@@ -37,8 +37,10 @@ describe("scratch filesystem boundary", () => {
   it("resolves approved future paths outside the repository", () => {
     const result = boundary();
     expect(result.sourceDbPath).toBe(fs.realpathSync.native(sourceDbPath));
-    expect(result.scratchDbPath).toBe(path.join(root, "approved", "scratch.sqlite"));
-    expect(result.scratchStatePath).toBe(path.join(root, "approved", "state"));
+    // Future paths resolve through their nearest existing ancestor (tmpdir may be a symlink).
+    const realRoot = fs.realpathSync.native(root);
+    expect(result.scratchDbPath).toBe(path.join(realRoot, "approved", "scratch.sqlite"));
+    expect(result.scratchStatePath).toBe(path.join(realRoot, "approved", "state"));
   });
 
   it("refuses missing source, existing outputs, aliases, and repository outputs", () => {
@@ -67,6 +69,24 @@ describe("scratch filesystem boundary", () => {
       }),
     ).toThrow("overlapping_output_paths");
   });
+
+  // path.relative returns an absolute path across drives; that is not "inside". Runs where the
+  // checkout and tmpdir sit on different drives (the Windows CI runner: D:\a\… vs C:\…\Temp).
+  const cwdDrive = path.parse(process.cwd()).root.toUpperCase();
+  it.runIf(process.platform === "win32" && cwdDrive !== path.parse(os.tmpdir()).root.toUpperCase())(
+    "treats an output on another drive as outside the repository",
+    () => {
+      const repoOnOtherDrive = fs.mkdtempSync(path.join(process.cwd(), ".aw-boundary-repo-"));
+      try {
+        const result = boundary({ repositoryRoot: repoOnOtherDrive });
+        expect(result.scratchDbPath).toBe(
+          path.join(fs.realpathSync.native(root), "approved", "scratch.sqlite"),
+        );
+      } finally {
+        fs.rmSync(repoOnOtherDrive, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("refuses a hard-link alias when the filesystem supports hard links", ({ skip }) => {
     const hardLink = path.join(root, "source-hardlink.sqlite");

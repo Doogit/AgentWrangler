@@ -1,0 +1,47 @@
+#!/bin/sh
+# SEC-101 pre-commit guard. Delegates to the Node scanner so the leak signatures
+# live in one place (scripts/hooks/leak-signatures.mjs). See precommit-scan.mjs.
+#
+# Also runs gitleaks --staged when available (warns if absent — install for release
+# pushes). And chains to the FORBIDDEN-identifier check (scripts/launch/) when present
+# (private repo only; the check file is excluded from the public export).
+
+set -e
+
+HOOK_DIR="$(dirname "$0")"
+
+# ── 1. SEC-101 path + content scan ──────────────────────────────────────────
+node "${HOOK_DIR}/precommit-scan.mjs"
+
+# ── 2. gitleaks staged scan (warn-only if absent) ───────────────────────────
+GITLEAKS_BIN=""
+if command -v gitleaks > /dev/null 2>&1; then
+  GITLEAKS_BIN="gitleaks"
+elif [ -f "${LOCALAPPDATA}/Microsoft/WinGet/Links/gitleaks.exe" ]; then
+  GITLEAKS_BIN="${LOCALAPPDATA}/Microsoft/WinGet/Links/gitleaks.exe"
+else
+  # WinGet portable install without a Links shim (matches export.mjs fallback).
+  for f in "${LOCALAPPDATA}"/Microsoft/WinGet/Packages/Gitleaks.Gitleaks_*/gitleaks.exe; do
+    [ -f "$f" ] && GITLEAKS_BIN="$f" && break
+  done
+fi
+
+if [ -n "$GITLEAKS_BIN" ]; then
+  # Use repo-root .gitleaks.toml when present; fall back to default ruleset.
+  REPO_ROOT="$(git rev-parse --show-toplevel)"
+  CONFIG_FLAG=""
+  if [ -f "${REPO_ROOT}/.gitleaks.toml" ]; then
+    CONFIG_FLAG="--config ${REPO_ROOT}/.gitleaks.toml"
+  fi
+  # gitleaks 8.x: `gitleaks git --staged` scans the staged diff.
+  # shellcheck disable=SC2086
+  "$GITLEAKS_BIN" git --staged $CONFIG_FLAG || exit 1
+else
+  echo "WARNING: gitleaks not found — secret scan SKIPPED (install for release commits)" >&2
+fi
+
+# ── 3. FORBIDDEN-identifier check (private repo only) ───────────────────────
+FORBIDDEN_CHECK="${HOOK_DIR}/../launch/forbidden-precommit-check.mjs"
+if [ -f "$FORBIDDEN_CHECK" ]; then
+  node "$FORBIDDEN_CHECK"
+fi

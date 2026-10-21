@@ -97,16 +97,22 @@ describe("FrictionCell compact variant", () => {
     expect(cell.dataset.band).toBe("LOW");
   });
 
-  it("shows DIRECTIONAL chip", () => {
+  it("shows the directional band while retaining the legacy caveat in its tooltip", () => {
     render(<FrictionCell counts={base} />);
-    // Chip renders the label text
-    expect(screen.getByText("LEGACY LOW")).toBeTruthy();
+    expect(screen.getByText("LOW")).toBeTruthy();
+    expect(screen.queryByText(/LEGACY LOW/)).toBeNull();
+    expect(screen.getAllByTitle(/Legacy friction heuristic/)).toHaveLength(2);
   });
 
   it("shows non-zero counts as inline text", () => {
-    render(<FrictionCell counts={{ ...base, api_error_count: 2, test_fail_count: 1 }} />);
+    render(
+      <FrictionCell
+        counts={{ ...base, api_error_count: 2, tool_error_count: 1, test_fail_count: 1 }}
+      />,
+    );
     const cell = screen.getByTestId("friction-cell");
     expect(cell.textContent).toContain("api-err 2");
+    expect(cell.textContent).toContain("tool-err 1");
     expect(cell.textContent).toContain("fail 1");
   });
 
@@ -157,17 +163,17 @@ describe("FrictionCell strip variant", () => {
     expect(cell.textContent).toContain("API errors");
     expect(cell.textContent).toContain("Operational: tool errors");
     expect(cell.textContent).toContain("Recorded test failure signals");
-    expect(cell.textContent).toContain("Completed-test outcome");
     expect(cell.textContent).toContain("Context: compactions");
-    expect(cell.textContent).toContain("Interrupts");
     expect(cell.textContent).toContain("Interaction: user-message share");
   });
 
-  it("renders interrupts as unavailable even for a legacy zero", () => {
+  // Rows with no data ("—" / Unavailable) are hidden from the strip; interrupts are always
+  // unsupported telemetry, so their row never renders.
+  it("hides the interrupts row even for a legacy zero", () => {
     render(<FrictionCell counts={{ ...base, interrupt_count: 0 }} variant="strip" />);
-    expect(screen.getByTestId("friction-cell").textContent).toContain(
-      "Unavailable (legacy zero is unsupported)",
-    );
+    const content = screen.getByTestId("friction-cell").textContent;
+    expect(content).not.toContain("Interrupts");
+    expect(content).not.toContain("Unavailable");
   });
 
   it("uses the completed-only numerator in the displayed tool-error rate", () => {
@@ -186,10 +192,10 @@ describe("FrictionCell strip variant", () => {
     expect(screen.getByTestId("friction-cell").textContent).toContain("50% (1/2 completed)");
   });
 
-  it("keeps missing legacy completed-test outcome metadata unavailable", () => {
+  it("hides the completed-test outcome row when legacy metadata is missing", () => {
     render(<FrictionCell counts={base} variant="strip" />);
     const content = screen.getByTestId("friction-cell").textContent;
-    expect(content).toContain("Unavailable (completed-test outcome metadata not recorded)");
+    expect(content).not.toContain("Completed-test outcome");
     expect(content).not.toContain("0 completed passes · No completed test outcomes");
   });
 

@@ -7,9 +7,8 @@ function fmtTokens(tokens: number): string {
 export default function ContextCompositionPanel({ data }: { data: ContextComposition | null }) {
   if (data === null || data.observed_turns === 0 || data.inventory_rows === 0) {
     return (
-      <section className="card" aria-label="Context composition">
-        <h2>Context composition</h2>
-        <p className="muted">
+      <section aria-label="Context composition">
+        <p style={{ color: "var(--text-muted)" }}>
           {data?.observed_turns === 0
             ? "No turns were observed for this workspace in the last 7 days."
             : "This workspace has not yet been scanned for CLAUDE.md or memory files."}
@@ -21,9 +20,8 @@ export default function ContextCompositionPanel({ data }: { data: ContextComposi
   const residualShare = data.rows.find((row) => row.key === "session_residual")?.share ?? 0;
 
   return (
-    <section className="card" aria-label="Context composition">
-      <h2>Context composition</h2>
-      <p className="muted">
+    <section aria-label="Context composition">
+      <p style={{ color: "var(--text-muted)" }}>
         Average context sent with each turn: {fmtTokens(data.observed_context_tokens ?? 0)} tokens
         (last 7 days).
       </p>
@@ -58,7 +56,7 @@ export default function ContextCompositionPanel({ data }: { data: ContextComposi
           accumulated conversation and reduce per-turn cost.
         </p>
       )}
-      <p className="muted" style={{ marginTop: "0.75rem" }}>
+      <p style={{ color: "var(--text-muted)", marginTop: "0.75rem" }}>
         v1 attribution uses estimated current CLAUDE.md and MEMORY token counts only (±5–10%
         tokenizer error). It excludes the system prompt and dynamic MCP schemas. Session history,
         tool outputs, and unattributed fixed overhead remain combined in the residual.

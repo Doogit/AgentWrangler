@@ -144,9 +144,9 @@ describe("ESF5 bounded synthetic effect corpus", () => {
         before: {
           available: true,
           total: baselineToolEvents,
-          counts: { Bash: baselineToolEvents },
+          counts: { Read: baselineToolEvents },
         },
-        after: { available: true, total: 10, counts: { Bash: 10 } },
+        after: { available: true, total: 10, counts: { Read: 10 } },
       });
       expect(cycle?.finalEvidence?.modelMix).toEqual({
         before: { available: true, total: 10, counts: { "claude-sonnet": 10 } },

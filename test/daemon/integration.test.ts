@@ -140,6 +140,41 @@ describe("read paths + CSRF", () => {
     expect(ids.length).toBe(2);
   });
 
+  it("GET /api/workspaces accepts a bounded initial limit", async () => {
+    const limited = await makeRequest(port, {
+      path: `/api/workspaces?${WIDE_WINDOW}&limit=1`,
+      headers: { host: `127.0.0.1:${port}` },
+    });
+    expect(limited.status).toBe(200);
+    const page = JSON.parse(limited.body) as {
+      data: { items: Array<{ workspace_id: string }>; next_cursor: string | null };
+    };
+    expect(page.data.items).toHaveLength(1);
+    expect(page.data.next_cursor).not.toBeNull();
+    const next = await makeRequest(port, {
+      path: `/api/workspaces?${WIDE_WINDOW}&limit=1&after=${encodeURIComponent(page.data.next_cursor ?? "")}`,
+      headers: { host: `127.0.0.1:${port}` },
+    });
+    expect(next.status).toBe(200);
+    const nextPage = JSON.parse(next.body) as {
+      data: { items: Array<{ workspace_id: string }>; next_cursor: string | null };
+    };
+    expect(nextPage.data.next_cursor).toBeNull();
+    expect(
+      new Set([...page.data.items, ...nextPage.data.items].map((row) => row.workspace_id)).size,
+    ).toBe(2);
+    const invalid = await makeRequest(port, {
+      path: `/api/workspaces?${WIDE_WINDOW}&limit=0`,
+      headers: { host: `127.0.0.1:${port}` },
+    });
+    expect(invalid.status).toBe(400);
+    const invalidCursor = await makeRequest(port, {
+      path: `/api/workspaces?${WIDE_WINDOW}&after=not-a-cursor`,
+      headers: { host: `127.0.0.1:${port}` },
+    });
+    expect(invalidCursor.status).toBe(400);
+  });
+
   // ── 3. Forged cross-origin POST /api/settings → 403 ────────────────────────
 
   it("POST /api/settings with sec-fetch-site: cross-site is rejected with 403", async () => {
@@ -229,6 +264,34 @@ describe("read paths + CSRF", () => {
     expect(r.status).toBe(200);
     const body = JSON.parse(r.body) as { data: unknown };
     expect(body.data).not.toBeNull();
+  });
+
+  it("GET /api/hot-sessions applies exact model filtering and sorting before limiting", async () => {
+    const r = await makeRequest(port, {
+      path: "/api/hot-sessions?model=claude-haiku&sort=cost&direction=asc",
+      headers: { host: `127.0.0.1:${port}` },
+    });
+    expect(r.status).toBe(200);
+    const body = JSON.parse(r.body) as Array<{
+      session_id: string;
+      cost_equiv_u: number;
+      models: string[];
+    }>;
+    expect(body[0]).toMatchObject({
+      session_id: "sess-a2",
+      cost_equiv_u: 800,
+      models: ["claude-haiku", "claude-sonnet"],
+    });
+    expect(body.every((row) => row.models.includes("claude-haiku"))).toBe(true);
+  });
+
+  it("GET /api/hot-sessions/models returns the complete sorted model catalog", async () => {
+    const r = await makeRequest(port, {
+      path: "/api/hot-sessions/models",
+      headers: { host: `127.0.0.1:${port}` },
+    });
+    expect(r.status).toBe(200);
+    expect(JSON.parse(r.body)).toEqual(["claude-haiku", "claude-sonnet"]);
   });
 });
 

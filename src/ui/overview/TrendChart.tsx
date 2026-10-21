@@ -12,7 +12,7 @@
  * All UI state follows the three-state pattern: loading | error | ok.
  */
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -32,7 +32,7 @@ import type { HeadroomTrendData } from "../../query/api/headroom-trend";
 import type { TrendData } from "../../query/api/trends";
 import type { ApiResponse } from "../../query/envelope";
 import { fetchHeadroomTrend } from "../api/client";
-import { workspaceLabel } from "../lib/workspace-label";
+import { useWorkspaceNames } from "../lib/workspace-names";
 import Chip from "../shell/Chip";
 import { SkeletonChart, useReducedMotion } from "../shell/Skeleton";
 import { CustomTooltip, gridProps, seriesPalette } from "./chart-theme";
@@ -102,15 +102,12 @@ interface BarDatum {
 function buildWorkspaceBarData(data: TrendData): {
   rows: BarDatum[];
   workspaceIds: string[];
-  labelMap: Map<string, string>;
 } {
   const workspaceIds: string[] = [];
-  const labelMap = new Map<string, string>();
 
   for (const row of data.by_workspace) {
     if (!workspaceIds.includes(row.workspace_id)) {
       workspaceIds.push(row.workspace_id);
-      labelMap.set(row.workspace_id, row.project_slug);
     }
   }
 
@@ -135,7 +132,7 @@ function buildWorkspaceBarData(data: TrendData): {
   const rows = Array.from(byBucket.values()).sort((a, b) =>
     String(a.bucket).localeCompare(String(b.bucket)),
   );
-  return { rows, workspaceIds, labelMap };
+  return { rows, workspaceIds };
 }
 
 // ---------------------------------------------------------------------------
@@ -210,12 +207,12 @@ function adoptionReferenceLines(data: TrendData) {
       key={`${marker.rec_id}-${marker.adopted_at}`}
       x={marker.bucket}
       ifOverflow="extendDomain"
-      stroke="var(--amber, #f59e0b)"
+      stroke="var(--amber)"
       strokeDasharray="4 3"
       label={{
         value: markerLabel(marker.lever),
         position: "insideTopRight",
-        fill: "var(--amber, #f59e0b)",
+        fill: "var(--amber)",
         fontSize: 10,
       }}
     />
@@ -271,12 +268,10 @@ function HeadroomPanel({
         Daily headroom vs your weekly cap
       </p>
       <div className="kpi-fn" style={{ marginBottom: 4, opacity: 0.85 }}>
-        <span style={{ color: "var(--teal, #2dd4bf)", marginRight: 16 }}>
+        <span style={{ color: "var(--teal)", marginRight: 16 }}>
           0.1x headline - unverified cap coefficient
         </span>
-        <span style={{ color: "var(--amber, #f59e0b)" }}>
-          1.0x upper-bound - unverified cap coefficient
-        </span>
+        <span style={{ color: "var(--amber)" }}>1.0x upper-bound - unverified cap coefficient</span>
       </div>
       <p className="kpi-fn" style={{ marginBottom: 8, opacity: 0.75 }}>
         Each line shows the share of your configured weekly cap left after that {data.bucket}'s
@@ -356,6 +351,7 @@ export default function TrendChart({ state }: TrendChartProps) {
   const prefersReducedMotion = useReducedMotion();
   const [shouldAnimate, setShouldAnimate] = useState(true);
   const isAnimationActive = !prefersReducedMotion && shouldAnimate;
+  const { labelFor } = useWorkspaceNames();
 
   useEffect(() => {
     if (state.status === "ok" && state.value.data !== null) setShouldAnimate(false);
@@ -413,6 +409,7 @@ export default function TrendChart({ state }: TrendChartProps) {
           data={state.value.data}
           headroomState={headroomState}
           isAnimationActive={isAnimationActive}
+          labelFor={labelFor}
         />
       )}
 
@@ -429,17 +426,35 @@ export default function TrendChart({ state }: TrendChartProps) {
 // Inner component (only rendered when data is present)
 // ---------------------------------------------------------------------------
 
-function TrendChartInner({
-  data,
-  headroomState,
-  isAnimationActive,
-}: {
+interface TrendChartInnerProps {
   data: TrendData;
   headroomState: HeadroomLoadState;
   isAnimationActive: boolean;
-}) {
-  const { rows, workspaceIds, labelMap } = buildWorkspaceBarData(data);
-  const scatterData = buildSessionScatterData(data);
+  labelFor: (workspaceId: string) => string;
+}
+
+function areTrendChartInnerPropsEqual(
+  previous: Readonly<TrendChartInnerProps>,
+  next: Readonly<TrendChartInnerProps>,
+): boolean {
+  return (
+    previous.headroomState === next.headroomState &&
+    previous.isAnimationActive === next.isAnimationActive &&
+    previous.labelFor === next.labelFor &&
+    // Same-reference short-circuit: skip the JSON.stringify deep-compare when the
+    // poll tick handed back the identical array (the common no-change case).
+    (previous.data === next.data || JSON.stringify(previous.data) === JSON.stringify(next.data))
+  );
+}
+
+const TrendChartInner = React.memo(function TrendChartInner({
+  data,
+  headroomState,
+  isAnimationActive,
+  labelFor,
+}: TrendChartInnerProps) {
+  const { rows, workspaceIds } = useMemo(() => buildWorkspaceBarData(data), [data]);
+  const scatterData = useMemo(() => buildSessionScatterData(data), [data]);
   const markerScatterData: ScatterDatum[] = data.adoption_markers.map((marker) => ({
     x: marker.bucket,
     y: 0,
@@ -489,7 +504,7 @@ function TrendChartInner({
       {data.adoption_markers.length > 0 && (
         <div className="kpi-fn" aria-label="Adoption markers" style={{ marginBottom: 8 }}>
           {data.adoption_markers.map((marker) => (
-            <span key={marker.rec_id} style={{ marginRight: 12, color: "var(--amber, #f59e0b)" }}>
+            <span key={marker.rec_id} style={{ marginRight: 12, color: "var(--amber)" }}>
               <span
                 title={marker.lever.trim() || "Recommendation adopted"}
                 style={{
@@ -583,21 +598,14 @@ function TrendChartInner({
                     />
                   }
                 />
-                <Legend
-                  formatter={(value: string) =>
-                    workspaceLabel({ workspace_id: value, repo_path: labelMap.get(value) ?? null })
-                  }
-                />
+                <Legend formatter={(value: string) => labelFor(value)} />
                 {workspaceIds.map((wid, i) => (
                   <Bar
                     key={wid}
                     dataKey={wid}
                     stackId="a"
                     fill={colorFor(i)}
-                    name={workspaceLabel({
-                      workspace_id: wid,
-                      repo_path: labelMap.get(wid) ?? null,
-                    })}
+                    name={labelFor(wid)}
                     isAnimationActive={isAnimationActive}
                   />
                 ))}
@@ -677,7 +685,7 @@ function TrendChartInner({
             Cap-weighted tokens per {data.bucket} · estimated cap draw
           </p>
           <p className="kpi-fn" style={{ marginBottom: 8, opacity: 0.75 }}>
-            {`Cap-weighted (COEFF=${data.cap_read_coeff}× cache reads) — unverified: Anthropic has not published a cap coefficient.`}
+            {`Cap-weighted: cache reads counted at ${data.cap_read_coeff}× (unverified — Anthropic has not published a cap coefficient).`}
           </p>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={capWeightedData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
@@ -727,4 +735,4 @@ function TrendChartInner({
       )}
     </div>
   );
-}
+}, areTrendChartInnerPropsEqual);

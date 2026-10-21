@@ -15,6 +15,7 @@
 
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resetPipelineStatus, setPipelineProgress } from "../../src/ingest/boot-progress.js";
 import type { OAuthUsageResult } from "../../src/oauth/usage.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
 import { forecastFromDb } from "../../src/query/forecast.js";
@@ -126,6 +127,65 @@ describe("calibrateLimit — happy path (utilization=0.25)", () => {
     const after = forecastFromDb(db, { now: new Date("2026-01-02T00:00:00.000Z") });
     expect(after.state).not.toBe("OFF");
     expect(after.limit_tokens).toBe(93000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REL-FIX bug 3: never calibrate on a half-loaded week
+// ---------------------------------------------------------------------------
+
+describe("calibrateLimit — history still loading", () => {
+  afterEach(() => {
+    resetPipelineStatus();
+  });
+
+  it("refuses while the boot backfill runs and the window isn't ingested; writes nothing", async () => {
+    // The live-DB failure: calibrated mid-backfill on ~35K tokens → limit 120,281 vs ~119M real.
+    setPipelineProgress({
+      phase: "reading",
+      files_total: 500,
+      files_completed: 3,
+      files_skipped: 0,
+      files_with_new_data: 3,
+      detector_runs: 0,
+    });
+    const result = await calibrateLimit(db, makeUsageReader(0.29));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.reason).toMatch(/still loading/);
+    expect(getSettingsData(db).limit_tokens).toBeNull();
+  });
+
+  it("refuses while loading when coverage stops short of the window start", async () => {
+    const windowStartMs = Date.parse(BASE_TS);
+    const result = await calibrateLimit(db, makeUsageReader(0.25), () => ({
+      loading: true,
+      completeThroughMs: windowStartMs + 1,
+    }));
+    expect(result.ok).toBe(false);
+  });
+
+  it("proceeds while loading once the whole window is ingested", async () => {
+    const result = await calibrateLimit(db, makeUsageReader(0.25), () => ({
+      loading: true,
+      completeThroughMs: Date.parse(BASE_TS),
+    }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.limit_tokens).toBe(93000);
+  });
+
+  it("proceeds once loading is done", async () => {
+    setPipelineProgress({
+      phase: "done",
+      files_total: 500,
+      files_completed: 500,
+      files_skipped: 0,
+      files_with_new_data: 500,
+      detector_runs: 1,
+    });
+    const result = await calibrateLimit(db, makeUsageReader(0.25));
+    expect(result.ok).toBe(true);
   });
 });
 

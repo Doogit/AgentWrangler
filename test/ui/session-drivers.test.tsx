@@ -5,7 +5,7 @@
  * Tests: gate (cheap→no panel), render (p75+/drivers→panel), routing chips,
  * approx_usd never summed, GUIDED prompt block with ≥3 measured quantities.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import { mockSession, mockSessionDrivers, mockTurnTimeline } from "../../src/ui/api/fixtures";
@@ -43,7 +43,7 @@ describe("CostDriversPanel gate", () => {
       mockSessionDrivers("cheap-session", true),
     );
     render(<SessionDetailPage sessionId="cheap-session" onBack={() => {}} />);
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.queryByTestId("cost-drivers-panel")).toBeNull();
   });
 
@@ -69,7 +69,7 @@ describe("CostDriversPanel gate", () => {
     setupBaseMocks("error-session");
     vi.mocked(client.fetchSessionDrivers).mockRejectedValue(new Error("drivers unavailable"));
     render(<SessionDetailPage sessionId="error-session" onBack={() => {}} />);
-    await screen.findByText("Session detail");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.queryByTestId("cost-drivers-panel")).toBeNull();
   });
 });
@@ -77,7 +77,10 @@ describe("CostDriversPanel gate", () => {
 describe("CostDriversPanel render", () => {
   it("renders ranked driver rows with label, share, and measured quantities", async () => {
     setupBaseMocks("hot-session");
-    vi.mocked(client.fetchSessionDrivers).mockResolvedValue(mockSessionDrivers("hot-session"));
+    const driverResponse = mockSessionDrivers("hot-session");
+    const firstDriver = driverResponse.data?.drivers[0];
+    if (firstDriver) firstDriver.session_cost_u = 1_250_000;
+    vi.mocked(client.fetchSessionDrivers).mockResolvedValue(driverResponse);
     render(<SessionDetailPage sessionId="hot-session" onBack={() => {}} />);
     await waitFor(() => expect(screen.queryByTestId("cost-drivers-panel")).not.toBeNull());
 
@@ -90,33 +93,26 @@ describe("CostDriversPanel render", () => {
     expect(rows[1]?.getAttribute("data-detector")).toBe("D6");
 
     // Labels visible
-    expect(screen.getByText("CACHE_WRITE_CHURN")).toBeTruthy();
-    expect(screen.getByText("TOOL_RESULT_BLOAT")).toBeTruthy();
+    expect(screen.getByText("Cache-write churn")).toBeTruthy();
+    expect(screen.getByText("Tool-result bloat")).toBeTruthy();
 
     // Share percentages render
     expect(screen.getByText("62% share")).toBeTruthy();
     expect(screen.getByText("41% share")).toBeTruthy();
+    expect(rows[0]?.textContent).toContain("$1.25 spent on this in this session");
+    expect(rows[1]?.textContent).toContain("—");
   });
 
-  it("approx_usd renders per-driver (D6 only) but is NOT summed across drivers", async () => {
+  it("puts the drivers in the investigate prompt, without weekly savings", async () => {
     setupBaseMocks("hot-session");
     vi.mocked(client.fetchSessionDrivers).mockResolvedValue(mockSessionDrivers("hot-session"));
     render(<SessionDetailPage sessionId="hot-session" onBack={() => {}} />);
     await waitFor(() => expect(screen.queryByTestId("cost-drivers-panel")).not.toBeNull());
 
-    // D6 has approx_usd: 0.15 — rendered as per-driver with the honesty label
-    const usdEl = screen.getByText(/\$0\.15\/wk \(this driver only\)/);
-    expect(usdEl).toBeTruthy();
-
-    // D8 has no approx_usd — no combined total appears.
-    const allText = screen.getByTestId("cost-drivers-panel").textContent ?? "";
-    // The per-driver qualifier must be present for D6's amount.
-    expect(allText).toContain("$0.15/wk (this driver only)");
-    // Honesty invariant: approx_usd is never summed — the panel must NOT show any ≈$ amount
-    // that is not the known per-driver one (0.15). A summed total of D6+D8 would be different.
-    // Count all ≈$ occurrences in the panel — must be exactly 1 (the per-driver one).
-    const approxMatches = allText.match(/≈\$/g) ?? [];
-    expect(approxMatches).toHaveLength(1);
+    const promptText = screen.getByTestId("investigate-prompt-text").textContent ?? "";
+    expect(promptText).toContain("COST DRIVERS:");
+    expect(promptText).not.toContain("$/wk");
+    expect(screen.queryByTestId("driver-prompt-text")).toBeNull();
   });
 });
 
@@ -144,40 +140,38 @@ describe("CostDriversPanel routing chips", () => {
   });
 });
 
-describe("CostDriversPanel GUIDED prompt", () => {
-  it("renders the GUIDED prompt block with ≥3 measured quantities", async () => {
+describe("Investigate this session card", () => {
+  it("quotes the session identity and the driver labels", async () => {
     setupBaseMocks("hot-session");
     vi.mocked(client.fetchSessionDrivers).mockResolvedValue(mockSessionDrivers("hot-session"));
     render(<SessionDetailPage sessionId="hot-session" onBack={() => {}} />);
     await waitFor(() => expect(screen.queryByTestId("cost-drivers-panel")).not.toBeNull());
 
-    const promptEl = screen.getByTestId("driver-prompt-text");
-    const promptText = promptEl.textContent ?? "";
-
-    // Must start with TASK:
-    expect(promptText).toMatch(/^TASK:/);
-
-    // MEASURED CONTEXT section present
-    expect(promptText).toContain("MEASURED CONTEXT:");
-
-    // ACCEPTANCE section present
-    expect(promptText).toContain("ACCEPTANCE:");
-
-    // Count lines that start with "Measured " — must be ≥3
-    const measuredLines = promptText
-      .split("\n")
-      .filter((line) => line.trimStart().startsWith("Measured "));
-    expect(measuredLines.length).toBeGreaterThanOrEqual(3);
-  });
-
-  it("prompt contains the driver label names", async () => {
-    setupBaseMocks("hot-session");
-    vi.mocked(client.fetchSessionDrivers).mockResolvedValue(mockSessionDrivers("hot-session"));
-    render(<SessionDetailPage sessionId="hot-session" onBack={() => {}} />);
-    await waitFor(() => expect(screen.queryByTestId("driver-prompt-text")).not.toBeNull());
-
-    const promptText = screen.getByTestId("driver-prompt-text").textContent ?? "";
+    const promptText = screen.getByTestId("investigate-prompt-text").textContent ?? "";
+    const session = mockSession("hot-session").data;
+    if (session === null) throw new Error("missing synthetic session");
+    expect(promptText).toContain(`TRANSCRIPT: ${session.file_path}`);
+    expect(promptText).toContain(`WORKSPACE: ${session.repo_path ?? session.workspace_id}`);
+    expect(promptText).toContain(
+      `estimated cost $${(session.cost_equiv_u / 1_000_000).toFixed(2)}`,
+    );
     expect(promptText).toContain("CACHE_WRITE_CHURN");
     expect(promptText).toContain("TOOL_RESULT_BLOAT");
+    expect(promptText).toContain("ACCEPTANCE:");
+  });
+
+  it("renders for a session with no drivers and copies exactly the previewed text", async () => {
+    setupBaseMocks("cheap-session");
+    vi.mocked(client.fetchSessionDrivers).mockResolvedValue(
+      mockSessionDrivers("cheap-session", true),
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<SessionDetailPage sessionId="cheap-session" onBack={() => {}} />);
+    const preview = await screen.findByTestId("investigate-prompt-text");
+    expect(screen.queryByTestId("cost-drivers-panel")).toBeNull();
+    expect(preview.textContent).toMatch(/^Investigate Claude Code session cheap-session\./);
+    fireEvent.click(screen.getByTestId("copy-investigate-prompt"));
+    expect(writeText).toHaveBeenCalledWith(preview.textContent);
   });
 });

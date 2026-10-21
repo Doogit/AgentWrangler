@@ -1,6 +1,6 @@
 /**
  * Frozen expected orderings for the RIQ3 fixture cases — hand-derived from
- * docs/plans/spec-ranking-policy-1.md (class order §4, bands §8, goal map §7),
+ * docs/plans/Archive/spec-ranking-policy-1.md (class order §4, bands §8, goal map §7),
  * BEFORE any ranker code exists. The ranker must reproduce these unmodified.
  *
  * `subject` in exclusions is a decision identity for OPPORTUNITY entries and a

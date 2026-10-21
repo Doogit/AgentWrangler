@@ -1,7 +1,7 @@
 /**
  * Frozen RIQ3 ranking-policy-1 fixture cases. Pure synthetic value objects —
  * no DB, no operator telemetry, no ranker import. Expected orderings live in
- * expected-orders.ts and are hand-derived from docs/plans/spec-ranking-policy-1.md,
+ * expected-orders.ts and are hand-derived from docs/plans/Archive/spec-ranking-policy-1.md,
  * never from ranker output (fixture-before-code rule).
  *
  * EVIDENCE_PACKET_VERSION does not appear here by design: the ranker input is the

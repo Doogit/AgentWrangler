@@ -2,30 +2,82 @@
  * test/ui/rv6-deep-link.test.tsx — RV6 "Act on #1" deep link.
  *
  * Covers both ends of the deep link:
- *   - VerdictBand: inline "Copy fix prompt" copies the SAME artifact as the
- *     rec card's Copy-prompt action, and "Review suggestion →" targets
- *     #/recommendations?focus=<rec_id>.
+ *   - OverviewPage TopRecommendations: rank-1 content follows active[0], and its Details link
+ *     focuses that recommendation on RecommendationsPage.
  *   - RecommendationsPage: arriving with focus=<rec_id> scrolls to, highlights,
  *     and auto-expands the target card (grouped + standalone); a stale focus
  *     degrades to the plain list with a quiet, dismissible notice.
  */
 
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecommendationCard } from "../../src/query/api/recommendations";
 import * as client from "../../src/ui/api/client";
 import {
+  mockBurnStatus,
+  mockCacheWriteTrend,
   mockEfficiencyHeadroom,
+  mockFlavorDecomposition,
+  mockGlobalOverview,
+  mockHeadroomTrend,
+  mockHookConfigResponse,
+  mockHotSessions,
   mockLedger,
+  mockLimits,
+  mockLinkageRate,
+  mockLiveSessions,
   mockPractices,
   mockRecommendations,
+  mockSuccessRate,
+  mockTrends,
+  mockWorkspaces,
 } from "../../src/ui/api/fixtures";
-import VerdictBand from "../../src/ui/overview/VerdictBand";
+import OverviewPage from "../../src/ui/overview/OverviewPage";
+import { isQuantified } from "../../src/ui/overview/TopRecommendations";
 import RecCard from "../../src/ui/recommendations/RecCard";
 import RecommendationsPage from "../../src/ui/recommendations/RecommendationsPage";
-import { buildPromptArtifact } from "../../src/ui/recommendations/prompt-templates";
+import {
+  fetchCacheWriteTrend,
+  fetchFlavorDecomposition,
+  fetchGlobalOverview,
+  fetchLiveSessions,
+  serveOverviewViewFromLegacyMocks,
+} from "./overview/overview-view-from-legacy";
 
 vi.mock("../../src/ui/api/client");
+beforeEach(serveOverviewViewFromLegacyMocks);
+vi.mock("../../src/ui/api/esf-client", () => ({
+  fetchEsfObservations: vi.fn().mockResolvedValue({ data: null }),
+}));
+// GoalSelector and the recommendation cards mount on RecommendationsPage and call feedback-client
+// on load. Mock the module so those calls resolve cleanly without touching global fetch.
+vi.mock("../../src/ui/api/feedback-client", () => ({
+  FeedbackClientError: class FeedbackClientError extends Error {
+    constructor(
+      public readonly status: number,
+      public readonly code: string,
+    ) {
+      super(`Feedback request failed (${code}, HTTP ${status}).`);
+      this.name = "FeedbackClientError";
+    }
+  },
+  listFeedback: vi.fn().mockResolvedValue({ data: [], meta: { ts: 0 } }),
+  setFeedback: vi.fn().mockResolvedValue({ data: {}, meta: { ts: 0 } }),
+  undoFeedback: vi.fn().mockResolvedValue({ data: {}, meta: { ts: 0 } }),
+  deleteFeedback: vi.fn().mockResolvedValue({ data: {}, meta: { ts: 0 } }),
+  getGoal: vi.fn().mockResolvedValue({
+    data: { scope_key: "__global__", goal: "PRESERVE_QUALITY" },
+    meta: { ts: 0 },
+  }),
+  setGoal: vi.fn().mockResolvedValue({
+    data: { scope_key: "__global__", goal: "PRESERVE_QUALITY" },
+    meta: { ts: 0 },
+  }),
+  resetGoal: vi.fn().mockResolvedValue({
+    data: { scope_key: "__global__", goal: "PRESERVE_QUALITY" },
+    meta: { ts: 0 },
+  }),
+}));
 
 const writeText = vi.fn().mockResolvedValue(undefined);
 
@@ -38,7 +90,26 @@ beforeEach(() => {
   vi.mocked(client.fetchLedger).mockResolvedValue(mockLedger());
   vi.mocked(client.fetchPractices).mockResolvedValue(mockPractices());
   vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
+  // OverviewPage API defaults (for tests that render OverviewPage via spotlight tests).
+  vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
+  vi.mocked(client.fetchSuccessRate).mockResolvedValue(mockSuccessRate());
+  vi.mocked(client.fetchBurnStatus).mockResolvedValue(mockBurnStatus());
+  vi.mocked(client.fetchHookConfig).mockResolvedValue(mockHookConfigResponse(false));
+  vi.mocked(client.fetchHotSessions).mockResolvedValue(mockHotSessions());
+  vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
+  vi.mocked(client.fetchLinkageRate).mockResolvedValue(mockLinkageRate());
+  vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
+  fetchFlavorDecomposition.mockResolvedValue(mockFlavorDecomposition({ preset: "7d" }));
+  fetchCacheWriteTrend.mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
+  vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
 });
+
+/** Mocks the three overview fetch calls that require explicit fixture data to render. */
+function setupOverviewApis() {
+  fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
+  fetchLiveSessions.mockResolvedValue(mockLiveSessions());
+}
 
 /** A D1 (artifact/copy-route) rec whose evidence yields a non-null prompt artifact. */
 function makeD1Rec(overrides: Partial<RecommendationCard> = {}): RecommendationCard {
@@ -65,80 +136,59 @@ function makeD1Rec(overrides: Partial<RecommendationCard> = {}): RecommendationC
 }
 
 // ---------------------------------------------------------------------------
-// VerdictBand — inline copy + deep link
+// OverviewPage rank-1 recommendation — active[0] (U4.2)
 // ---------------------------------------------------------------------------
-describe("VerdictBand — RV6 deep link", () => {
-  it("Copy fix prompt copies the same artifact as the rec card's action", () => {
-    const rec = makeD1Rec();
-    const expected = buildPromptArtifact(rec);
-    if (expected === null) throw new Error("expected a prompt artifact for the fixture rec");
-
-    // The card's own Copy-prompt action renders the same artifact text.
-    const card = render(<RecCard rec={rec} />);
-    const cardText = card.container.querySelector<HTMLTextAreaElement>(
-      ".rec-prompt-artifact textarea",
-    )?.value;
-    expect(cardText).toBe(expected.text);
-    card.unmount();
-
-    const { getByRole } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={rec}
-      />,
-    );
-    fireEvent.click(getByRole("button", { name: "Copy fix prompt" }));
-    expect(writeText).toHaveBeenCalledWith(expected.text);
+// TopRecommendations preserves active order and links by rec_id focus.
+describe("OverviewPage top recommendations — RV6 deep link", () => {
+  it("rank-1 row shows the title/lever of active[0]", async () => {
+    setupOverviewApis();
+    render(<OverviewPage />);
+    const row = await screen.findByTestId("top-rec-1");
+    expect(row.classList.contains("overview-top-rec-row")).toBe(true);
+    const heading = row.querySelector("h3");
+    const recs = mockRecommendations();
+    if (recs.data === null) throw new Error("expected fixture data");
+    // Top-3 eligibility skips unquantified recs; rank 1 is the first quantified active rec.
+    const active0 = recs.data.active.find(isQuantified);
+    if (!active0) throw new Error("expected active[0] fixture");
+    expect(heading?.textContent).toBe(active0.title ?? active0.lever);
   });
 
-  it("Review suggestion → targets #/recommendations?focus=<rec_id>", () => {
-    const rec = makeD1Rec();
-    const { getByRole } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={rec}
-      />,
-    );
-    const link = getByRole("link", { name: "Review suggestion →" });
-    expect(link.getAttribute("href")).toBe(
-      `#/recommendations?focus=${encodeURIComponent(rec.rec_id)}`,
+  it("rank-1 title link deep-links by rec_id of active[0]", async () => {
+    setupOverviewApis();
+    render(<OverviewPage />);
+    const row = await screen.findByTestId("top-rec-1");
+    const link = row.querySelector("h3 a");
+    const recs = mockRecommendations();
+    if (recs.data === null) throw new Error("expected fixture data");
+    const active0 = recs.data.active.find(isQuantified);
+    if (!active0) throw new Error("expected active[0] fixture");
+    expect(link?.getAttribute("href")).toBe(
+      `#/recommendations?focus=${encodeURIComponent(active0.rec_id)}`,
     );
   });
 
-  it("surfaces a measured claim for the top rec", () => {
-    const rec = makeD1Rec();
-    const { container } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={rec}
-      />,
-    );
-    // 21.3K source vs 8K target → concise measured (token) claim, not a dollar figure.
-    expect(container.querySelector(".verdict-band-claim")?.textContent ?? "").toContain("21K");
+  it("recommendations section shows no raw token counts", async () => {
+    // OV-2 intentionally shows modeled dollar savings per week, but not raw evidence token counts.
+    setupOverviewApis();
+    render(<OverviewPage />);
+    const row = await screen.findByTestId("top-rec-1");
+    const section = row.closest("section");
+    expect(section?.textContent).not.toMatch(/\b(?:21[,.]?300|13[,.]?300|21\.3K)\b/i);
+    expect(section?.textContent).not.toMatch(/\b\d[\d,.]*\s*(?:tokens?|tok)\b/i);
   });
 
-  it("falls back to a plain review link when there is no top rec", () => {
-    const { getByRole, container } = render(
-      <VerdictBand
-        preset="7d"
-        trend={null}
-        priorTrend={null}
-        isLoading={false}
-        topRecommendation={null}
-      />,
-    );
-    const link = getByRole("link", { name: "Review recommendations →" });
-    expect(link.getAttribute("href")).toBe("#/recommendations");
-    expect(container.querySelector(".verdict-band-copy")).toBeNull();
+  it("shows 'No active recommendations' link when active is empty", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected fixture data");
+    response.data.active = [];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    setupOverviewApis();
+
+    render(<OverviewPage />);
+    const link = await screen.findByRole("link", { name: "No active recommendations" });
+    expect(link?.textContent).toBe("No active recommendations");
+    expect(link?.getAttribute("href")).toBe("#/recommendations");
   });
 });
 
@@ -146,6 +196,30 @@ describe("VerdictBand — RV6 deep link", () => {
 // RecommendationsPage — focus handling
 // ---------------------------------------------------------------------------
 describe("RecommendationsPage — RV6 focus handling", () => {
+  it("highlights a focused limit warning and allows clearing its focus", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations fixture data");
+    response.data.limit_warnings = [
+      makeD1Rec({
+        rec_id: "warning-focus",
+        detector_id: "D5",
+        modeled_savings_u_per_wk: null,
+        modeled_formula: { ...makeD1Rec().modeled_formula, kind: "WARNING" },
+      }),
+    ];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    window.location.hash = "#/recommendations?focus=warning-focus";
+    const { container } = render(<RecommendationsPage />);
+    await waitFor(() => expect(container.querySelector(".limit-warning-strip")).not.toBeNull());
+    const warning = container.querySelector(".limit-warning-strip .rec-focus-highlight");
+    expect(warning).not.toBeNull();
+    const dismiss = warning?.querySelector<HTMLButtonElement>(".rec-focus-dismiss");
+    expect(dismiss).toBeTruthy();
+    fireEvent.click(dismiss as HTMLButtonElement);
+    expect(window.location.hash).not.toContain("focus=");
+    await waitFor(() => expect(container.querySelector(".rec-focus-highlight")).toBeNull());
+  });
+
   it("lands on the expanded, highlighted focused card", async () => {
     const response = mockRecommendations();
     if (response.data === null) throw new Error("expected recommendations fixture data");
@@ -171,11 +245,11 @@ describe("RecommendationsPage — RV6 focus handling", () => {
       expect(container.querySelector("[data-detector-id='D1']")).not.toBeNull();
     });
 
-    // The focused member is promoted out of the closed remaining queue, so it
-    // can be scrolled to and read immediately.
+    // The focused member is promoted to the spotlight card (selectedRec), so it
+    // is visible at rest — the old collapsing queue is gone (UIP-7).
     const focusedCard = container.querySelector(".rec-focus-highlight");
-    expect(focusedCard?.closest(".recs-remaining-queue")).toBeNull();
-    expect(container.querySelector<HTMLDetailsElement>(".recs-remaining-queue")?.open).toBe(false);
+    expect(focusedCard).not.toBeNull();
+    expect(container.querySelector(".recs-remaining-queue")).toBeNull();
     expect(container.querySelector(".rec-focus-banner")).not.toBeNull();
     expect(window.location.hash).toContain("focus=rec-D1-b");
 

@@ -7,14 +7,19 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ["22", "24"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
           cache: "npm"
 
       - name: Install dependencies
@@ -26,22 +31,60 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: U12 fixture privacy gate
+        run: npm run check:u12-fixtures
+
+      - name: SEC-101 content gate
+        run: npm run check:content
+
       - name: Test
         run: npm test
 
       - name: Smoke (daemon loopback)
+        if: runner.os != 'Windows'
         run: |
           # Start daemon in background; wait for it to bind; curl the hello endpoint.
           node --import tsx/esm bootstrap/daemon.ts &
           DAEMON_PID=$!
           # Poll until the port is open (up to 10s)
           for i in $(seq 1 20); do
-            if curl -sf http://127.0.0.1:47821/ > /dev/null 2>&1; then
+            if curl -sf http://127.0.0.1:2929/ > /dev/null 2>&1; then
               break
             fi
             sleep 0.5
           done
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:47821/)
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:2929/)
           kill $DAEMON_PID || true
           echo "HTTP status: $HTTP_STATUS"
           [ "$HTTP_STATUS" = "200" ]
+
+      - name: Smoke (daemon loopback — Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $daemon = Start-Process node -ArgumentList "--import","tsx/esm","bootstrap/daemon.ts" -PassThru -NoNewWindow
+          $ok = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $resp = Invoke-WebRequest -Uri http://127.0.0.1:2929/ -UseBasicParsing -ErrorAction Stop
+              if ($resp.StatusCode -eq 200) { $ok = $true; break }
+            } catch {}
+          }
+          Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { Write-Error "Daemon did not respond 200"; exit 1 }
+          Write-Host "HTTP status: 200"
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan all commits
+
+      - name: Run gitleaks
+        # gitleaks/gitleaks-action is free for personal-account repos (charged for orgs).
+        # Uses the repo's .gitleaks.toml automatically (placed at root per gitleaks precedence).
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

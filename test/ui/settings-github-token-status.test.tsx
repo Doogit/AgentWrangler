@@ -8,7 +8,7 @@
  *   - Never renders a token value.
  */
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
 import { mockSettings } from "../../src/ui/api/fixtures";
@@ -19,6 +19,7 @@ vi.mock("../../src/ui/api/client");
 afterEach(() => cleanup());
 beforeEach(() => {
   vi.clearAllMocks();
+  window.location.hash = "#/settings?section=integrations";
   vi.mocked(client.fetchSettings).mockResolvedValue(mockSettings());
   vi.mocked(client.saveSettings).mockResolvedValue(mockSettings());
   vi.mocked(client.resetDatabase).mockResolvedValue(mockSettings());
@@ -71,5 +72,230 @@ describe("SettingsPage — GithubTokenStatusPanel: configured", () => {
       expect(el.textContent).toMatch(/configured/i);
       expect(el.textContent).toContain("credential-manager");
     });
+  });
+});
+
+describe("SettingsPage — credential recovery", () => {
+  it("clears a status-read error after a successful explicit refresh", async () => {
+    const empty = {
+      state: "never-run" as const,
+      attemptId: null,
+      startedAt: null,
+      completedAt: null,
+      lastSuccess: null,
+      eligibleRepositories: 0,
+      attemptedReads: 0,
+      failedReads: 0,
+      categories: {},
+      failedStages: [],
+      draining: false,
+    };
+    vi.mocked(client.fetchOutcomesStatus)
+      .mockRejectedValueOnce(new Error("private"))
+      .mockResolvedValueOnce({
+        sinceDaemonStart: true,
+        sync: empty,
+        connection: {
+          ...empty,
+          repositoryAccess: "untested",
+          credentialEpoch: 0,
+        },
+      });
+    vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({ configured: true, source: "env" });
+    render(<SettingsPage />);
+    await screen.findByText("Could not read outcomes status.");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+    await screen.findByText(/Repository access has not been tested/i);
+    expect(screen.queryByText("Could not read outcomes status.")).toBeNull();
+  });
+
+  it("clears prior connection success even when the post-refresh status GET fails", async () => {
+    const empty = {
+      state: "never-run" as const,
+      attemptId: null,
+      startedAt: null,
+      completedAt: null,
+      lastSuccess: null,
+      eligibleRepositories: 0,
+      attemptedReads: 0,
+      failedReads: 0,
+      categories: {},
+      failedStages: [],
+      draining: false,
+    };
+    vi.mocked(client.fetchOutcomesStatus)
+      .mockResolvedValueOnce({
+        sinceDaemonStart: true,
+        sync: empty,
+        connection: {
+          ...empty,
+          state: "success",
+          repositoryAccess: "tested",
+          credentialEpoch: 0,
+        },
+      })
+      .mockRejectedValueOnce(new Error("private error"));
+    vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({ configured: true, source: "env" });
+    vi.mocked(client.refreshGithubTokenStatus).mockResolvedValue({
+      configured: true,
+      source: "env",
+      epoch: 1,
+    });
+    render(<SettingsPage />);
+    await screen.findByText(/Connection test: success/);
+    fireEvent.click(screen.getByRole("button", { name: /changed the credential/i }));
+    await waitFor(() => expect(screen.queryByText(/Connection test: success/)).toBeNull());
+    expect(screen.getByText(/Repository access has not been tested/i)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("private error");
+  });
+
+  it("ignores a status read that settles while an explicit action POST is pending", async () => {
+    const empty = {
+      state: "never-run" as const,
+      attemptId: null,
+      startedAt: null,
+      completedAt: null,
+      lastSuccess: null,
+      eligibleRepositories: 0,
+      attemptedReads: 0,
+      failedReads: 0,
+      categories: {},
+      failedStages: [],
+      draining: false,
+    };
+    let releaseGet!: (value: Awaited<ReturnType<typeof client.fetchOutcomesStatus>>) => void;
+    let releasePost!: (
+      value: Awaited<ReturnType<typeof client.startOutcomesConnectionTest>>,
+    ) => void;
+    vi.mocked(client.fetchOutcomesStatus)
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseGet = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        sinceDaemonStart: true,
+        sync: empty,
+        connection: {
+          ...empty,
+          state: "running",
+          attemptId: "attempt",
+          repositoryAccess: "untested",
+          credentialEpoch: 0,
+        },
+      });
+    vi.mocked(client.startOutcomesConnectionTest).mockReturnValue(
+      new Promise((resolve) => {
+        releasePost = resolve;
+      }),
+    );
+    vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({ configured: true, source: "env" });
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Test connection" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+    expect(client.fetchOutcomesStatus).toHaveBeenCalledTimes(1);
+    releaseGet({
+      sinceDaemonStart: true,
+      sync: empty,
+      connection: {
+        ...empty,
+        state: "success",
+        repositoryAccess: "tested",
+        credentialEpoch: 0,
+      },
+    });
+    await waitFor(() => expect(screen.queryByText(/Connection test: success/)).toBeNull());
+    expect(screen.getByText(/Starting operation/i)).toBeTruthy();
+    releasePost({ status: 202, attemptId: "attempt" });
+    await screen.findByText(/Connection test: running/);
+  });
+
+  it("refreshes sibling connection evidence and ignores an older status GET", async () => {
+    const empty = {
+      state: "never-run" as const,
+      attemptId: null,
+      startedAt: null,
+      completedAt: null,
+      lastSuccess: null,
+      eligibleRepositories: 0,
+      attemptedReads: 0,
+      failedReads: 0,
+      categories: {},
+      failedStages: [],
+      draining: false,
+    };
+    const stale = {
+      sinceDaemonStart: true as const,
+      sync: empty,
+      connection: {
+        ...empty,
+        state: "success" as const,
+        repositoryAccess: "tested" as const,
+        credentialEpoch: 0,
+      },
+    };
+    const current = {
+      sinceDaemonStart: true as const,
+      sync: empty,
+      connection: { ...empty, repositoryAccess: "untested" as const, credentialEpoch: 1 },
+    };
+    let release!: (value: typeof stale) => void;
+    vi.mocked(client.fetchOutcomesStatus)
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(current);
+    vi.mocked(client.fetchGithubTokenStatus).mockResolvedValue({ configured: true, source: "env" });
+    vi.mocked(client.refreshGithubTokenStatus).mockResolvedValue({
+      configured: true,
+      source: "env",
+      epoch: 1,
+    });
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /changed the credential/i }));
+    await screen.findByText(/repository access has not been tested/i);
+    release(stale);
+    await waitFor(() => expect(screen.queryByText(/Connection test: success/)).toBeNull());
+  });
+
+  it("shows request failure and recovers through retry without exposing a secret", async () => {
+    vi.mocked(client.fetchGithubTokenStatus)
+      .mockRejectedValueOnce(new Error("fake-secret provider detail"))
+      .mockResolvedValueOnce({
+        configured: false,
+        source: null,
+        state: "absent",
+        code: "github-token-not-found",
+      });
+    render(<SettingsPage />);
+    await screen.findByText(/could not read token status/i);
+    expect(document.body.textContent).not.toContain("fake-secret");
+    fireEvent.click(screen.getByRole("button", { name: "Retry status" }));
+    await screen.findByLabelText("github token status");
+  });
+
+  it("rechecks locally and ignores an older status response", async () => {
+    let release!: (value: { configured: boolean; source: "env" | null }) => void;
+    vi.mocked(client.fetchGithubTokenStatus).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    vi.mocked(client.refreshGithubTokenStatus).mockResolvedValue({
+      configured: false,
+      source: null,
+      state: "absent",
+    });
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /changed the credential/i }));
+    await screen.findByLabelText("github token status");
+    release({ configured: true, source: "env" });
+    await waitFor(() =>
+      expect(screen.getByLabelText("github token status").textContent).not.toContain(
+        "configured (env)",
+      ),
+    );
   });
 });

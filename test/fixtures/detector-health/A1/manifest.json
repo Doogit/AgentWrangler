@@ -1,0 +1,9 @@
+{
+  "id": "A1",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "A1_RESULT_BYTES_THRESHOLD",
+    "expect": "silent"
+  }
+}

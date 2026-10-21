@@ -1,0 +1,14 @@
+{
+  "context_inventory": [
+    {
+      "probe_id": "probe-positive-claude-md",
+      "workspace_id": "positive",
+      "probed_at": "2026-12-20T09:10:00.000Z",
+      "component": "CLAUDE_MD",
+      "file_ref": "CLAUDE.md",
+      "file_hash": "hash-positive",
+      "tokens": 5000,
+      "attribution_version": "measured-v1"
+    }
+  ]
+}

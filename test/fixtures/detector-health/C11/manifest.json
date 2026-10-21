@@ -1,0 +1,16 @@
+{
+  "id": "C11",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_misses": [
+    {
+      "fixture": "near-miss",
+      "target_constant": "minimum capped-call errors (1 per session)",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-sidechain",
+      "target_constant": "Scope/Trigger clause: tool call must be on the main chain (sidechain over-cap errors excluded)",
+      "expect": "silent"
+    }
+  ]
+}

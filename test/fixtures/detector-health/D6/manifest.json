@@ -1,0 +1,29 @@
+{
+  "id": "D6",
+  "positive": {
+    "fixture": "positive",
+    "expect": "fires"
+  },
+  "near_misses": [
+    {
+      "fixture": "near-miss-excess-floor",
+      "target_constant": "D6_EXCESS_FLOOR_BYTES",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-min-sessions",
+      "target_constant": "D6_MIN_SESSIONS",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-a1-bytes",
+      "target_constant": "A1_RESULT_BYTES_THRESHOLD",
+      "expect": "silent"
+    },
+    {
+      "fixture": "near-miss-min-pct",
+      "target_constant": "D6_MIN_PCT_OF_SPEND",
+      "expect": "silent"
+    }
+  ]
+}

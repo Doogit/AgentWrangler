@@ -1,0 +1,729 @@
+{
+  "capturedFrom": "47751fde REST path",
+  "pass1": {
+    "workItems": [
+      {
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "workspace_id": "ws-alpha",
+        "number": 1,
+        "state": "MERGED",
+        "final_commit": "merge-1",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-01T00:00:00Z",
+        "closed_at": "2026-08-01T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "workspace_id": "ws-alpha",
+        "number": 2,
+        "state": "MERGED",
+        "final_commit": "merge-2",
+        "checks_conclusion": "FAILURE",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-02T00:00:00Z",
+        "closed_at": "2026-08-02T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#3",
+        "workspace_id": "ws-alpha",
+        "number": 3,
+        "state": "CLOSED",
+        "final_commit": "head-3",
+        "checks_conclusion": "NONE",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": "2026-08-03T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#4",
+        "workspace_id": "ws-alpha",
+        "number": 4,
+        "state": "CLOSED",
+        "final_commit": "pm-4",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": "2026-08-04T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#5",
+        "workspace_id": "ws-alpha",
+        "number": 5,
+        "state": "MERGED",
+        "final_commit": "merge-5",
+        "checks_conclusion": "NONE",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-05T00:00:00Z",
+        "closed_at": "2026-08-05T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "workspace_id": "ws-alpha",
+        "number": 6,
+        "state": "OPEN",
+        "final_commit": "test-merge-6",
+        "checks_conclusion": "PENDING",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": null,
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#7",
+        "workspace_id": "ws-alpha",
+        "number": 7,
+        "state": "OPEN",
+        "final_commit": "test-merge-7",
+        "checks_conclusion": "PENDING",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": null,
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "workspace_id": "ws-alpha",
+        "number": 8,
+        "state": "MERGED",
+        "final_commit": "merge-8",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-08T00:00:00Z",
+        "closed_at": "2026-08-08T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      }
+    ],
+    "branchKeys": [
+      {
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "head_ref_key": "fp(feature/pr-1)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "head_ref_key": "fp(feature/pr-2)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#3",
+        "head_ref_key": "fp(feature/pr-3)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#4",
+        "head_ref_key": "fp(feature/pr-4)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#5",
+        "head_ref_key": "fp(feature/pr-5)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "head_ref_key": "fp(feature/pr-6)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "head_ref_key": "fp(feature/pr-8)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      }
+    ],
+    "links": [
+      {
+        "session_id": "sess-a1",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "confidence": 1,
+        "method": "TRAILER"
+      },
+      {
+        "session_id": "sess-a1",
+        "work_item_id": "gh:acme/repo-alpha#4",
+        "confidence": 1,
+        "method": "TRAILER"
+      },
+      {
+        "session_id": "sess-a2",
+        "work_item_id": "gh:acme/repo-alpha#3",
+        "confidence": 0.6,
+        "method": "SHA_OVERLAP"
+      },
+      {
+        "session_id": "sess-a3",
+        "work_item_id": "gh:acme/repo-alpha#5",
+        "confidence": 0.6,
+        "method": "SHA_OVERLAP"
+      }
+    ],
+    "findings": [
+      {
+        "finding_id": "e1:gh:acme/repo-alpha#1:th-1a",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "UNRESOLVED_THREAD",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "th-1a",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "unresolved-thread-v1"
+      },
+      {
+        "finding_id": "e1:gh:acme/repo-alpha#1:th-1b",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "UNRESOLVED_THREAD",
+        "severity": "UNKNOWN",
+        "status": "ADDRESSED",
+        "evidence_ref": "th-1b",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "unresolved-thread-v1"
+      },
+      {
+        "finding_id": "e1:gh:acme/repo-alpha#6:th-6",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "UNRESOLVED_THREAD",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "th-6",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "unresolved-thread-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#2:0",
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#2:e2:deferred:0",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#2:1",
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#2:e2:deferred:1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#6:0",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#6:e2:deferred:0",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#6:1",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#6:e2:deferred:1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#1:0",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:2@merge-1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#1:1",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:3@merge-1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#8:0",
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:2@merge-8",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#8:1",
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:3@merge-8",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      }
+    ]
+  },
+  "pass2": {
+    "workItems": [
+      {
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "workspace_id": "ws-alpha",
+        "number": 1,
+        "state": "MERGED",
+        "final_commit": "merge-1",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-01T00:00:00Z",
+        "closed_at": "2026-08-01T00:00:00Z",
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "workspace_id": "ws-alpha",
+        "number": 2,
+        "state": "MERGED",
+        "final_commit": "merge-2",
+        "checks_conclusion": "FAILURE",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-02T00:00:00Z",
+        "closed_at": "2026-08-02T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#3",
+        "workspace_id": "ws-alpha",
+        "number": 3,
+        "state": "CLOSED",
+        "final_commit": "head-3",
+        "checks_conclusion": "NONE",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": "2026-08-03T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#4",
+        "workspace_id": "ws-alpha",
+        "number": 4,
+        "state": "CLOSED",
+        "final_commit": "pm-4",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": "2026-08-04T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#5",
+        "workspace_id": "ws-alpha",
+        "number": 5,
+        "state": "MERGED",
+        "final_commit": "merge-5",
+        "checks_conclusion": "NONE",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-05T00:00:00Z",
+        "closed_at": "2026-08-05T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "workspace_id": "ws-alpha",
+        "number": 6,
+        "state": "MERGED",
+        "final_commit": "merge-6",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-21T00:00:00Z",
+        "closed_at": "2026-08-21T00:00:00Z",
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#7",
+        "workspace_id": "ws-alpha",
+        "number": 7,
+        "state": "OPEN",
+        "final_commit": "test-merge-7",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": null,
+        "closed_at": null,
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "workspace_id": "ws-alpha",
+        "number": 8,
+        "state": "MERGED",
+        "final_commit": "merge-8",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-08T00:00:00Z",
+        "closed_at": "2026-08-08T00:00:00Z",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#9",
+        "workspace_id": "ws-alpha",
+        "number": 9,
+        "state": "MERGED",
+        "final_commit": "merge-9",
+        "checks_conclusion": "SUCCESS",
+        "opened_at": "2026-07-01T00:00:00Z",
+        "merged_at": "2026-08-22T00:00:00Z",
+        "closed_at": "2026-08-22T00:00:00Z",
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      }
+    ],
+    "branchKeys": [
+      {
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "head_ref_key": "fp(feature/pr-1)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "head_ref_key": "fp(feature/pr-2)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#3",
+        "head_ref_key": "fp(feature/pr-3)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#4",
+        "head_ref_key": "fp(feature/pr-4)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#5",
+        "head_ref_key": "fp(feature/pr-5)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "head_ref_key": "fp(feature/pr-6)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "head_ref_key": "fp(feature/pr-8)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:00:00.000Z"
+      },
+      {
+        "work_item_id": "gh:acme/repo-alpha#9",
+        "head_ref_key": "fp(feature/pr-9)",
+        "normalization_version": "branch-v1",
+        "synced_at": "2026-09-01T00:10:00.000Z"
+      }
+    ],
+    "links": [
+      {
+        "session_id": "sess-a1",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "confidence": 1,
+        "method": "TRAILER"
+      },
+      {
+        "session_id": "sess-a1",
+        "work_item_id": "gh:acme/repo-alpha#4",
+        "confidence": 1,
+        "method": "TRAILER"
+      },
+      {
+        "session_id": "sess-a2",
+        "work_item_id": "gh:acme/repo-alpha#3",
+        "confidence": 0.6,
+        "method": "SHA_OVERLAP"
+      },
+      {
+        "session_id": "sess-a3",
+        "work_item_id": "gh:acme/repo-alpha#5",
+        "confidence": 0.6,
+        "method": "SHA_OVERLAP"
+      }
+    ],
+    "findings": [
+      {
+        "finding_id": "e1:gh:acme/repo-alpha#1:th-1a",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "UNRESOLVED_THREAD",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "th-1a",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "unresolved-thread-v1"
+      },
+      {
+        "finding_id": "e1:gh:acme/repo-alpha#1:th-1b",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "UNRESOLVED_THREAD",
+        "severity": "UNKNOWN",
+        "status": "ADDRESSED",
+        "evidence_ref": "th-1b",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "unresolved-thread-v1"
+      },
+      {
+        "finding_id": "e1:gh:acme/repo-alpha#6:th-6",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "UNRESOLVED_THREAD",
+        "severity": "UNKNOWN",
+        "status": "ADDRESSED",
+        "evidence_ref": "th-6",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": "2026-09-01T00:10:00.000Z",
+        "cleared_by": "merge-6",
+        "extractor_version": "unresolved-thread-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#2:0",
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#2:e2:deferred:0",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#2:1",
+        "work_item_id": "gh:acme/repo-alpha#2",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#2:e2:deferred:1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#6:0",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#6:e2:deferred:0",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#6:1",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#6:e2:deferred:1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#9:0",
+        "work_item_id": "gh:acme/repo-alpha#9",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#9:e2:deferred:0",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:10:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e2:gh:acme/repo-alpha#9:1",
+        "work_item_id": "gh:acme/repo-alpha#9",
+        "source": "DEFERRAL_SECTION",
+        "severity": "UNKNOWN",
+        "status": "DEFERRED",
+        "evidence_ref": "gh:acme/repo-alpha#9:e2:deferred:1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:10:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "deferral-section-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#1:0",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:2@merge-1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#1:1",
+        "work_item_id": "gh:acme/repo-alpha#1",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:3@merge-1",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#6:0",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:2@merge-6",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:10:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#6:1",
+        "work_item_id": "gh:acme/repo-alpha#6",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:3@merge-6",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:10:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#8:0",
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:2@merge-8",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#8:1",
+        "work_item_id": "gh:acme/repo-alpha#8",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:3@merge-8",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:00:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#9:0",
+        "work_item_id": "gh:acme/repo-alpha#9",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:2@merge-9",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:10:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      },
+      {
+        "finding_id": "e3:gh:acme/repo-alpha#9:1",
+        "work_item_id": "gh:acme/repo-alpha#9",
+        "source": "DIFF_MARKER",
+        "severity": "LOW",
+        "status": "UNKNOWN",
+        "evidence_ref": "src/a.ts:3@merge-9",
+        "confidence": null,
+        "raised_at": "2026-09-01T00:10:00.000Z",
+        "cleared_at": null,
+        "cleared_by": null,
+        "extractor_version": "diff-marker-v1"
+      }
+    ]
+  }
+}

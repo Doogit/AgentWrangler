@@ -8,6 +8,7 @@ export function makeEffectCycle(overrides: Partial<EffectCycle> = {}): EffectCyc
     contractVersion: "esf-effect-1",
     queryDefinitionVersion: "esf-1",
     versionStatus: "SUPPORTED",
+    bridge: { bridgeKind: "LEGACY_UNLINKED" },
     detectorId: "D2",
     metricId: "avg_context_per_turn",
     methodVersion: "esf-1",

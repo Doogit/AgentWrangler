@@ -1,0 +1,17 @@
+{
+  "limit_snapshots": [
+    {
+      "ts": "2027-01-05T00:00:00.000Z",
+      "resets_at": "2027-01-08T12:00:00.000Z",
+      "used_pct": 22,
+      "source": "api"
+    },
+    {
+      "ts": "2027-01-06T00:00:00.000Z",
+      "resets_at": "2027-01-08T12:00:00.000Z",
+      "used_pct": 40,
+      "source": "api"
+    }
+  ],
+  "user_config": [{ "key": "dh_anchor", "value": "x", "updated_at": "2027-01-07T00:00:00.000Z" }]
+}

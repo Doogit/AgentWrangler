@@ -66,6 +66,85 @@ function makeDeps(overrides: Partial<OutcomesPassDeps> = {}) {
 }
 
 describe("createOutcomesPassRunner — hard per-pass deadline", () => {
+  it("reports a thrown sync stage as failed even when no repository count was returned", async () => {
+    const { deps } = makeDeps({
+      sync: async () => {
+        throw new Error("secret diagnostic");
+      },
+    });
+    const runner = createOutcomesPassRunner(deps);
+    await runner.run();
+    expect(runner.snapshot()).toMatchObject({
+      state: "failed",
+      failedStages: ["sync"],
+      categories: { "provider-error": 1 },
+    });
+    expect(JSON.stringify(runner.snapshot())).not.toContain("secret diagnostic");
+  });
+
+  it("keeps lastSuccess on a partial pass and reports safe failed-stage counts", async () => {
+    let pass = 0;
+    const { deps } = makeDeps({
+      sync: async () => {
+        pass++;
+        return {
+          eligibleRepositories: 1,
+          attemptedReads: 2,
+          failedReads: pass === 1 ? 0 : 1,
+          categories: pass === 1 ? {} : { "access-ambiguous": 1 },
+          repositories: [],
+        };
+      },
+    });
+    const runner = createOutcomesPassRunner(deps);
+    await runner.run();
+    const first = runner.snapshot();
+    expect(first.state).toBe("success");
+    await runner.run();
+    expect(runner.snapshot()).toMatchObject({
+      state: "partial",
+      lastSuccess: first.completedAt,
+      failedReads: 1,
+      failedStages: ["sync"],
+      categories: { "access-ambiguous": 1 },
+    });
+  });
+
+  it("classifies link and findings failures as partial without advancing lastSuccess", async () => {
+    let failed = false;
+    const good = {
+      eligibleRepositories: 1,
+      attemptedReads: 1,
+      failedReads: 0,
+      categories: {},
+      repositories: [],
+    };
+    const bad = {
+      eligibleRepositories: 1,
+      attemptedReads: 1,
+      failedReads: 1,
+      categories: { "not-found-ambiguous": 1 },
+      repositories: [],
+    };
+    const { deps } = makeDeps({
+      sync: async () => good,
+      link: async () => (failed ? bad : good),
+      findings: async () => (failed ? bad : good),
+    });
+    const runner = createOutcomesPassRunner(deps);
+    await runner.run();
+    const lastSuccess = runner.snapshot().lastSuccess;
+    failed = true;
+    await runner.run();
+    expect(runner.snapshot()).toMatchObject({
+      state: "partial",
+      lastSuccess,
+      failedStages: ["link", "findings"],
+      failedReads: 2,
+      categories: { "not-found-ambiguous": 2 },
+    });
+  });
+
   it("does not invoke validation-only PR head-key reads during a normal daemon pass", async () => {
     let headKeyCalls = 0;
     const { deps } = makeDeps({
@@ -81,7 +160,7 @@ describe("createOutcomesPassRunner — hard per-pass deadline", () => {
     expect(headKeyCalls).toBe(0);
   });
 
-  it("abandons a hung pass at the deadline, clears the flag, and lets the next poll run", async () => {
+  it("publishes timed-out but excludes a successor until the original body drains", async () => {
     // FIRST token read never settles (= hung pass); later reads succeed.
     const never: Promise<TokenResult> = new Promise(() => {});
     let reads = 0;
@@ -96,12 +175,13 @@ describe("createOutcomesPassRunner — hard per-pass deadline", () => {
 
     const first = await runner.run();
     expect(first.aborted).toBe(true);
-    expect(runner.isRunning).toBe(false); // flag cleared despite the hang
+    expect(runner.isRunning).toBe(true);
+    expect(runner.snapshot()).toMatchObject({ state: "timed-out", draining: true });
 
-    // Next poll runs to completion end-to-end.
+    // A permanently hung body requires daemon restart; no overlapping body starts.
     const second = await runner.run();
-    expect(second).toEqual({ skipped: false, disabled: false, aborted: false });
-    expect(calls).toEqual(["probe", "probe", "sync", "link", "derive", "findings"]);
+    expect(second.skipped).toBe(true);
+    expect(calls).toEqual(["probe"]);
   });
 
   it("skips a concurrent poll while a pass is in flight", async () => {
@@ -152,7 +232,7 @@ describe("createOutcomesPassRunner — hard per-pass deadline", () => {
 // ── Abandoned-pass interleaving (review P2) ──────────────────────────────────
 
 describe("createOutcomesPassRunner — abandoned-pass interleaving", () => {
-  it("a pass settling AFTER the deadline + successor start cannot crash or corrupt: its writes are the idempotent upserts and the successor completes", async () => {
+  it("a pass settling AFTER the deadline cannot overlap or overwrite its terminal status", async () => {
     // Real in-memory SQLite so the "late write" is an actual idempotent upsert —
     // the same shape as every DB write in the real outcomes pass (see the safety
     // rationale in src/daemon/outcomes-pass.ts).
@@ -200,15 +280,20 @@ describe("createOutcomesPassRunner — abandoned-pass interleaving", () => {
 
       const first = await runner.run();
       expect(first.aborted).toBe(true); // deadline fired while sync hung
-      expect(runner.isRunning).toBe(false); // flag cleared anyway
+      expect(runner.isRunning).toBe(true); // still draining
 
-      // Successor poll starts and completes normally while pass #1 pends.
+      // Successor is refused while pass #1 pends.
       const second = await runner.run();
-      expect(second).toEqual({ skipped: false, disabled: false, aborted: false });
+      expect(second.skipped).toBe(true);
 
       // NOW the abandoned body settles.
       releaseSync?.();
       await lateDone;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(runner.snapshot()).toMatchObject({ state: "timed-out", draining: false });
+      expect(runner.isRunning).toBe(false);
+      const third = await runner.run();
+      expect(third.skipped).toBe(false);
       // Give any stray rejection a macrotask turn to surface.
       await new Promise((resolve) => setTimeout(resolve, 10));
 

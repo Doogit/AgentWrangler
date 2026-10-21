@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
@@ -52,6 +52,8 @@ describe("SessionDetailPage sidechain turns", () => {
 
     render(<SessionDetailPage sessionId="session-demo" onBack={() => {}} />);
 
+    // The raw turn table sits behind "Show all N turns".
+    fireEvent.click(await screen.findByRole("button", { name: /^Show all .* turns$/ }));
     expect(await screen.findByRole("columnheader", { name: "Chain" })).toBeTruthy();
     const sidechainRow = screen.getByText("sidechain-model").closest("tr");
     const mainChainRow = screen.getByText("main-chain-model").closest("tr");

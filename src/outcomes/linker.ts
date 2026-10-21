@@ -18,6 +18,7 @@
 import * as fs from "node:fs";
 import * as readline from "node:readline";
 import type { Db } from "../db/open.js";
+import { awaitDbWriteGate } from "../db/write-gate.js";
 import type {
   FrozenTranscriptEntry,
   StrictTranscriptHarvester,
@@ -25,6 +26,8 @@ import type {
 } from "../evidence/r3/transcript.js";
 import { fingerprintBranchRef } from "./branch-key.js";
 import type { GithubClient } from "./github/client.js";
+import { type GhPRRead, PR_READ_BATCH, type PassPrPages } from "./github/pr-page.js";
+import { type OutcomeStageSummary, newStageSummary, observeGithubClient } from "./stage-summary.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -185,6 +188,53 @@ const YIELD_EVERY = 16;
 
 /** Maximum GitHub commit-to-PR reverse lookups in a single linker cycle. */
 const REVERSE_LOOKUP_CAP = 50;
+
+/**
+ * P0-U13: a PR's commit SHAs + trailer ids, persisted per work item in
+ * user_config (`gh_pr_reads:<work_item_id>`, no migration) together with the
+ * work_items.synced_at they were read at. sync rewrites synced_at only when a
+ * PR changed (or is OPEN), so a terminal PR whose synced_at still matches is
+ * not re-read. S3: the pass's GraphQL page supplies fresh reads for every PR
+ * it carries; this store covers the PRs a warm pass's page does not reach.
+ */
+interface PersistedPrReads {
+  syncedAt: string | null;
+  shas: string[];
+  trailerIds: string[];
+}
+
+/**
+ * P0-U13: reverse commit→PR lookups per repo, persisted in user_config
+ * (`gh_commit_pulls:<owner>/<repo>`) and valid while the repo's sync watermark
+ * is unchanged — a PR that could newly contain a commit moves the watermark.
+ */
+interface PersistedCommitPulls {
+  watermark: string | null;
+  pulls: Record<string, number[]>;
+  /** SHAs GitHub answered 422 (unknown commit): not re-asked under the same watermark. */
+  unknown?: string[];
+}
+
+function extractPrReads(
+  commits: Array<{ sha: string; message: string }>,
+  body: string,
+): { shas: Set<string>; trailerIds: Set<string> } {
+  const trailerIds = new Set<string>();
+  for (const commit of commits) {
+    for (const trailerId of extractTrailerSessionIds(commit.message)) trailerIds.add(trailerId);
+  }
+  for (const trailerId of extractTrailerSessionIds(body)) trailerIds.add(trailerId);
+  return { shas: new Set(commits.map((commit) => commit.sha)), trailerIds };
+}
+
+function parseJson<T>(value: string | null | undefined): T | undefined {
+  if (value === null || value === undefined) return undefined;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Extract session ids from supported commit/PR trailer lines.
@@ -407,7 +457,13 @@ export async function evaluateBranchLinksShadow(
  * @param client — needed only for SHA_OVERLAP: fetch PR commit SHAs.
  *                 Pass disabled client to skip SHA_OVERLAP linkage.
  */
-export async function linkSessions(db: Db, client: GithubClient): Promise<void> {
+export async function linkSessions(
+  db: Db,
+  underlyingClient: GithubClient,
+  pages?: PassPrPages,
+): Promise<OutcomeStageSummary> {
+  const summary = newStageSummary();
+  const client = observeGithubClient(underlyingClient, summary);
   // Get all RECONCILED sessions with ≥1 Bash tool_event and their workspace mapping.
   const sessions = db
     .prepare(
@@ -426,6 +482,11 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
     repo_owner: string | null;
     repo_name: string | null;
   }>;
+  summary.eligibleRepositories = new Set(
+    sessions
+      .filter((session) => session.repo_owner && session.repo_name)
+      .map((session) => `${session.repo_owner}/${session.repo_name}`),
+  ).size;
 
   const insertLink = db.prepare(`
     INSERT INTO session_work_links (session_id, work_item_id, confidence, method)
@@ -447,6 +508,117 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
   // (lazy: only populated when needed for a workspace)
   const prShaCache = new Map<string, Set<string>>(); // work_item_id → sha set
   const prTrailerIdCache = new Map<string, Set<string>>(); // work_item_id → session ids
+  const selectConfig = db.prepare("SELECT value FROM user_config WHERE key = ?");
+  const upsertConfig = db.prepare(`
+    INSERT INTO user_config (key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `);
+  const deleteConfig = db.prepare("DELETE FROM user_config WHERE key = ?");
+  const readConfig = (key: string): string | null | undefined =>
+    (selectConfig.get(key) as { value: string | null } | undefined)?.value;
+
+  /** Persist a terminal PR's reads unless the stored copy already matches. */
+  const persistPrReads = (
+    wi: { work_item_id: string; state: string; synced_at: string | null },
+    reads: { shas: Set<string>; trailerIds: Set<string> },
+  ): void => {
+    // OPEN PRs are re-read every pass (sync rewrites them every pass), so a
+    // stored copy would never be used.
+    if (wi.state === "OPEN") return;
+    const key = `gh_pr_reads:${wi.work_item_id}`;
+    const value = JSON.stringify({
+      syncedAt: wi.synced_at,
+      shas: [...reads.shas],
+      trailerIds: [...reads.trailerIds],
+    } satisfies PersistedPrReads);
+    if (readConfig(key) !== value) upsertConfig.run(key, value, new Date().toISOString());
+  };
+
+  const commitPullsByRepo = new Map<
+    string,
+    Omit<PersistedCommitPulls, "unknown"> & { unknown: Set<string>; dirty: boolean }
+  >();
+  const commitPullsFor = (owner: string, repo: string) => {
+    const repoKey = `${owner}/${repo}`;
+    let memo = commitPullsByRepo.get(repoKey);
+    if (memo === undefined) {
+      const watermark = readConfig(`gh_watermark:${repoKey}`) ?? null;
+      const stored = parseJson<PersistedCommitPulls>(readConfig(`gh_commit_pulls:${repoKey}`));
+      const valid =
+        stored?.watermark === watermark &&
+        typeof stored.pulls === "object" &&
+        stored.pulls !== null;
+      memo = {
+        watermark,
+        pulls: valid ? stored.pulls : {},
+        unknown: new Set(valid && Array.isArray(stored.unknown) ? stored.unknown : []),
+        dirty: false,
+      };
+      commitPullsByRepo.set(repoKey, memo);
+    }
+    return memo;
+  };
+
+  /** A terminal PR's stored reads, valid while its synced_at is unchanged (OPEN is never trusted). */
+  const storedReadsFor = (wi: {
+    work_item_id: string;
+    state: string;
+    synced_at: string | null;
+  }): PersistedPrReads | undefined => {
+    if (wi.state === "OPEN") return undefined;
+    const stored = parseJson<PersistedPrReads>(readConfig(`gh_pr_reads:${wi.work_item_id}`));
+    return stored !== undefined && stored.syncedAt === wi.synced_at ? stored : undefined;
+  };
+
+  // P0-U13 S3b: work items that are off this pass's page and have no valid stored
+  // reads (a cold boot: every older PR) are read in aliased GraphQL batches instead
+  // of two REST calls each. PRs a batch cannot return keep the per-PR REST fallback.
+  const fetchedReads = new Map<string, GhPRRead>();
+  const deniedRepos = new Set<string>();
+  const listPRReads = client.listPRReads;
+  if (listPRReads !== undefined && client.enabled) {
+    const seenWorkspaces = new Set<string>();
+    for (const session of sessions) {
+      const { repo_owner: owner, repo_name: name, workspace_id: workspaceId } = session;
+      if (owner === null || name === null || seenWorkspaces.has(workspaceId)) continue;
+      if (hasManual.get(session.session_id) !== undefined) continue;
+      seenWorkspaces.add(workspaceId);
+      const repoKey = `${owner}/${name}`;
+      const wanted = (
+        db
+          .prepare(
+            "SELECT work_item_id, number, state, synced_at FROM work_items WHERE workspace_id = ?",
+          )
+          .all(workspaceId) as Array<{
+          work_item_id: string;
+          number: number;
+          state: string;
+          synced_at: string | null;
+        }>
+      ).filter(
+        (wi) =>
+          pages?.get(owner, name, wi.number) === undefined && storedReadsFor(wi) === undefined,
+      );
+      for (let i = 0; i < wanted.length && !deniedRepos.has(repoKey); i += PR_READ_BATCH) {
+        const chunk = wanted.slice(i, i + PR_READ_BATCH);
+        const result = await listPRReads.call(
+          client,
+          owner,
+          name,
+          chunk.map((wi) => wi.number),
+        );
+        if (!result.ok) {
+          // The per-PR REST read would be denied identically: do not retry it N times.
+          if (/:(401|403|429)$/.test(result.reason)) deniedRepos.add(repoKey);
+          continue;
+        }
+        for (const wi of chunk) {
+          const read = result.data.get(wi.number);
+          if (read !== undefined) fetchedReads.set(wi.work_item_id, read);
+        }
+      }
+    }
+  }
 
   let reverseLookups = 0;
 
@@ -461,6 +633,8 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
       await new Promise((r) => setImmediate(r));
     }
     processed += 1;
+    // Each write below follows the gate (or the gate after the last await before it).
+    await awaitDbWriteGate();
 
     // If session already has a MANUAL link, skip (MANUAL wins).
     const manualExists = hasManual.get(session.session_id);
@@ -472,12 +646,59 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
     // 1. TRAILER (GitHub commit/PR trailers, only when a repository is available)
     if (repoOwner !== null && repoName !== null && client.enabled) {
       const workItems = db
-        .prepare("SELECT work_item_id, number FROM work_items WHERE workspace_id = ?")
-        .all(session.workspace_id) as Array<{ work_item_id: string; number: number }>;
+        .prepare(
+          "SELECT work_item_id, number, state, synced_at FROM work_items WHERE workspace_id = ?",
+        )
+        .all(session.workspace_id) as Array<{
+        work_item_id: string;
+        number: number;
+        state: string;
+        synced_at: string | null;
+      }>;
       const trailerMatches: string[] = [];
 
       for (const wi of workItems) {
         let trailerIds = prTrailerIdCache.get(wi.work_item_id);
+        if (trailerIds === undefined) {
+          // This pass's GraphQL page already holds the PR's commits and body.
+          const paged = pages?.get(repoOwner, repoName, wi.number);
+          if (paged !== undefined) {
+            const reads = extractPrReads(paged.commits, paged.body);
+            trailerIds = reads.trailerIds;
+            prShaCache.set(wi.work_item_id, reads.shas);
+            prTrailerIdCache.set(wi.work_item_id, trailerIds);
+            persistPrReads(wi, reads);
+          }
+        }
+        // OPEN PRs are rewritten every pass, so they must be re-read every pass —
+        // enforce that invariant directly rather than relying on synced_at, which
+        // sync.ts only bumps when its own check-conclusion read succeeds (P0-U13
+        // review: a repo-wide check-conclusion denial freezes synced_at for an
+        // OPEN PR without stopping it from evolving).
+        if (trailerIds === undefined) {
+          const stored = storedReadsFor(wi);
+          if (stored !== undefined) {
+            trailerIds = new Set(stored.trailerIds);
+            prShaCache.set(wi.work_item_id, new Set(stored.shas));
+            prTrailerIdCache.set(wi.work_item_id, trailerIds);
+          }
+        }
+        if (trailerIds === undefined) {
+          const fetched = fetchedReads.get(wi.work_item_id);
+          if (fetched !== undefined) {
+            const reads = extractPrReads(fetched.commits, fetched.body);
+            trailerIds = reads.trailerIds;
+            prShaCache.set(wi.work_item_id, reads.shas);
+            prTrailerIdCache.set(wi.work_item_id, trailerIds);
+            persistPrReads(wi, reads);
+          }
+        }
+        if (trailerIds === undefined && deniedRepos.has(`${repoOwner}/${repoName}`)) {
+          trailerIds = new Set<string>();
+          prShaCache.set(wi.work_item_id, new Set());
+          prTrailerIdCache.set(wi.work_item_id, trailerIds);
+          deleteConfig.run(`gh_pr_reads:${wi.work_item_id}`);
+        }
         if (trailerIds === undefined) {
           trailerIds = new Set<string>();
           const commitResult = await client.listPRCommits(repoOwner, repoName, wi.number);
@@ -498,7 +719,14 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
               trailerIds.add(trailerId);
             }
           }
+          await awaitDbWriteGate();
           prTrailerIdCache.set(wi.work_item_id, trailerIds);
+          // Only complete reads carry over; a failed read is retried next pass.
+          if (commitResult.ok && bodyResult.ok) {
+            persistPrReads(wi, { shas: prShaCache.get(wi.work_item_id) ?? new Set(), trailerIds });
+          } else {
+            deleteConfig.run(`gh_pr_reads:${wi.work_item_id}`);
+          }
         }
         if (trailerIds.has(session.session_id)) trailerMatches.push(wi.work_item_id);
       }
@@ -514,6 +742,7 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
 
     // 2. PR_LINK
     const prLinks = await harvestPrLinks(session.file_path);
+    await awaitDbWriteGate();
     const prLinkMatches = resolvePrLinkMatches(db, prLinks);
 
     if (prLinkMatches.length > 0) {
@@ -569,14 +798,28 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
 
         // Only SHAs absent from every synced PR commit list can use a reverse lookup.
         for (const sha of sessionShas) {
-          if (shaToWorkItems.has(sha) || reverseLookups >= REVERSE_LOOKUP_CAP || !client.enabled) {
-            continue;
+          if (shaToWorkItems.has(sha) || !client.enabled) continue;
+          const memo = commitPullsFor(repoOwner, repoName);
+          let prNumbers = Object.hasOwn(memo.pulls, sha) ? memo.pulls[sha] : undefined;
+          if (prNumbers === undefined) {
+            if (memo.unknown.has(sha)) continue;
+            if (reverseLookups >= REVERSE_LOOKUP_CAP) continue;
+            reverseLookups += 1;
+            const pullsResult = await client.listPullsForCommit(repoOwner, repoName, sha);
+            if (!pullsResult.ok) {
+              // 422 = commit unknown to GitHub; it answers the same until the repo moves.
+              if (/:422$/.test(pullsResult.reason)) {
+                memo.unknown.add(sha);
+                memo.dirty = true;
+              }
+              continue;
+            }
+            prNumbers = pullsResult.data;
+            memo.pulls[sha] = prNumbers;
+            memo.dirty = true;
           }
-          reverseLookups += 1;
-          const pullsResult = await client.listPullsForCommit(repoOwner, repoName, sha);
-          if (!pullsResult.ok) continue;
           const reverseMatches = new Set<string>();
-          for (const prNumber of pullsResult.data) {
+          for (const prNumber of prNumbers) {
             for (const wi of workItems) {
               if (wi.number === prNumber) reverseMatches.add(wi.work_item_id);
             }
@@ -601,6 +844,7 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
         }
 
         if (!ambiguous && overlapCount.size > 0) {
+          await awaitDbWriteGate();
           deleteLink.run(session.session_id);
           for (const [wid, count] of overlapCount) {
             insertLink.run(session.session_id, wid, shaOverlapConfidence(count), "SHA_OVERLAP");
@@ -613,6 +857,20 @@ export async function linkSessions(db: Db, client: GithubClient): Promise<void> 
 
     // 5. UNLINKED — implicit; do nothing (no row).
   }
+  await awaitDbWriteGate();
+  for (const [repoKey, memo] of commitPullsByRepo) {
+    if (!memo.dirty) continue;
+    upsertConfig.run(
+      `gh_commit_pulls:${repoKey}`,
+      JSON.stringify({
+        watermark: memo.watermark,
+        pulls: memo.pulls,
+        unknown: [...memo.unknown],
+      } satisfies PersistedCommitPulls),
+      new Date().toISOString(),
+    );
+  }
+  return summary;
 }
 
 // ---------------------------------------------------------------------------

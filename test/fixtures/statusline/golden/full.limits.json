@@ -1,0 +1,12 @@
+{
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 23.4,
+      "resets_at": "now+6510"
+    },
+    "seven_day": {
+      "used_percentage": 81,
+      "resets_at": "now+214200"
+    }
+  }
+}

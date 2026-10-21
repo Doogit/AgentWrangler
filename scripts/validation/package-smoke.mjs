@@ -25,7 +25,7 @@ Object.assign(env, {
   npm_config_registry: "https://registry.npmjs.org/",
   npm_config_audit: "false", npm_config_fund: "false",
   AW_NO_OPEN: "1", AW_DB_PATH: path.join(root, "smoke.sqlite"),
-  AW_SCAN_ROOT: path.join(root, "empty-scan"), AW_PORT: "0",
+  AW_SCAN_ROOT: path.join(root, "empty-scan"), AW_PORT: "0", AW_USAGE_CLI: "off",
 });
 await fs.mkdir(env.AW_SCAN_ROOT);
 await fs.writeFile(env.npm_config_userconfig, "");
@@ -57,12 +57,12 @@ try {
   // output captured so stdout remains the pack JSON on every supported runner.
   const [pack] = JSON.parse(await npm(["pack", "--ignore-scripts", "--foreground-scripts=false", "--json", "--pack-destination", root], repo));
   const files = new Set(pack.files.map((file) => file.path));
-  for (const required of ["dist/cli/agentwrangler.js", "dist/daemon/index.js", "dist/ui/index.html", "README.md", "LICENSE"]) {
+  for (const required of ["dist/cli/agentwrangler.js", "dist/daemon/index.js", "dist/ui/index.html", "README.md", "LICENSE", "CHANGELOG.md"]) {
     assert(files.has(required), `tarball missing ${required}`);
   }
   assert([...files].some((file) => file.startsWith("dist/db/migrations/")), "migrations missing");
   assert([...files].some((file) => file.startsWith("dist/ui/assets/") && file.endsWith(".js")), "UI chunks missing");
-  assert([...files].every((file) => file === "package.json" || file === "README.md" || file === "LICENSE" || file.startsWith("dist/")), "unexpected package content");
+  assert([...files].every((file) => file === "package.json" || file === "README.md" || file === "LICENSE" || file === "CHANGELOG.md" || file.startsWith("dist/")), "unexpected package content");
   const tarball = path.join(root, pack.filename);
   assert(path.dirname(tarball) === root, "pack filename escaped temporary root");
   const sha256 = createHash("sha256").update(await fs.readFile(tarball)).digest("hex");

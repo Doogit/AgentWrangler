@@ -1,0 +1,9 @@
+{
+  "id": "D14",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "later main turns before user prompt",
+    "expect": "silent"
+  }
+}

@@ -172,6 +172,8 @@ describe("approval proposal discovery", () => {
     const externalRoot = path.join(root, "outside-sentinel");
     const externalCheckout = path.join(externalRoot, "nested-private-repo");
     fs.mkdirSync(queued);
+    // Discovery walks from canonical search roots; tmpdir may sit under a symlink (macOS /var).
+    const canonicalQueued = fs.realpathSync.native(queued);
     fs.mkdirSync(path.join(externalCheckout, ".git"), { recursive: true });
     fs.writeFileSync(
       path.join(externalCheckout, ".git", "config"),
@@ -187,7 +189,7 @@ describe("approval proposal discovery", () => {
       repositoryRoot,
       testHooks: {
         beforeVisitDirectory(queuedPath) {
-          if (queuedPath !== queued) return;
+          if (queuedPath !== canonicalQueued) return;
           fs.rmdirSync(queued);
           fs.symlinkSync(externalRoot, queued, process.platform === "win32" ? "junction" : "dir");
           swapped = true;

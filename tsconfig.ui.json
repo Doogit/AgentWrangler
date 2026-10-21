@@ -17,6 +17,7 @@
   "include": [
     "src/ui/**/*",
     "test/ui/**/*",
+    "src/shared/**/*",
     "src/query/envelope.ts",
     "src/query/api/overview.ts",
     "src/query/api/settings.ts",

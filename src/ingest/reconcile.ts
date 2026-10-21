@@ -48,7 +48,37 @@ export function reconcileSessions(
       "SELECT session_id, last_turn_at, turn_count FROM sessions WHERE state != 'RECONCILED' OR last_turn_at >= :cutoff",
     )
     .all({ cutoff: cutoffIso }) as SessionRow[];
+  reconcileRows(db, sessions, cutoffIso, opts);
+}
 
+/**
+ * P2-U4: reconcile exactly these sessions (one transaction). The slice loop calls it
+ * with small batches of the sessions a slice touched, so no single transaction
+ * covers the whole corpus.
+ */
+export function reconcileSessionsById(
+  db: Db,
+  sessionIds: readonly string[],
+  cutoffIso: string,
+  opts: ReconcileOptions = DEFAULT_RECONCILE_OPTIONS,
+): void {
+  const get = db.prepare(
+    "SELECT session_id, last_turn_at, turn_count FROM sessions WHERE session_id = ?",
+  );
+  const sessions: SessionRow[] = [];
+  for (const id of sessionIds) {
+    const row = get.get(id) as SessionRow | undefined;
+    if (row !== undefined) sessions.push(row);
+  }
+  reconcileRows(db, sessions, cutoffIso, opts);
+}
+
+function reconcileRows(
+  db: Db,
+  sessions: readonly SessionRow[],
+  cutoffIso: string,
+  opts: ReconcileOptions,
+): void {
   const setProvisional = db.prepare("UPDATE turns SET provisional = ? WHERE session_id = ?");
   const setSession = db.prepare(
     "UPDATE sessions SET state = ?, hygiene_flags = ? WHERE session_id = ?",

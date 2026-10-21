@@ -40,6 +40,18 @@ import {
   projectPRPage,
 } from "./client.js";
 import type { TokenResult } from "./credential.js";
+import {
+  type GhPRPage,
+  type GhPRRead,
+  type PRPageRequest,
+  PR_PAGE_MAX_STDOUT_BYTES,
+  PR_PAGE_RETRY_SIZE,
+  PR_PAGE_SIZE,
+  buildPRPageQuery,
+  buildPRReadsQuery,
+  projectGraphqlPRPage,
+  projectPRReads,
+} from "./pr-page.js";
 
 // ---------------------------------------------------------------------------
 // Child-process runner (injectable for tests)
@@ -88,7 +100,11 @@ export type GhSpawn = typeof spawn;
 export function createGhRunner(spawnFn: GhSpawn = spawn): GhRunner {
   return (args, opts) =>
     new Promise((resolve) => {
-      const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: "1" };
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        GH_PROMPT_DISABLED: "1",
+        GH_HOST: "github.com",
+      };
       if (opts.token !== null) env.GH_TOKEN = opts.token;
 
       let child: ReturnType<typeof spawn>;
@@ -196,6 +212,8 @@ export class GhCliClient implements GithubClient {
   }
 
   private errReason(prefix: string, r: GhRunResult): string {
+    if (r.failure === "timeout") return `${prefix}:timeout`;
+    if (r.failure === "stdout-limit") return `${prefix}:malformed`;
     if (r.httpStatus !== undefined) return `${prefix}:${r.httpStatus}`;
     if (/ENOENT|not recognized|no such file/i.test(r.stderr)) return `${prefix}:gh-not-found`;
     return `${prefix}:${r.code ?? "spawn"}`;
@@ -203,6 +221,25 @@ export class GhCliClient implements GithubClient {
 
   private run(args: string[], input?: string): Promise<GhRunResult> {
     return this.runner(args, { token: this.token, ...(input !== undefined ? { input } : {}) });
+  }
+
+  /** Explicit, bounded repository-access probe using the same daemon token and gh transport. */
+  async testRepositoryAccess(owner: string, repo: string): Promise<GhResult<"accessible">> {
+    if (!this.enabled) return this.disabledResult();
+    const r = await this.runner(["api", `repos/${owner}/${repo}/pulls?per_page=1`], {
+      token: this.token,
+      timeoutMs: 20_000,
+      maxStdoutBytes: 512 * 1024,
+    });
+    if (!r.ok) return { ok: false, reason: this.errReason("github-api-error", r) };
+    try {
+      const value: unknown = JSON.parse(r.stdout);
+      const projected = projectPRPage(value);
+      if (!projected.ok) return { ok: false, reason: "github-pr-payload-invalid" };
+      return { ok: true, data: "accessible" };
+    } catch {
+      return { ok: false, reason: "github-pr-payload-invalid" };
+    }
   }
 
   async listPRs(owner: string, repo: string, since?: string): Promise<GhResult<GhPR[]>> {
@@ -221,6 +258,95 @@ export class GhCliClient implements GithubClient {
     } catch {
       return { ok: false, reason: "github-pr-payload-invalid" };
     }
+  }
+
+  /**
+   * One batched GraphQL PR page (P0-U13 S3). `gh` exits 1 when the body carries
+   * field-level errors (e.g. FORBIDDEN on statusCheckRollup) while stdout still
+   * holds the full {data, errors} JSON, so stdout is parsed even when !ok. A
+   * page that overflows the stdout cap is retried once at the smaller size.
+   */
+  async listPRPage(
+    owner: string,
+    repo: string,
+    request: PRPageRequest,
+  ): Promise<GhResult<GhPRPage>> {
+    if (!this.enabled) return this.disabledResult();
+    const read = (n: number, numbers: readonly number[]) =>
+      this.runner(["api", "graphql", "--input", "-"], {
+        token: this.token,
+        input: JSON.stringify({
+          query: buildPRPageQuery(numbers),
+          variables: { owner, repo, n, cursor: request.cursor },
+        }),
+        maxStdoutBytes: PR_PAGE_MAX_STDOUT_BYTES,
+      });
+    let r = await read(PR_PAGE_SIZE, request.numbers);
+    // The retry sheds the by-number aliases too: they stay stored as unsettled
+    // and are asked for again on the next pass.
+    if (r.failure === "stdout-limit") r = await read(PR_PAGE_RETRY_SIZE, []);
+    if (r.failure !== undefined)
+      return { ok: false, reason: this.errReason("github-graphql-error", r) };
+    let body: unknown;
+    try {
+      body = JSON.parse(r.stdout);
+    } catch {
+      return {
+        ok: false,
+        reason: r.ok ? "github-pr-payload-invalid" : this.errReason("github-graphql-error", r),
+      };
+    }
+    const projected = projectGraphqlPRPage(body);
+    // A failed exit whose stdout is not a page (e.g. 401 {"message":...}) is a
+    // transport failure, reported like every other gh read.
+    if (!projected.ok && !r.ok && projected.reason === "github-pr-payload-invalid") {
+      return { ok: false, reason: this.errReason("github-graphql-error", r) };
+    }
+    return projected;
+  }
+
+  /**
+   * P0-U13 S3b: body + first 100 commits for several PRs in one aliased GraphQL
+   * call (same transport and stdout cap as the page read). A call that overflows
+   * the stdout cap is split in half and each half retried; PRs the response does
+   * not carry (deleted, unreadable) are absent from the map.
+   */
+  async listPRReads(
+    owner: string,
+    repo: string,
+    numbers: readonly number[],
+  ): Promise<GhResult<Map<number, GhPRRead>>> {
+    if (!this.enabled) return this.disabledResult();
+    const r = await this.runner(["api", "graphql", "--input", "-"], {
+      token: this.token,
+      input: JSON.stringify({ query: buildPRReadsQuery(numbers), variables: { owner, repo } }),
+      maxStdoutBytes: PR_PAGE_MAX_STDOUT_BYTES,
+    });
+    if (r.failure === "stdout-limit" && numbers.length > 1) {
+      const mid = Math.ceil(numbers.length / 2);
+      const first = await this.listPRReads(owner, repo, numbers.slice(0, mid));
+      const second = await this.listPRReads(owner, repo, numbers.slice(mid));
+      if (!first.ok) return second.ok ? second : first;
+      if (!second.ok) return first;
+      return { ok: true, data: new Map([...first.data, ...second.data]) };
+    }
+    if (r.failure !== undefined) {
+      return { ok: false, reason: this.errReason("github-graphql-error", r) };
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(r.stdout);
+    } catch {
+      return {
+        ok: false,
+        reason: r.ok ? "github-pr-payload-invalid" : this.errReason("github-graphql-error", r),
+      };
+    }
+    const projected = projectPRReads(body);
+    if (!projected.ok && !r.ok && projected.reason === "github-pr-payload-invalid") {
+      return { ok: false, reason: this.errReason("github-graphql-error", r) };
+    }
+    return projected;
   }
 
   async getPRHeadKey(

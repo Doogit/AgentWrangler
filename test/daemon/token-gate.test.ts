@@ -18,6 +18,7 @@ import type Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "../../src/daemon/http.js";
 import { resetQueryDb, setQueryDb } from "../../src/query/db-context.js";
+import { seedValidatedRecommendation } from "../fixtures/recommendations.js";
 import { createInMemoryFixtureDb } from "../fixtures/seed.js";
 
 // ---------------------------------------------------------------------------
@@ -66,17 +67,6 @@ function makeRequest(
 const FIXED_TOKEN = "aaaabbbb-cccc-dddd-eeee-ffffffffffff";
 
 const REC_ID = "rec-token-gate-01";
-const PROPOSED_REC_SQL = `
-  INSERT INTO recommendations
-    (rec_id, provenance, detector_id, category, scope_workspace_id, lever,
-     modeled_savings_u_per_wk, modeled_formula_json, evidence_json,
-     target_metric, state, created_at, dismissed_until)
-  VALUES
-    (?, 'RULE', 'D2', 'CONTEXT', NULL, 'Test lever', 1000,
-     '{"model":"X","inputs":{}}', '{"count":3}',
-     'avg_context_per_turn', 'PROPOSED', datetime('now'), NULL)
-`;
-
 let server: http.Server;
 let port: number;
 let db: Database.Database;
@@ -105,7 +95,11 @@ beforeEach(() => {
   db.prepare("DELETE FROM recommendation_effects WHERE rec_id=?").run(REC_ID);
   db.prepare("DELETE FROM effect_cycles WHERE rec_id=?").run(REC_ID);
   db.prepare("DELETE FROM recommendations WHERE rec_id=?").run(REC_ID);
-  db.prepare(PROPOSED_REC_SQL).run(REC_ID);
+  seedValidatedRecommendation(db, {
+    recId: REC_ID,
+    templateId: "D2_LONG_FULL_CONTEXT",
+    scope: null,
+  });
 });
 
 afterEach(() => {
@@ -349,6 +343,38 @@ describe("W3-A apply routes — token gate", () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(401);
+  });
+
+  // D8: one-click apply is off for 0.2.0 — the API refuses it even with a valid token.
+  const authed = (path: string, body: unknown) =>
+    makeRequest(port, {
+      method: "POST",
+      path,
+      headers: {
+        host: `127.0.0.1:${port}`,
+        "Sec-Fetch-Site": "same-origin",
+        "Content-Type": "application/json",
+        "X-AgentWrangler-Token": FIXED_TOKEN,
+      },
+      body: JSON.stringify(body),
+    });
+
+  it("D8: POST /api/recommendations/:id/apply with a valid token is refused (403) and starts no job", async () => {
+    const before = (db.prepare("SELECT COUNT(*) AS n FROM apply_jobs").get() as { n: number }).n;
+    const res = await authed(`/api/recommendations/${REC_ID}/apply`, { workspace_cwd: "C:\\fake" });
+    expect(res.status).toBe(403);
+    const body = JSON.parse(res.body) as { code?: string; error?: string };
+    expect(body.code).toBe("APPLY_DISABLED");
+    expect(body.error).toMatch(/One-click apply is off in 0\.2\.0/);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM apply_jobs").get() as { n: number }).n).toBe(
+      before,
+    );
+  });
+
+  it("D8: POST /api/recommendations/jobs/:id/confirm with a valid token is refused (403)", async () => {
+    const res = await authed("/api/recommendations/jobs/job-token-test/confirm", {});
+    expect(res.status).toBe(403);
+    expect((JSON.parse(res.body) as { code?: string }).code).toBe("APPLY_DISABLED");
   });
 
   it("POST /api/recommendations/jobs/:id/rollback without token returns 401 before handler validation", async () => {

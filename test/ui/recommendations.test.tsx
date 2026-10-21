@@ -11,6 +11,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../../src/ui/api/client";
+import * as feedbackClient from "../../src/ui/api/feedback-client";
 import {
   mockEfficiencyHeadroom,
   mockLedger,
@@ -20,6 +21,21 @@ import {
 import RecommendationsPage from "../../src/ui/recommendations/RecommendationsPage";
 
 vi.mock("../../src/ui/api/client");
+vi.mock("../../src/ui/api/feedback-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof feedbackClient>();
+  return {
+    ...actual,
+    listFeedback: vi.fn(),
+    setFeedback: vi.fn(),
+    undoFeedback: vi.fn(),
+    deleteFeedback: vi.fn(),
+    getGoal: vi.fn(),
+    setGoal: vi.fn(),
+    resetGoal: vi.fn(),
+  };
+});
+
+const envelope = <T,>(data: T) => ({ data, meta: {} }) as never;
 
 afterEach(() => cleanup());
 // W4: RecommendationsPage now renders <ImpactLedger />, which calls
@@ -31,6 +47,19 @@ beforeEach(() => {
   vi.mocked(client.fetchLedger).mockResolvedValue(mockLedger());
   vi.mocked(client.fetchPractices).mockResolvedValue(mockPractices());
   vi.mocked(client.fetchEfficiencyHeadroom).mockResolvedValue(mockEfficiencyHeadroom());
+  vi.mocked(feedbackClient.listFeedback).mockResolvedValue(envelope([]));
+  vi.mocked(feedbackClient.setFeedback).mockResolvedValue(envelope({}));
+  vi.mocked(feedbackClient.undoFeedback).mockResolvedValue(envelope({}));
+  vi.mocked(feedbackClient.deleteFeedback).mockResolvedValue(envelope({}));
+  vi.mocked(feedbackClient.getGoal).mockResolvedValue(
+    envelope({ scope_key: "__global__", goal: "PRESERVE_QUALITY" }),
+  );
+  vi.mocked(feedbackClient.setGoal).mockResolvedValue(
+    envelope({ scope_key: "__global__", goal: "REDUCE_RESOURCE_USE" }),
+  );
+  vi.mocked(feedbackClient.resetGoal).mockResolvedValue(
+    envelope({ scope_key: "__global__", goal: "PRESERVE_QUALITY" }),
+  );
 });
 
 describe("RecommendationsPage — states", () => {
@@ -45,19 +74,73 @@ describe("RecommendationsPage — states", () => {
     vi.mocked(client.fetchRecommendations).mockRejectedValue(new Error("ECONNREFUSED"));
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => {
-      expect(container.querySelector(".banner-error")).not.toBeNull();
+      expect(container.querySelector(".async-error-state")).not.toBeNull();
+    });
+    expect(container.textContent ?? "").not.toContain("ECONNREFUSED");
+  });
+
+  it("retries only the recommendations collection", async () => {
+    vi.mocked(client.fetchRecommendations)
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValue(mockRecommendations());
+    render(<RecommendationsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry recommendations" }));
+    await waitFor(() => expect(client.fetchRecommendations).toHaveBeenCalledTimes(2));
+  });
+
+  it("maps known ranking warnings and keeps their codes in collapsed technical details", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations data");
+    response.data.rank_warnings = [{ code: "PACKET_EXPIRED", detail: "stale evidence" }];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    const { container } = render(<RecommendationsPage />);
+
+    await waitFor(() => expect(container.querySelector(".recs-rank-warning")).not.toBeNull());
+    const warning = container.querySelector(".recs-rank-warning");
+    expect(warning?.firstChild?.textContent).toContain("Some evidence is no longer current");
+    const details = warning?.querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain("PACKET_EXPIRED");
+    expect(warning?.textContent).not.toContain("stale evidence");
+  });
+
+  it("fails closed for an unknown ranking warning code", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations data");
+    response.data.rank_warnings = [{ code: "UNRECOGNIZED_WARNING" as never, detail: "" }];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    const { container } = render(<RecommendationsPage />);
+
+    await waitFor(() => expect(container.querySelector(".recs-rank-warning")).not.toBeNull());
+    const warning = container.querySelector(".recs-rank-warning");
+    expect(warning?.firstChild?.textContent).toContain("could not be ranked right now");
+    expect(warning?.querySelector("details")?.textContent).toContain("UNRECOGNIZED_WARNING");
+  });
+
+  it("labels recommendations that need concrete steps", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected data");
+
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+    render(<RecommendationsPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("needs steps").length).toBeGreaterThan(0);
     });
   });
 
   it("renders a decision-first detail view with developer diagnostics closed by default", async () => {
-    vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected data");
+
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
     const { container } = render(<RecommendationsPage />);
 
     // Wait for the card to render — modeled savings are not a collapsed headline anchor.
     await waitFor(() => {
       const headline = container.querySelector(".rec-headline-text");
       expect(headline).not.toBeNull();
-      expect(headline?.textContent ?? "").toContain("Directional — no modeled savings");
+      expect(headline?.textContent ?? "").toContain("Use /clear between unrelated tasks");
     });
 
     // Collapsed directional cards retain only the confidence tier and claim chip.
@@ -83,7 +166,9 @@ describe("RecommendationsPage — states", () => {
     expect(container.querySelector(".rec-modeled")?.textContent ?? "").not.toMatch(/\$\d/);
 
     const text = container.textContent ?? "";
-    expect(text).toContain("Why this is ranked here");
+    expect(container.querySelector(".rec-details")?.textContent ?? "").not.toContain(
+      "Why this is ranked here",
+    );
     expect(text).toContain("What we observed");
     expect(text).toContain("3 long, high-context sessions");
     expect(text).toContain("Possible reduction");
@@ -102,16 +187,21 @@ describe("RecommendationsPage — states", () => {
     const detailsId = expandBtn.getAttribute("aria-controls");
     expect(detailsId).not.toBeNull();
     expect(container.ownerDocument.getElementById(detailsId ?? "")).not.toBeNull();
-    expect(container.querySelectorAll(".rec-details h4.rec-section-label")).toHaveLength(7);
+    expect(container.querySelectorAll(".rec-details h4.rec-section-label")).toHaveLength(6);
   });
 
-  it("shows confidence tiers and unvalidated assumption notes per detector", async () => {
+  it("shows no confidence tiers and shows unvalidated assumption notes per detector", async () => {
     const response = mockRecommendations();
     if (response.data === null) throw new Error("expected recommendations fixture data");
     const base = response.data.active[0];
     if (!base) throw new Error("expected recommendation fixture data");
 
-    const d2 = { ...base, rec_id: "rec-D2-tier", detector_id: "D2" };
+    const d2 = {
+      ...base,
+      rec_id: "rec-D2-tier",
+      detector_id: "D2",
+      confidence_tier: "VERIFIED" as const,
+    };
     const d8 = {
       ...base,
       rec_id: "rec-D8-tier",
@@ -119,6 +209,7 @@ describe("RecommendationsPage — states", () => {
       category: "CACHE",
       title: "D8 cache rewrite",
       evidence: { ...base.evidence, avoidance_fraction: 0.25 },
+      confidence_tier: "ESTIMATED" as const,
     };
     const d1 = {
       ...base,
@@ -164,43 +255,15 @@ describe("RecommendationsPage — states", () => {
     response.data.active = [d2, d8, d1, d4, d5, d9];
     response.data.active_groups = [];
     response.data.limit_warnings = [];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => {
-      expect(container.querySelectorAll(".rec-confidence-tier")).toHaveLength(6);
+      expect(container.querySelectorAll(".rec-category-chip").length).toBeGreaterThanOrEqual(6);
     });
 
-    const tiers = [...container.querySelectorAll<HTMLElement>(".rec-confidence-tier")];
-    expect(tiers.map((tier) => tier.textContent)).toEqual(
-      expect.arrayContaining(["MODELED SAVINGS", "ADVISORY", "WARNING", "DIRECTIONAL"]),
-    );
-    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--modeled"))).toBe(
-      true,
-    );
-    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--advisory"))).toBe(
-      true,
-    );
-    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--warning"))).toBe(
-      true,
-    );
-    expect(tiers.some((tier) => tier.className.includes("rec-confidence-tier--directional"))).toBe(
-      true,
-    );
-    expect(
-      tiers.some(
-        (tier) =>
-          tier.title === "Possible savings calculated from assumptions that have not been verified",
-      ),
-    ).toBe(true);
-    expect(tiers.some((tier) => tier.title === "Conditional advice, no dollar estimate")).toBe(
-      true,
-    );
-    expect(
-      tiers.some(
-        (tier) => tier.title === "Warning about how quickly your remaining allowance is being used",
-      ),
-    ).toBe(true);
+    expect(container.querySelectorAll(".rec-confidence-tier")).toHaveLength(0);
 
     for (const expandBtn of container.querySelectorAll<HTMLButtonElement>(
       "button.rec-expand-btn[aria-expanded='false']",
@@ -210,13 +273,16 @@ describe("RecommendationsPage — states", () => {
 
     const notes = container.textContent ?? "";
     expect(notes).toContain("Unvalidated assumption:");
-    expect(notes).toContain("33%");
+    // R6-06: D2 uses a one-decimal percent so it matches the $ math elsewhere on the card.
+    expect(notes).toContain("33.0%");
     expect(notes).toContain("25%");
     expect(notes).toContain("80K tokens for CLAUDE.md");
     expect(notes).toContain("20%");
   });
 
-  it("renders one top-level card for a detector group and keeps its member recommendations", async () => {
+  // UIP-7: the single-card + collapsed-members queue was replaced by a spotlight
+  // (rec #1) plus each remaining group rendered as its own visible section.
+  it("renders each remaining group as a visible section keeping its member recommendations", async () => {
     const response = mockRecommendations();
     if (response.data === null) throw new Error("expected recommendations fixture data");
     const first = response.data.active[0];
@@ -240,14 +306,16 @@ describe("RecommendationsPage — states", () => {
 
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => {
-      expect(container.querySelectorAll(".rec-group-card")).toHaveLength(1);
+      expect(container.querySelector(".recs-group-section")).not.toBeNull();
     });
 
-    expect(
-      container.querySelector("[data-detector-id='D2'] .rec-group-count")?.textContent,
-    ).toContain("1 recommendation");
+    // first rec is promoted to the spotlight; the second stays visible in its
+    // group section (not hidden behind a single collapsed queue).
+    expect(container.querySelector(".recs-group-count")?.textContent).toContain("(1)");
     expect(container.textContent ?? "").toContain("Another session-hygiene recommendation");
-    expect(container.querySelectorAll(".rec-session-row")).toHaveLength(1);
+    // D-B: no group header is a modeled-$ value or summed total.
+    const head = container.querySelector(".recs-group-head")?.textContent ?? "";
+    expect(head).not.toContain("$");
   });
 
   it("links grouped affected sessions to their session detail routes", async () => {
@@ -262,6 +330,7 @@ describe("RecommendationsPage — states", () => {
     };
     response.data.active = [recommendation];
     response.data.active_groups = [{ ...firstGroup, recs: [recommendation], session_count: 2 }];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -274,7 +343,10 @@ describe("RecommendationsPage — states", () => {
     ).toEqual(["#/sessions/session%2Fone", "#/sessions/session%20two"]);
   });
 
-  it("keeps minor items collapsed until the user expands the group", async () => {
+  // UIP-7: minor items are no longer a special second-level collapse with a summed
+  // $ header. They render as an ordinary group section (spotlight + group) with no
+  // modeled-$ total in the header (D-B).
+  it("renders minor items as an ordinary group section without a summed $ header", async () => {
     const response = mockRecommendations();
     if (response.data === null) throw new Error("expected recommendations fixture data");
     const first = response.data.active[0];
@@ -307,27 +379,20 @@ describe("RecommendationsPage — states", () => {
 
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => {
-      expect(container.querySelector("details.rec-minor-items")).not.toBeNull();
+      expect(container.querySelector(".recs-group-section")).not.toBeNull();
     });
 
-    const minorDetails = container.querySelector<HTMLDetailsElement>("details.rec-minor-items");
-    if (!minorDetails) throw new Error("minor-items details not found");
-    expect(minorDetails.open).toBe(false);
-    expect(minorDetails.querySelector("summary")?.textContent).toContain("Show 1 minor item");
-
-    const summary = minorDetails.querySelector("summary");
-    if (!summary) throw new Error("minor-items summary not found");
-    fireEvent.click(summary);
-    expect(minorDetails.open).toBe(true);
+    // Both minor items are visible (one promoted to the spotlight, one in the
+    // group section) — not hidden behind the old second-level collapse.
     expect(container.textContent).toContain("Small memory trim");
-    expect(minorDetails.textContent).toContain("Small cache cleanup");
-    const remainingSummary = container.querySelector(".rec-minor-items-card .rec-group-summary");
-    expect(remainingSummary?.textContent).toContain("1 affected session");
-    expect(remainingSummary?.textContent).toContain("$0.75/wk modeled across this group");
-    expect(remainingSummary?.textContent).not.toContain("$1.25");
-    expect(container.querySelector(".rec-minor-items-card .rec-title")?.textContent).toBe(
-      "Minor items",
-    );
+    expect(container.textContent).toContain("Small cache cleanup");
+    // The old ad-hoc minor-items collapse is gone.
+    expect(container.querySelector("details.rec-minor-items")).toBeNull();
+    // D-B: no group header carries a modeled-$ value or summed total.
+    const heads = [...container.querySelectorAll(".recs-group-head")]
+      .map((h) => h.textContent ?? "")
+      .join(" ");
+    expect(heads).not.toContain("$");
   });
 
   it("uses detector group labels for adopted and dismissed badges", async () => {
@@ -384,6 +449,7 @@ describe("RecommendationsPage — states", () => {
         },
       },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -398,7 +464,9 @@ describe("RecommendationsPage — states", () => {
     fireEvent.click(expandBtn);
 
     const text = container.querySelector(".rec-details")?.textContent ?? "";
-    expect(text).toContain("Repeated attempts do not prove waste");
+    // R6-13: the D7 loops caveat no longer claims "no savings estimate is shown" under a
+    // rendered $ figure; it states the 50% avoidability assumption instead.
+    expect(text).toContain("it assumes 50% of the repeat turns were avoidable");
     expect(text).not.toContain("Modeled projection");
   });
 
@@ -436,6 +504,7 @@ describe("RecommendationsPage — states", () => {
         },
       },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -480,6 +549,7 @@ describe("RecommendationsPage — states", () => {
         },
       },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -504,8 +574,51 @@ describe("RecommendationsPage — states", () => {
     );
   });
 
+  it("labels a U7 D10 row's catalog_target_tokens as the 5% context share, not a target", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations fixture data");
+    const base = response.data.active[0];
+    if (!base) throw new Error("expected an active recommendation fixture");
+    response.data.active = [
+      {
+        ...base,
+        rec_id: "rec-D10-global-u7-mock",
+        detector_id: "D10",
+        category: "TOOLING",
+        evidence: {
+          catalog_tokens: 18_000,
+          catalog_target_tokens: 3_000,
+          delta_context_tokens: 6_000,
+          removable_tokens: 6_000,
+          mean_context_tokens: 60_000,
+        },
+      },
+    ];
+
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+
+    const { container } = render(<RecommendationsPage />);
+    await waitFor(() => expect(container.querySelector(".rec-card")).not.toBeNull());
+    const expandBtn = container.querySelector<HTMLButtonElement>(
+      "button.rec-expand-btn[aria-expanded='false']",
+    );
+    if (!expandBtn) throw new Error("expand button not found");
+    fireEvent.click(expandBtn);
+
+    const text = container.querySelector(".rec-details")?.textContent ?? "";
+    expect(text).toContain(
+      "estimated 18K catalog tokens; about 6K are in items with no recorded use this week (5% of the mean context per turn is 3K).",
+    );
+    expect(text).toContain("catalog estimate (18K now) should fall by about 6K");
+    expect(text).not.toContain("3K target");
+    expect(text).not.toContain("toward 3K");
+  });
+
   it("surfaces D2 raw-context, cap-weighted, and cache-read exposure facts", async () => {
-    vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected data");
+
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => expect(container.querySelector(".rec-card")).not.toBeNull());
@@ -541,6 +654,7 @@ describe("RecommendationsPage — states", () => {
         },
       },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -633,6 +747,7 @@ describe("RecommendationsPage — states", () => {
         },
       },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -732,6 +847,7 @@ describe("RecommendationsPage — states", () => {
         },
       },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -778,6 +894,7 @@ describe("RecommendationsPage — states", () => {
       },
       { ...base, rec_id: "rec-D10-missing-evidence", detector_id: "D10", evidence: {} },
     ];
+
     vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
 
     const { container } = render(<RecommendationsPage />);
@@ -821,28 +938,168 @@ describe("RecommendationsPage — states", () => {
     fireEvent.click(expandBtn);
 
     const text = container.querySelector(".rec-details")?.textContent ?? "";
-    expect(text).toContain("This detector crossed its configured threshold");
+    expect(text).toContain("Review the affected sessions and measured trigger facts below.");
     expect(text).toContain("Modeled projection");
     expect(text).toContain("Re-run the detector after 7 days");
   });
 
-  it("explains that cross-family rank is not a descending dollar sort", async () => {
+  it("presents ranked list above decisions and decisions demoted to the bottom", async () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
     const { container } = render(<RecommendationsPage />);
 
+    // B5: "Ranked by weekly impact" heading is the primary section now.
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "How suggestions are ordered" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Ranked by weekly impact" })).toBeTruthy();
     });
 
     const text = container.textContent ?? "";
-    fireEvent.click(screen.getByRole("button", { name: "How suggestions are ordered" }));
-    expect(screen.getByRole("tooltip").textContent).toContain("fixed category order");
-    expect(screen.getByRole("tooltip").textContent).toContain(
-      "estimated savings sorts within each category",
-    );
+    // Detector details section is present with the simplified label.
+    expect(screen.getByRole("heading", { name: "Detector details and filtering" })).toBeTruthy();
+    // InfoTip on the ranked list explains the new ordering.
+    fireEvent.click(screen.getByRole("button", { name: "How this list is ranked" }));
+    expect(screen.getByRole("tooltip").textContent).toContain("highest first");
+    for (const card of container.querySelectorAll(".rec-card")) {
+      expect(card.querySelector(".rec-rank-badge")).toBeNull();
+      expect(card.textContent ?? "").not.toContain("CHECK FIRST");
+      expect(card.textContent ?? "").not.toContain("Why this is ranked here");
+    }
+    expect(text).not.toContain("Ranked decisions");
     expect(text).not.toContain("ranked by impact, highest first");
     expect(text).not.toContain("leverage class");
     expect(text).not.toContain("detector families follow");
+  });
+
+  it("shows the active recommendations in the ranked list and keeps D5 in its warning strip", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations fixture data");
+    const base = response.data.active[0];
+    if (!base) throw new Error("expected an active recommendation fixture");
+
+    const d2First = {
+      ...base,
+      rec_id: "rec-queue-d2-first",
+      detector_id: "D2",
+      title: "D2 first",
+    };
+    const d1Middle = {
+      ...base,
+      rec_id: "rec-queue-d1-middle",
+      detector_id: "D1",
+      title: "D1 middle",
+    };
+    const d2Last = {
+      ...base,
+      rec_id: "rec-queue-d2-last",
+      detector_id: "D2",
+      title: "D2 last",
+    };
+    const d5Warning = {
+      ...base,
+      rec_id: "rec-queue-d5-warning",
+      detector_id: "D5",
+      category: "LIMIT",
+      title: "D5 warning",
+      modeled_savings_u_per_wk: null,
+      modeled_formula: { ...base.modeled_formula, kind: "WARNING" as const, inputs: {} },
+      evidence: {},
+    };
+    response.data.active = [d2First, d1Middle, d2Last];
+    response.data.active_groups = [
+      {
+        detector_id: "D2",
+        label: "Session hygiene",
+        recs: [d2First, d2Last],
+        session_count: 0,
+        total_savings_u_per_wk: 0,
+      },
+      {
+        detector_id: "D1",
+        label: "CLAUDE.md / memory",
+        recs: [d1Middle],
+        session_count: 0,
+        total_savings_u_per_wk: 0,
+      },
+    ];
+    response.data.limit_warnings = [d5Warning];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+
+    render(<RecommendationsPage />);
+
+    const queue = await screen.findByRole("list", { name: "Ranked by weekly impact" });
+    expect(
+      [...queue.querySelectorAll(".rec-card .rec-title")].map((title) => title.textContent),
+    ).toEqual(["D2 first", "D2 last", "D1 middle"]);
+    expect(document.querySelector(".limit-warning-strip")?.textContent).toContain(d5Warning.lever);
+  });
+
+  it("describes the D5 forecast in the limit strip with readable times and no Julian day", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations fixture data");
+    const base = response.data.active[0];
+    if (!base) throw new Error("expected an active recommendation fixture");
+    response.data.limit_warnings = [
+      {
+        ...base,
+        rec_id: "rec-d5-forecast",
+        detector_id: "D5",
+        category: "LIMIT",
+        modeled_savings_u_per_wk: null,
+        evidence: {
+          forecast_state: "WARNING",
+          used_pct: 78.4,
+          projected_pct: 112,
+          resets_at: "2026-09-25T09:00:00.000Z",
+          projected_limit_hit_at: "2026-09-24T15:00:00.000Z",
+          required_cut_pct: 21,
+          projected_exhaustion_jd: 2461303.1,
+        },
+      },
+    ];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+
+    render(<RecommendationsPage />);
+
+    await screen.findByRole("heading", { name: "Ranked by weekly impact" });
+    const text = document.querySelector(".limit-warning-strip")?.textContent ?? "";
+    expect(text).toContain("78% of the weekly limit is used");
+    expect(text).toContain("At the pace of the last day, about 112% by the reset on");
+    expect(text).toMatch(/reset on \w{3}, Sep \d+, \d+:\d{2} (AM|PM)/);
+    expect(text).toContain("the limit would be reached about");
+    expect(text).toContain("Cutting use by about 21%");
+    expect(text).not.toContain("2461303");
+    fireEvent.click(screen.getByRole("button", { name: "How the limit warning is worked out" }));
+    expect(screen.getByRole("tooltip").textContent).toContain("hours left until the reset");
+  });
+
+  it("names a since-reset pace when the week is under a day old", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations fixture data");
+    const base = response.data.active[0];
+    if (!base) throw new Error("expected an active recommendation fixture");
+    response.data.limit_warnings = [
+      {
+        ...base,
+        rec_id: "rec-d5-young-week",
+        detector_id: "D5",
+        category: "LIMIT",
+        modeled_savings_u_per_wk: null,
+        evidence: {
+          forecast_state: "WARNING",
+          used_pct: 20,
+          projected_pct: 140,
+          pace_window_hours: 8,
+          resets_at: "2026-09-25T09:00:00.000Z",
+        },
+      },
+    ];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+
+    render(<RecommendationsPage />);
+
+    await screen.findByRole("heading", { name: "Ranked by weekly impact" });
+    const text = document.querySelector(".limit-warning-strip")?.textContent ?? "";
+    expect(text).toContain("At the pace since the weekly reset, about 140%");
+    expect(text).not.toContain("the last day");
   });
 
   it("shows the honest detector status strip", async () => {
@@ -945,19 +1202,17 @@ describe("RecommendationsPage — toolbar controls (RV5)", () => {
     expect(proposed?.textContent).toMatch(/\(\d+\)/);
   });
 
-  it("shows confidence-tier chips for the proposed view", async () => {
+  it("shows estimate-basis chips for the proposed view", async () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
     const { container } = render(<RecommendationsPage />);
     await waitFor(() => {
-      expect(container.querySelector("[data-toolbar-tier]")).not.toBeNull();
+      expect(container.querySelector("[data-toolbar-basis]")).not.toBeNull();
     });
 
-    const tierChips = container.querySelectorAll("[data-toolbar-tier]");
-    const tierLabels = [...tierChips].map((c) => c.getAttribute("data-toolbar-tier"));
-    expect(tierLabels).toContain("WARNING");
-    expect(tierLabels).toContain("MODELED SAVINGS");
-    expect(tierLabels).toContain("ADVISORY");
-    expect(tierLabels).toContain("DIRECTIONAL");
+    const basisChips = container.querySelectorAll("[data-toolbar-basis]");
+    const basisValues = [...basisChips].map((c) => c.getAttribute("data-toolbar-basis"));
+    expect(basisValues).toEqual(["P", "E", "O", "R"]);
+    expect(container.querySelector("[data-toolbar-tier]")).toBeNull();
   });
 
   it("shows group-by and sort selects", async () => {
@@ -1009,6 +1264,77 @@ describe("RecommendationsPage — toolbar controls (RV5)", () => {
     });
   });
 
+  it("applies lifecycle sort order to adopted and dismissed queue entries", async () => {
+    const response = mockRecommendations();
+    if (response.data === null) throw new Error("expected recommendations fixture data");
+    const base = response.data.active[0];
+    if (!base) throw new Error("expected an active recommendation fixture");
+    const adoptedOld = {
+      ...base,
+      rec_id: "rec-adopted-old",
+      state: "ADOPTED" as const,
+      title: "Adopted old",
+      lever: "Adopted old",
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    const adoptedNew = {
+      ...base,
+      rec_id: "rec-adopted-new",
+      state: "ADOPTED" as const,
+      title: "Adopted new",
+      lever: "Adopted new",
+      created_at: "2026-02-01T00:00:00Z",
+    };
+    const dismissedOld = {
+      ...base,
+      rec_id: "rec-dismissed-old",
+      state: "DISMISSED" as const,
+      title: "Dismissed old",
+      lever: "Dismissed old",
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    const dismissedNew = {
+      ...base,
+      rec_id: "rec-dismissed-new",
+      state: "DISMISSED" as const,
+      title: "Dismissed new",
+      lever: "Dismissed new",
+      created_at: "2026-02-01T00:00:00Z",
+    };
+    response.data.active = [];
+    response.data.active_groups = [];
+    response.data.limit_warnings = [];
+    response.data.adopted = [adoptedOld, adoptedNew];
+    response.data.dismissed = [dismissedOld, dismissedNew];
+    vi.mocked(client.fetchRecommendations).mockResolvedValue(response);
+
+    window.location.hash = "#/recommendations?state=adopted&sort=newest";
+    render(<RecommendationsPage />);
+
+    const adoptedHeading = await screen.findByRole("heading", {
+      name: "Adopted changes — measured effect",
+    });
+    const adoptedList = adoptedHeading.closest(".card")?.querySelector("ul.rec-adopted-list");
+    const adoptedRows = [...(adoptedList?.querySelectorAll("li.rec-adopted-row") ?? [])];
+    expect(adoptedRows).toHaveLength(2);
+    expect(adoptedRows[0]?.textContent).toContain("Adopted new");
+    expect(adoptedRows[1]?.textContent).toContain("Adopted old");
+    // Each adopted rec appears exactly once — no duplicate adopted/dismissed list.
+    expect(document.querySelectorAll("li.rec-adopted-row")).toHaveLength(2);
+
+    window.location.hash = "#/recommendations?state=dismissed&sort=newest";
+    await waitFor(() => {
+      const dismissedHeading = screen.getByRole("heading", { name: "Dismissed", level: 2 });
+      const dismissedList = dismissedHeading
+        .closest(".card")
+        ?.querySelector("ul.rec-dismissed-list");
+      const rows = [...(dismissedList?.querySelectorAll("li.rec-dismissed-row") ?? [])];
+      expect(rows).toHaveLength(2);
+      expect(rows[0]?.textContent).toContain("Dismissed new");
+      expect(rows[1]?.textContent).toContain("Dismissed old");
+    });
+  });
+
   it("filter state never drops the standing honesty footnote (FR-REC-103)", async () => {
     vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
     const { container } = render(<RecommendationsPage />);
@@ -1028,7 +1354,7 @@ describe("RecommendationsPage — toolbar controls (RV5)", () => {
       expect(container.querySelector(".recs-toolbar")).not.toBeNull();
     });
     expect(container.textContent ?? "").toContain(
-      "Estimates can overlap; do not add them together",
+      "Dollar figures are net of overlaps: each token is counted once, so they add up.",
     );
   });
 });

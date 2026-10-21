@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { EXTRACTOR_VERSIONS } from "../../outcomes/finding-extractors.js";
 import type { LoadedApprovedEvidenceInput } from "../common/approved-input.js";
 import { publishApprovedOutput } from "../common/approved-input.js";
-import { EvidenceBoundaryError } from "../common/boundary.js";
+import { EvidenceBoundaryError, resolveProspectivePath } from "../common/boundary.js";
 import { canonicalJson, sha256Bytes } from "../common/canonical.js";
 import { redactEvidenceExcerpt } from "../common/redaction.js";
 import { COND1_RUNNER_VERSION, canonicalAnswerKeySha256 } from "./score.js";
@@ -98,7 +98,8 @@ export function readApprovedArtifactJson(
 ): unknown {
   if (!/^[0-9a-f]{64}$/u.test(expectedSha256)) fail("cond1_input_digest_invalid");
   const resolved = path.resolve(inputPath);
-  if (path.dirname(resolved) !== path.resolve(loaded.scratchStatePath)) {
+  // scratchStatePath is canonical; canonicalize the parent too (macOS /var -> /private/var).
+  if (resolveProspectivePath(path.dirname(resolved)) !== path.resolve(loaded.scratchStatePath)) {
     fail("cond1_input_not_direct_state_child");
   }
   let stat: fs.Stats;
@@ -370,7 +371,10 @@ function preflightOutputs(loaded: LoadedApprovedEvidenceInput, outputs: readonly
   const resolved = outputs.map((output) => path.resolve(output));
   if (new Set(resolved).size !== resolved.length) fail("cond1_output_paths_duplicate");
   for (const output of resolved) {
-    if (path.dirname(output) !== state) fail("cond1_output_not_direct_state_child");
+    // scratchStatePath is canonical; canonicalize the parent too (macOS /var -> /private/var).
+    if (resolveProspectivePath(path.dirname(output)) !== state) {
+      fail("cond1_output_not_direct_state_child");
+    }
     try {
       fs.lstatSync(output);
       fail("cond1_output_already_exists");

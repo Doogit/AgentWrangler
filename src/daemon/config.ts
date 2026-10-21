@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_SCAN_ROOT = path.join(os.homedir(), ".claude", "projects");
 
 /** Default TCP port for the loopback HTTP server. */
-const DEFAULT_PORT = 47821;
+const DEFAULT_PORT = 2929;
 
 /**
  * Activity window in seconds: sessions with last_turn_at within this many
@@ -75,4 +75,24 @@ export function loadConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig 
     uiRoot,
     ...overrides,
   };
+}
+
+const ONEDRIVE_ENV = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"] as const;
+
+/**
+ * P3-U8 (D12): a one-line warning when `dbPath` is inside a OneDrive-synced folder (under one of
+ * OneDrive's env roots, or a path segment starting "OneDrive"), else null. The path is unchanged.
+ */
+export function oneDriveWarning(dbPath: string, env: NodeJS.ProcessEnv): string | null {
+  const resolved = path.resolve(dbPath);
+  const lower = resolved.toLowerCase();
+  const underRoot = ONEDRIVE_ENV.some((name) => {
+    const root = env[name];
+    if (!root) return false;
+    const r = path.resolve(root).toLowerCase();
+    return lower === r || lower.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+  });
+  const segment = resolved.split(/[\\/]/).some((s) => /^onedrive/i.test(s));
+  if (!underRoot && !segment) return null;
+  return `DB  : warning — ${resolved} is in a OneDrive-synced folder; sync can lock or corrupt a live SQLite file. Move it with --db-path or AW_DB_PATH.`;
 }

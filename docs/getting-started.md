@@ -35,7 +35,7 @@ commands above; `npx agentwrangler@latest` installs and runs the packaged releas
 
 ## First launch
 
-The daemon binds `http://127.0.0.1:47821` immediately and serves a loading page, then scans
+The daemon binds `http://127.0.0.1:2929` immediately and serves a loading page, then scans
 your `~/.claude/projects/**/*.jsonl` transcripts in the background. The dashboard appears
 right away and fills in as the scan completes — a large history won't block the page.
 
@@ -58,9 +58,10 @@ If you have no matching recommendation, use session inspection now and return af
    workflow. For example, move a long task-specific checklist out of always-loaded instructions
    and reference it when needed. Preserve rules your project still needs; review the actual diff.
    Copying a prompt does not apply it. The family-level prompt is a preview; copying it does
-   not enable tracking for an individual instance. Experimental assisted actions have their own confirmation.
+   not enable tracking for an individual instance. **Open in Claude Code** (Settings > Advanced >
+   Experimental actions, off by default) opens your own terminal; nothing is applied for you.
 3. After the edit is complete, choose **I completed the change** when offered, then
-   **Track this change**. This records an available pre-change baseline and starts tracking;
+   **Track**. This records an available pre-change baseline and starts tracking;
    it does not edit files or independently verify your manual attestation. Missing baseline
    history can prevent a useful comparison. While the save is pending, wait for its result;
    pending is not saved. A failed save is not a tracked change; read the error and use **Retry**
@@ -114,9 +115,33 @@ whether one is present.
 
 Settings → **Calibrate from usage** derives your weekly token limit from your live Claude Code
 utilization and auto-saves it — this turns on the burn forecast on the Overview tab. A manual
-override field exists if calibration is unavailable. The usage reader uses your existing
-Claude Code sign-in to call Anthropic's OAuth usage endpoint; Settings shows its status. It reads
-usage and does not upload transcript text.
+override field exists if calibration is unavailable. Utilization comes from the Claude Code
+`/usage` reader or the statusline (see [Usage limits](#usage-limits)); AgentWrangler does not use
+your Claude login to call claude.ai. The bytes-to-token calibration call is separate: it is
+optional and needs your own `ANTHROPIC_API_KEY`, which the daemon reads only for that call.
+
+### Usage limits
+
+The Usage limits card on Overview shows your 5-hour and weekly percentages. Two sources feed it:
+
+- **`/usage` reader (on by default).** AgentWrangler runs your own `claude -p /usage` in the
+  background, only while the dashboard is open: at most every 5 minutes when you have been active,
+  hourly when idle, skipped while the statusline reading is fresh. Each call has a 20 s timeout,
+  with backoff after failures. `claude` must be on your `PATH` and recent enough to support
+  `/usage`. It never reads your Claude login; your own `claude` CLI makes the call. It stores only
+  percentages, reset times and model labels in `~/.agentwrangler/usage-cli.json`. Turn it off with
+  the Settings checkbox **Read usage via Claude Code /usage** (Settings > Usage limits from Claude
+  Code) or `AW_USAGE_CLI=off`. A reading older than 60 minutes shows as stale. Overview shows a
+  one-time, dismissible notice about this reader.
+- **Statusline (optional).** Settings → **Install statusline** points Claude Code's `statusLine`
+  at `agentwrangler statusline`. It updates on every turn and makes no background calls. Before
+  changing anything, Settings shows the exact before/after of `~/.claude/settings.json` and saves a
+  timestamped backup. An existing statusline keeps running and displaying (`--wrap "<your
+  command>"`). **Uninstall statusline** restores your previous setting. Only the two limit
+  percentages and reset times are saved, to `~/.agentwrangler/statusline-limits.json`.
+
+The 5-hour and weekly figures come from whichever reading is newer. Per-model weekly rows come
+only from `/usage`.
 
 ### In-session guardrails
 
@@ -129,19 +154,61 @@ removes only its three hooks. The direct-only PreCompact hook can copy raw trans
 `~/.agentwrangler/checkpoints/`; see [Privacy](privacy.md#raw-transcript-checkpoint-copies) for
 its retention and cleanup.
 
+### macOS
+
+These behaviors may differ on macOS, and have not been tested on a real Mac in 0.2.0:
+
+- **Open in Claude Code** opens Terminal.app through `osascript`. macOS may show a one-time
+  Automation permission prompt the first time.
+- Only `GET /api/oauth/status` reads your Claude Code login, to report signed-in and plan tier. On
+  macOS it may read the Keychain item "Claude Code-credentials" with the `security` tool (3 s
+  timeout, cached 60 s), so macOS may show a Keychain access prompt. The token is never returned,
+  logged, stored or sent.
+
+### Claude login and `ANTHROPIC_API_KEY` (all platforms)
+
+`ANTHROPIC_API_KEY` is removed from the environment of every `claude` AgentWrangler starts
+(Judge me, Open in Claude Code, `/usage`). Those use your Claude subscription login.
+
+### Audit your history with Claude (experimental)
+
+```sh
+agentwrangler audit [--db <path>] [--out <dir>] [--jsonl-root <dir>] [--days N]
+```
+
+This command never starts or talks to the daemon. It copies your database (the source is opened
+read-only and never changed) and works on the copy. Defaults:
+
+| Flag | Default |
+|---|---|
+| `--db` | The daemon's database (`AW_DB_PATH`, else `~/.agentwrangler/db.sqlite`) |
+| `--out` | `~/.agentwrangler/audits/<today's date>/` |
+| `--jsonl-root` | `~/.claude/projects` |
+| `--days` | `28`, ending at the latest turn in the database |
+
+It writes an audit folder holding `db.sqlite` (the copy), `schema.md`, `pack.md` (aggregate
+tables), `query.mjs`, `scan.mjs`, `render.mjs` and `prompt.md`. It prints the folder path and a
+`claude "Read .../prompt.md and follow it"` line. Run that line yourself in a Claude Code session;
+the session ends by rendering its findings to `report.html`. The audit folder holds a copy of your
+local data, so treat it as sensitive.
+
 ## Configuration
 
-All environment variables are optional; sensible defaults apply. See
-[`.env.example`](../.env.example) for the authoritative list.
+All environment variables are optional; sensible defaults apply. The table below matches
+[`.env.example`](../.env.example).
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `AW_PORT` | Daemon HTTP port | `47821` |
+| `AW_PORT` | Daemon HTTP port | `2929` |
 | `AW_DB_PATH` | SQLite database path | `~/.agentwrangler/db.sqlite` |
 | `AW_SCAN_ROOT` | Transcript directory to scan | `~/.claude/projects` |
 | `AW_UI_ROOT` | Directory the built UI is served from | `<package>/dist/ui` |
 | `AW_GITHUB_TOKEN` | Read-only GitHub PAT for outcomes sync | *(unset)* |
 | `AW_NO_OPEN` | Set to `1` to not auto-open the browser | *(unset)* |
+| `AW_ACTIVITY_WINDOW_SECS` | Seconds of activity that count a session as live | `300` |
+| `AW_HOOK_MARKER_DIR` | Directory for hook context-budget marker files | `~/.agentwrangler/hook-markers` |
+| `AW_CHECKPOINT_DIR` | Directory for PreCompact raw transcript copies | `~/.agentwrangler/checkpoints` |
+| `AW_USAGE_CLI` | Set to `off` to disable the `claude /usage` reader | on |
 
 Scan roots and the activity window are editable in Settings. Saved scan roots take effect after restarting the daemon.
 
@@ -174,7 +241,7 @@ UI changes.
 - **Blank page or 503 after updating** — the daemon loads code once at boot and never
   hot-reloads. Restart it after an update (`Ctrl+C`, then relaunch).
 - **Port already in use** — another daemon instance is running, or set `AW_PORT` to move.
-- **"Local daemon unavailable" screen** — the UI can't reach `127.0.0.1:47821`; start the
+- **"Local daemon unavailable" screen** — the UI can't reach `127.0.0.1:2929`; start the
   daemon and hit *Retry connection*.
 - **Node version errors** — the engine range is `>=22 <25`; `node --version` to check.
 - **Outcomes columns empty** — no GitHub token configured, or the token lacks read access to
@@ -184,7 +251,7 @@ UI changes.
 
 ## Uninstall
 
-- While the dashboard is running, open [Settings → In-session guards](http://127.0.0.1:47821/#/settings?section=in-session-guards) and remove installed AgentWrangler hooks (or use the copied uninstall prompt).
+- While the dashboard is running, open [Settings → In-session guards](http://127.0.0.1:2929/#/settings?section=in-session-guards) and remove installed AgentWrangler hooks (or use the copied uninstall prompt).
 - Stop the daemon (`Ctrl+C`).
 - Remove the package: `npm uninstall -g agentwrangler` if globally installed. For a source
   checkout, remove the checkout when it is no longer needed.

@@ -1,14 +1,34 @@
 {
   "name": "agentwrangler",
-  "version": "0.1.0",
-  "bin": { "agentwrangler": "dist/cli/agentwrangler.js" },
+  "version": "0.2.0",
+  "bin": {
+    "agentwrangler": "dist/cli/agentwrangler.js"
+  },
   "description": "Local observability for Claude Code agent token spend and outcomes",
   "type": "module",
   "license": "Apache-2.0",
-  "files": ["dist", "README.md", "LICENSE"],
-  "repository": { "type": "git", "url": "git+https://github.com/Doogit/AgentWrangler.git" },
+  "keywords": [
+    "claude-code",
+    "observability",
+    "tokens",
+    "cost",
+    "dashboard",
+    "anthropic"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Doogit/AgentWrangler.git"
+  },
   "homepage": "https://github.com/Doogit/AgentWrangler#readme",
-  "bugs": { "url": "https://github.com/Doogit/AgentWrangler/issues" },
+  "bugs": {
+    "url": "https://github.com/Doogit/AgentWrangler/issues"
+  },
   "engines": {
     "node": ">=22 <25"
   },
@@ -20,9 +40,13 @@
   "scripts": {
     "lint": "biome check src test",
     "typecheck": "tsc --noEmit --project tsconfig.node.json && tsc --noEmit --project tsconfig.ui.json",
+    "certify": "node --import tsx/esm scripts/parity/certify.ts",
+    "detector-health": "node --import tsx/esm scripts/detector-health/report.ts",
     "test": "vitest run && vitest run --config vitest.ui.config.ts",
+    "verify:app": "node scripts/verify-app.mjs",
     "smoke": "node --import tsx/esm src/daemon/index.ts --smoke --no-open",
     "daemon": "node --import tsx/esm src/daemon/index.ts",
+    "dashboard:seed": "node scripts/dashboard-seed.mjs",
     "install-hook": "node --import tsx/esm src/daemon/index.ts --install-hook",
     "uninstall-hook": "node --import tsx/esm src/daemon/index.ts --uninstall-hook",
     "evidence:create-approval": "node --import tsx/esm src/evidence/create-approval.ts",
@@ -32,21 +56,29 @@
     "evidence:r3-u4": "node --import tsx/esm src/evidence/r3/cli.ts",
     "evidence:d7-coverage": "node --import tsx/esm src/evidence/d7/cli.ts",
     "evidence:prepare-g2": "node --import tsx/esm scripts/evidence/prepare-g2.ts",
+    "backfill:sessions-ux": "node --import tsx/esm scripts/backfill-sessions-ux.ts",
+    "backfill:limit-snapshots": "node --import tsx/esm scripts/backfill-limit-snapshots.ts",
     "evidence:prepare-b6": "node --import tsx/esm scripts/evidence/prepare-b6.ts",
     "evidence:judge-g2": "node --import tsx/esm src/evidence/g2/cli.ts",
+    "evidence:u12-preflight": "node --import tsx/esm scripts/evidence/u12-preflight.ts",
+    "check:u12-fixtures": "node --import tsx/esm scripts/hooks/assert-u12-fixtures.ts",
+    "check:content": "node scripts/hooks/content-scan-ci.mjs",
+    "perf:backfill": "npm run build:daemon && node --import tsx/esm scripts/benchmark/backfill-harness.mts bench",
     "build:daemon": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "build:ui": "vite build",
     "build:ui:profiling": "vite build --mode profiling",
     "build": "npm run build:daemon && npm run build:ui",
-    "prepare": "npm run build",
+    "hooks:install": "node scripts/hooks/install.mjs",
+    "prepare": "node scripts/hooks/install.mjs && npm run build",
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.104.0",
     "better-sqlite3": "^12.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^3.10.1",
-    "sirv": "^3.0.2"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

@@ -12,7 +12,7 @@
  * Three distinct UI states (loading ≠ error ≠ ok/empty), mirroring OverviewPage.
  */
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type {
   RecommendationCard,
   RecommendationGroup,
@@ -20,7 +20,9 @@ import type {
 } from "../../query/api/recommendations";
 import type { ApiResponse } from "../../query/envelope";
 import { fetchRecommendations } from "../api/client";
+import { EFFECT_NOT_MEASURED_HELP, headlineSavings, meterBounds } from "../lib/rec-presentation";
 import { useWorkspaceNames } from "../lib/workspace-names";
+import AsyncErrorState from "../shell/AsyncErrorState";
 import Chip from "../shell/Chip";
 import EmptyState from "../shell/EmptyState";
 import InfoTip from "../shell/InfoTip";
@@ -28,20 +30,22 @@ import { SkeletonBlock } from "../shell/Skeleton";
 import DetectorStatusStrip from "./DetectorStatusStrip";
 import ImpactLedger from "./ImpactLedger";
 import PracticesSection from "./PracticesSection";
-import RecCard, { DETECTOR_GROUP_LABELS } from "./RecCard";
+import RecCard, { DETECTOR_GROUP_LABELS, recTargetLabel } from "./RecCard";
 import RecsToolbar, {
   type SortOrder,
   type ToolbarParams,
   collectWorkspaces,
   filterRecommendations as applyFilters,
+  lifecycleListParams,
   parseToolbarParams,
+  resetToolbarParams,
   setToolbarParam,
 } from "./RecsToolbar";
 import { sessionIdsForRecommendation } from "./rec-sessions";
 
 type LoadState =
   | { status: "loading" }
-  | { status: "error"; message: string }
+  | { status: "error" }
   | { status: "ok"; value: ApiResponse<RecommendationsView> };
 
 // ---------------------------------------------------------------------------
@@ -63,20 +67,111 @@ const STANDING_FOOTNOTE =
 const WASTE_SOURCE_FOOTNOTE =
   "Estimates show possible reductions, not results. Different suggestion types use different estimation methods.";
 
-const DE_MINIMIS_FLOOR_U = 1_000_000;
-const MINOR_ITEMS_GROUP_ID = "MINOR_ITEMS";
+const LIMIT_TIME_FORMAT: Intl.DateTimeFormatOptions = {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+};
+
+function limitTime(iso: unknown): string | null {
+  if (typeof iso !== "string") return null;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleString("en-US", LIMIT_TIME_FORMAT);
+}
+
+/**
+ * The limit-strip sentence, from the D5 forecast facts (used % of the weekly limit, the pace over
+ * the last day, and the hours left to the reset). Falls back to the card's lever for an older
+ * record that has none of them.
+ */
+function limitWarningText(
+  rec: RecommendationCard,
+  labelFor: (workspaceId: string) => string,
+): string {
+  const facts = rec.evidence;
+  const used = facts.used_pct;
+  const projected = facts.projected_pct;
+  const reset = limitTime(facts.resets_at);
+  if (typeof used !== "number" || typeof projected !== "number" || reset === null) return rec.lever;
+  const hit = limitTime(facts.projected_limit_hit_at);
+  const cut = facts.required_cut_pct;
+  const topWorkspace = facts.top_workspace_id;
+  const share = facts.top_workspace_share;
+  const windowHours = facts.pace_window_hours;
+  const paceBasis =
+    typeof windowHours === "number" && windowHours < 23.5
+      ? "the pace since the weekly reset"
+      : "the pace of the last day";
+  const parts = [
+    facts.forecast_state === "EXCEEDED"
+      ? `${Math.round(used)}% of the weekly limit is used; it resets ${reset}.`
+      : `${Math.round(used)}% of the weekly limit is used. At ${paceBasis}, about ${Math.round(projected)}% by the reset on ${reset}${hit === null ? "." : `; the limit would be reached about ${hit}.`}`,
+  ];
+  if (typeof cut === "number" && cut > 0)
+    parts.push(`Cutting use by about ${cut}% from now keeps you under it.`);
+  if (typeof topWorkspace === "string" && typeof share === "number")
+    parts.push(
+      `${labelFor(topWorkspace)} is ${Math.round(share * 100)}% of this week's cost-equivalent spend.`,
+    );
+  return parts.join(" ");
+}
+
+const RANKING_WARNING_COPY: Record<string, string> = {
+  PACKET_EXPIRED: "Some evidence is no longer current. Refresh after new activity is available.",
+  MISSING_EVIDENCE:
+    "Some recommendations could not be ranked because supporting evidence is unavailable.",
+};
+
+function rankingWarningCopy(code: string): string {
+  return RANKING_WARNING_COPY[code] ?? "Some recommendations could not be ranked right now.";
+}
+
+// Humanize the excluded-decision enums at the UI boundary (SEC-101 structural
+// strings). The backend keeps
+// emitting the enums; no raw code reaches the reader.
+const EXCLUDED_REASON_COPY: Record<string, string> = {
+  HEALTHY: "Healthy — no action needed",
+  NO_CHANGE: "No significant change",
+  PACKET_EXPIRED: "Evidence expired",
+  MALFORMED_CANDIDATE: "Skipped — data issue",
+  COOLDOWN_ACTIVE: "Recently acted on — cooling down",
+};
+function excludedReasonCopy(reason: string): string {
+  return EXCLUDED_REASON_COPY[reason] ?? reason.toLowerCase().replace(/_/g, " ");
+}
+function excludedSubjectCopy(subject: string): string {
+  return subject
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// History repeats one card per window and workspace, so it folds into one row per detector,
+// newest detector first; each row keeps the caller's card order.
+function groupHistory(
+  recs: RecommendationCard[],
+): { detector_id: string; label: string; newest: string; recs: RecommendationCard[] }[] {
+  const grouped = new Map<string, RecommendationCard[]>();
+  for (const rec of recs)
+    grouped.set(rec.detector_id, [...(grouped.get(rec.detector_id) ?? []), rec]);
+  return [...grouped]
+    .map(([detector_id, members]) => ({
+      detector_id,
+      label:
+        DETECTOR_GROUP_LABELS[detector_id] === undefined
+          ? detector_id
+          : `${detector_id} · ${DETECTOR_GROUP_LABELS[detector_id]}`,
+      newest: members.reduce((max, rec) => (rec.created_at > max ? rec.created_at : max), ""),
+      recs: members,
+    }))
+    .sort((a, b) => b.newest.localeCompare(a.newest));
+}
 
 function deriveUiGroups(active: RecommendationCard[]): RecommendationGroup[] {
   const grouped = new Map<string, RecommendationCard[]>();
-  const minorItems: RecommendationCard[] = [];
   for (const rec of active) {
-    if (
-      rec.modeled_savings_u_per_wk !== null &&
-      rec.modeled_savings_u_per_wk < DE_MINIMIS_FLOOR_U
-    ) {
-      minorItems.push(rec);
-      continue;
-    }
     const members = grouped.get(rec.detector_id);
     if (members === undefined) grouped.set(rec.detector_id, [rec]);
     else members.push(rec);
@@ -92,16 +187,11 @@ function deriveUiGroups(active: RecommendationCard[]): RecommendationGroup[] {
       label: DETECTOR_GROUP_LABELS[detector_id] ?? detector_id,
       recs,
       session_count: sessions.size,
-      total_savings_u_per_wk: recs.reduce(
-        (total, rec) => total + (rec.modeled_savings_u_per_wk ?? 0),
-        0,
-      ),
+      total_savings_u_per_wk: recs.reduce((total, rec) => total + (headlineSavings(rec) ?? 0), 0),
     };
   };
 
-  const groups = [...grouped].map(([detectorId, recs]) => buildGroup(detectorId, recs));
-  if (minorItems.length > 0) groups.push(buildGroup(MINOR_ITEMS_GROUP_ID, minorItems));
-  return groups;
+  return [...grouped].map(([detectorId, recs]) => buildGroup(detectorId, recs));
 }
 
 function groupsCoverActive(groups: RecommendationGroup[], active: RecommendationCard[]): boolean {
@@ -134,21 +224,36 @@ function activeGroupsForView(view: RecommendationsView): RecommendationGroup[] {
 // Toolbar-aware filtering + sorting + grouping
 // ---------------------------------------------------------------------------
 
-/** Sort active recs by the toolbar sort order. "confidence" = keep existing article-priority order. */
+/** The $ the card headline shows (what SavingsMeter renders); the lowest value when it shows none. */
+function shownRank(rec: RecommendationCard): number {
+  const shown =
+    rec.allocated_u_per_wk === null
+      ? typeof rec.reliability_u_per_wk === "number"
+        ? rec.reliability_u_per_wk
+        : isStandaloneShown(rec)
+          ? rec.modeled_savings_u_per_wk
+          : null
+      : headlineSavings(rec);
+  return shown ?? -Number.MAX_VALUE; // finite, so two "no $" cards compare equal (not NaN)
+}
+
+/** Standalone lane (E1/E2): the meter shows the modeled figure, kept out of the page total. */
+function isStandaloneShown(rec: RecommendationCard): boolean {
+  return (
+    rec.allocated_u_per_wk === null &&
+    typeof rec.reliability_u_per_wk !== "number" &&
+    typeof rec.modeled_savings_u_per_wk === "number" &&
+    rec.modeled_savings_u_per_wk > 0 &&
+    rec.estimate?.summable === false
+  );
+}
+
+/** Sort recommendations by the toolbar sort order. "confidence" preserves the API order. */
 function applySort(recs: RecommendationCard[], sort: SortOrder): RecommendationCard[] {
   if (sort === "confidence") return recs; // preserve API article-priority order
   if (sort === "savings") {
-    // Workspace/minor-item groups can contain different methods. Keep their
-    // family policy order; dollar estimates only reorder within a family.
-    const familyOrder = new Map<string, number>();
-    for (const rec of recs) {
-      if (!familyOrder.has(rec.detector_id)) familyOrder.set(rec.detector_id, familyOrder.size);
-    }
-    return [...recs].sort(
-      (a, b) =>
-        (familyOrder.get(a.detector_id) ?? 0) - (familyOrder.get(b.detector_id) ?? 0) ||
-        (b.modeled_savings_u_per_wk ?? -1) - (a.modeled_savings_u_per_wk ?? -1),
-    );
+    // The $ each card shows (as the server ranks it); cards that show no $ are last.
+    return [...recs].sort((a, b) => shownRank(b) - shownRank(a));
   }
   // newest: sort by created_at DESC
   return [...recs].sort((a, b) => {
@@ -181,7 +286,7 @@ function groupByWorkspace(recs: RecommendationCard[]): RecommendationGroup[] {
       recs: members,
       session_count: sessions.size,
       total_savings_u_per_wk: members.reduce(
-        (total, rec) => total + (rec.modeled_savings_u_per_wk ?? 0),
+        (total, rec) => total + (headlineSavings(rec) ?? 0),
         0,
       ),
     };
@@ -201,31 +306,65 @@ function withGroupMembers(
     ...group,
     recs,
     session_count: new Set(recs.flatMap(sessionIdsForRecommendation)).size,
-    total_savings_u_per_wk: recs.reduce(
-      (total, rec) => total + (rec.modeled_savings_u_per_wk ?? 0),
-      0,
-    ),
+    total_savings_u_per_wk: recs.reduce((total, rec) => total + (headlineSavings(rec) ?? 0), 0),
   };
 }
 
+function isCurrentRankedRec(rec: RecommendationCard): boolean {
+  return (
+    (rec.weeks_ago ?? 0) === 0 &&
+    (rec.state as string) !== "RETIRED" &&
+    rec.state !== "MEASURED_EFFECTIVE"
+  );
+}
+
 function toolbarGroups(view: RecommendationsView, params: ToolbarParams): RecommendationGroup[] {
-  const filtered = applyFilters(view.active, params);
+  const filtered = applyFilters(view.active.filter(isCurrentRankedRec), params);
+  // "savings" orders groups by the summed $ their cards show (after filters), groups showing no $
+  // and minor items last, as the server orders them unfiltered. Sort is stable. Standalone
+  // estimates overlap, so they add only their largest card.
+  const shownTotal = (group: RecommendationGroup) => {
+    if (!group.recs.some((rec) => shownRank(rec) >= 0)) return -1;
+    let sum = 0;
+    let standaloneMax = 0;
+    for (const rec of group.recs) {
+      const shown = Math.max(0, shownRank(rec));
+      if (isStandaloneShown(rec)) standaloneMax = Math.max(standaloneMax, shown);
+      else sum += shown;
+    }
+    return sum + standaloneMax;
+  };
+  const orderGroups = (groups: RecommendationGroup[]): RecommendationGroup[] =>
+    params.sort !== "savings"
+      ? groups
+      : [...groups].sort(
+          (a, b) =>
+            Number(a.detector_id === "MINOR_ITEMS") - Number(b.detector_id === "MINOR_ITEMS") ||
+            shownTotal(b) - shownTotal(a),
+        );
   if (params.group === "workspace") {
-    return groupByWorkspace(filtered).map((group) => ({
-      ...group,
-      recs: applySort(group.recs, params.sort),
-    }));
+    return orderGroups(
+      groupByWorkspace(filtered).map((group) => ({
+        ...group,
+        recs: applySort(group.recs, params.sort),
+      })),
+    );
   }
 
   // Default: detector-family groups (respect existing API groups when valid).
   const groups = activeGroupsForView(view);
   // Re-filter groups using the same priority as applyFilters.
-  return groups
-    .map((group) => {
-      const recs = applySort(applyFilters(group.recs, params), params.sort);
-      return withGroupMembers(group, recs);
-    })
-    .filter((group) => group.recs.length > 0);
+  return orderGroups(
+    groups
+      .map((group) => {
+        const recs = applySort(
+          applyFilters(group.recs.filter(isCurrentRankedRec), params),
+          params.sort,
+        );
+        return withGroupMembers(group, recs);
+      })
+      .filter((group) => group.recs.length > 0),
+  );
 }
 
 async function fetchSessionToken(): Promise<string> {
@@ -240,6 +379,7 @@ async function fetchSessionToken(): Promise<string> {
 export default function RecommendationsPage() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSaved, setLastSaved] = useState<string | null>(null);
   const { labelFor } = useWorkspaceNames();
 
   // Subscribe to hash changes to pick up URL-synced toolbar params.
@@ -251,10 +391,12 @@ export default function RecommendationsPage() {
     let cancelled = false;
     fetchRecommendations()
       .then((v) => {
-        if (!cancelled) setState({ status: "ok", value: v });
+        if (!cancelled) {
+          setState({ status: "ok", value: v });
+        }
       })
-      .catch((e: unknown) => {
-        if (!cancelled) setState({ status: "error", message: String(e) });
+      .catch(() => {
+        if (!cancelled) setState({ status: "error" });
       });
     return () => {
       cancelled = true;
@@ -276,8 +418,12 @@ export default function RecommendationsPage() {
   }
 
   // RecCard invokes this only after its local undo window elapses.
-  async function handleAdopt(recId: string): Promise<void> {
-    await persistAction("adopt", { rec_id: recId });
+  async function handleAdopt(recId: string, optionId?: string): Promise<void> {
+    await persistAction("adopt", {
+      rec_id: recId,
+      completed_change: true,
+      ...(optionId === undefined ? {} : { option_id: optionId }),
+    });
   }
 
   async function persistAction(action: "adopt" | "dismiss", body: Record<string, unknown>) {
@@ -291,31 +437,96 @@ export default function RecommendationsPage() {
     if (!res.ok) {
       throw new Error(`Change was not saved (HTTP ${res.status}). Retry or refresh the page.`);
     }
+    // REL-FIX 2: an adoption nothing can measure is saved without a cycle (effect_measured: false).
+    let unmeasured = false;
+    if (action === "adopt") {
+      try {
+        const result = (await res.json()) as { data?: { effect_measured?: boolean } } | null;
+        unmeasured = result?.data?.effect_measured === false;
+      } catch {
+        // The flag is optional; a body we cannot read means a measured adoption.
+      }
+    }
+    // The card may leave the list on refresh, so the page names what was saved.
+    const saved = view?.active.find((rec) => rec.rec_id === body.rec_id);
+    setLastSaved(
+      `${action === "adopt" ? "Adopted" : "Dismissed"}: ${
+        saved ? recTargetLabel(saved, labelFor) : String(body.rec_id)
+      }${unmeasured ? " · Effect not measured" : ""}`,
+    );
     refresh();
   }
 
   const view = state.status === "ok" ? state.value.data : null;
   const visibleWarnings = applyFilters(view?.limit_warnings ?? [], toolbarParams);
-  // Confidence tier is a proposed-finding filter. Ignore a stale/manual tier
-  // hash parameter for lifecycle lists where that control is not available.
-  const lifecycleFilterParams = { ...toolbarParams, tier: null };
+  // Basis and Last seen are proposed-finding filters. Ignore a stale/manual
+  // hash parameter for lifecycle lists where those controls are not available.
+  const lifecycleFilterParams = lifecycleListParams(toolbarParams);
   const visibleAdopted = applyFilters(view?.adopted ?? [], lifecycleFilterParams);
   const visibleDismissed = applyFilters(view?.dismissed ?? [], lifecycleFilterParams);
+  const historyFromApi =
+    (view as (RecommendationsView & { history?: RecommendationCard[] }) | null)?.history ?? [];
+  const isImproved = (rec: RecommendationCard) => rec.state === "MEASURED_EFFECTIVE";
+  const isNoImprovement = (rec: RecommendationCard) =>
+    rec.effect_cycle?.targetDirection === "WORSENED" ||
+    rec.effect_cycle?.targetDirection === "UNCHANGED" ||
+    (rec.effect_cycle == null && rec.legacy_effect_verdict === "NO_EFFECT");
+  const isRetired = (rec: RecommendationCard) => (rec.state as string) === "RETIRED";
+  const rankedAdopted = visibleAdopted
+    .filter(
+      (rec) =>
+        !isImproved(rec) &&
+        !isRetired(rec) &&
+        rec.detector_id !== "D5" &&
+        (isNoImprovement(rec) ||
+          rec.effect_cycle?.state === "OPEN_SETTLING" ||
+          rec.effect_cycle?.state === "OPEN_MEASURING"),
+    )
+    .sort((a, b) => Number(isNoImprovement(b)) - Number(isNoImprovement(a)));
+  const visibleHistory = applyFilters(
+    [
+      ...new Map(
+        [...historyFromApi, ...visibleAdopted.filter(isImproved)].map((rec) => [rec.rec_id, rec]),
+      ).values(),
+    ],
+    lifecycleFilterParams,
+  );
+  const rankedAdoptedIds = new Set(rankedAdopted.map((rec) => rec.rec_id));
+  const historyIds = new Set(visibleHistory.map((rec) => rec.rec_id));
+  const ledgerAdopted = visibleAdopted.filter(
+    (rec) => !rankedAdoptedIds.has(rec.rec_id) && !historyIds.has(rec.rec_id),
+  );
   const hasFilters =
-    toolbarParams.scope !== null || toolbarParams.ws !== null || toolbarParams.tier !== null;
-  const resetFilters = () => {
-    for (const key of ["scope", "ws", "tier"]) setToolbarParam(key, null);
-  };
-
-  // RV6 deep-link focus: the top rec is always an active/limit-warning proposal.
-  // Known → the target card scrolls/highlights/auto-expands; stale → quiet notice.
+    toolbarParams.scope !== null ||
+    toolbarParams.ws !== null ||
+    toolbarParams.basis !== null ||
+    toolbarParams.seen !== null ||
+    toolbarParams.type !== null;
+  const resetFilters = resetToolbarParams;
+  // RC-B: proposed cards under the de-minimis floor, shown in their own collapsed section.
+  const belowFloorRecs =
+    toolbarParams.state === null || toolbarParams.state === "proposed"
+      ? applyFilters(view?.below_floor ?? [], toolbarParams)
+      : [];
+  // RV6 deep-link focus: the target proposal may live in the ranked list or
+  // the limit-warning strip. Known → the
+  // target card scrolls/highlights/auto-expands; stale → quiet notice. RC-B: a target in the
+  // collapsed below-floor or history section opens that section.
   const focus = toolbarParams.focus;
+  const focusInBelowFloor = focus !== null && belowFloorRecs.some((rec) => rec.rec_id === focus);
+  const focusInHistory = focus !== null && visibleHistory.some((rec) => rec.rec_id === focus);
   const focusKnown =
     focus !== null &&
     view !== null &&
-    [...view.active, ...view.limit_warnings].some((rec) => rec.rec_id === focus);
+    (focusInBelowFloor ||
+      focusInHistory ||
+      [...view.active, ...view.limit_warnings].some((rec) => rec.rec_id === focus));
   const focusRecId = focusKnown ? focus : null;
   const clearFocus = () => setToolbarParam("focus", null);
+  const focusWarning = useCallback((node: HTMLDivElement | null) => {
+    node?.scrollIntoView?.({ block: "center" });
+    node?.focus({ preventScroll: true });
+  }, []);
 
   return (
     <div>
@@ -331,11 +542,7 @@ export default function RecommendationsPage() {
         </div>
       </div>
 
-      {state.status === "error" && (
-        <div className="banner banner-error" role="alert" aria-live="assertive">
-          <span>⚠ Daemon unreachable — {state.message}</span>
-        </div>
-      )}
+      {state.status === "error" && <AsyncErrorState resource="recommendations" onRetry={refresh} />}
 
       {state.status === "loading" && (
         <div aria-busy="true" aria-label="Loading recommendations">
@@ -346,9 +553,6 @@ export default function RecommendationsPage() {
 
       {state.status === "ok" && view !== null && (
         <>
-          {/* URL-synced toolbar: filter · sort · group */}
-          <RecsToolbar view={view} params={toolbarParams} />
-
           {/* RV6: a stale/unknown deep-link degrades to the full list with a quiet notice. */}
           {focus !== null && !focusKnown && (
             <output className="recs-focus-notice">
@@ -359,24 +563,49 @@ export default function RecommendationsPage() {
             </output>
           )}
 
+          <section
+            className="recs-supporting-intro"
+            aria-labelledby="recs-supporting-detectors-head"
+          >
+            <div className="section-head">
+              <h2 id="recs-supporting-detectors-head">Detector details and filtering</h2>
+            </div>
+            <p className="rec-ranking-explainer">
+              Evidence records and filters for the ranked recommendations below.
+            </p>
+            <RecsToolbar view={view} params={toolbarParams} />
+          </section>
+
           {/* D5 limit warning alert strip — above waste-source cards (taxonomy §7 IA §4 §2.1) */}
           {visibleWarnings.length > 0 &&
             (toolbarParams.state === null || toolbarParams.state === "proposed") && (
               <div className="limit-warning-strip">
                 {visibleWarnings.map((rec) => (
-                  <div key={rec.rec_id} className="banner banner-warn" role="alert">
-                    <span>
-                      <strong>Limit warning</strong> {rec.lever}
+                  <div
+                    key={rec.rec_id}
+                    className={`banner banner-warn${focusRecId === rec.rec_id ? " rec-focus-highlight" : ""}`}
+                    role="alert"
+                    tabIndex={-1}
+                    ref={focusRecId === rec.rec_id ? focusWarning : undefined}
+                  >
+                    <span className="limit-warning-strip-icon" aria-hidden="true">
+                      ⚠
                     </span>
-                    <RecCard
-                      rec={rec}
-                      rank={1}
-                      focusRecId={focusRecId}
-                      onDismissFocus={clearFocus}
-                      onDismiss={handleDismiss}
-                      onAdopt={handleAdopt}
-                      onEffectMutated={refresh}
+                    <span className="limit-warning-strip-text">
+                      <strong>Limit warning</strong> {limitWarningText(rec, labelFor)}
+                    </span>
+                    <InfoTip
+                      label="How the limit warning is worked out"
+                      content="Uses the weekly-limit percentage Claude Code reports, plus how fast it rose over the last 24 hours (since the reset if that was sooner). Unless a reading falls exactly at the start of that day, the percentage then is estimated between the nearest readings using local token spend. It adds that pace for the hours left until the reset. The share by workspace uses this week's cost-equivalent spend."
                     />
+                    <a className="limit-warning-strip-action" href="#/settings?section=calibration">
+                      Calibrate budget hook
+                    </a>
+                    {focusRecId === rec.rec_id && (
+                      <button type="button" className="rec-focus-dismiss" onClick={clearFocus}>
+                        Clear highlight
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -389,13 +618,16 @@ export default function RecommendationsPage() {
               // Put one applicable recommendation first so its action and tracking gate are
               // immediately available. Its siblings remain in their original family and order.
               const visibleRecs = visibleGroups.flatMap((group) => group.recs);
+              const savingsScale = Math.max(
+                0,
+                ...visibleRecs.map((rec) => meterBounds(rec)?.[1] ?? 0),
+              );
               // A valid deep link must remain visible: if its target would otherwise be
               // nested in the closed remaining queue, promote it to the action card.
               const selectedRec =
                 (focusRecId === null
                   ? undefined
-                  : visibleRecs.find((rec) => rec.rec_id === focusRecId)) ??
-                visibleRecs.find((rec) => rec.detector_id !== "D5");
+                  : visibleRecs.find((rec) => rec.rec_id === focusRecId)) ?? visibleRecs[0];
               const remainingGroups =
                 selectedRec === undefined
                   ? visibleGroups
@@ -404,9 +636,12 @@ export default function RecommendationsPage() {
                       return recs.length === 0 ? [] : [withGroupMembers(group, recs)];
                     });
 
-              // Scope choices keep the tier filter and include warning proposals.
+              // Scope choices keep the basis/seen filters and include warning proposals.
               const workspaces = collectWorkspaces(view, labelFor);
-              const allProposed = [...view.active, ...view.limit_warnings];
+              const allProposed = [
+                ...view.active.filter(isCurrentRankedRec),
+                ...view.limit_warnings,
+              ];
               const scopeCandidates = applyFilters(allProposed, {
                 ...toolbarParams,
                 scope: null,
@@ -526,7 +761,14 @@ export default function RecommendationsPage() {
                             {topFamily.session_count === 1 ? "session" : "sessions"}
                           </p>
                         )}
-                        <p className="kpi-fn">Estimates can overlap; do not add them together.</p>
+                        <p className="kpi-fn">
+                          Dollar figures are net of overlaps: each token is counted once, so they
+                          add up.{" "}
+                          <InfoTip
+                            label="Net of overlaps"
+                            content="Each card's dollar figure is the spend in the last 7 days its fix would remove. Tokens targeted by several recommendations are counted once, for the most specific fix, so the figures can be added without double counting."
+                          />
+                        </p>
                       </div>
                       <div className="recs-summary-trio" aria-label="Scope and adoption counts">
                         <span>
@@ -543,73 +785,150 @@ export default function RecommendationsPage() {
                   )}
 
                   <div className="section-head">
-                    <h2>Where to start</h2>
+                    <h2>Ranked by weekly impact</h2>
                   </div>
                   <p className="rec-ranking-explainer">
-                    Suggestions are grouped by the kind of change. Savings are estimates.
+                    Ranked using measured effects where available, usage-based estimates for
+                    savings, and risk for safety findings. Review the evidence before acting.
                     <InfoTip
-                      label="How suggestions are ordered"
-                      content="Recommended order uses a fixed category order. Categories use different estimation methods, so dollar amounts cannot be compared across them. Newest sorts within each group; estimated savings sorts within each category."
+                      label="How this list is ranked"
+                      content="Weekly impact uses measured effects when available, usage-estimated savings where measurement is pending, and risk for safety findings. The list follows the server's ranking order, highest first."
                     />
                   </p>
-                  {visibleGroups.length === 0 ? (
-                    visibleWarnings.length === 0 ? (
-                      <div>
-                        <EmptyState
-                          headline={
-                            hasFilters && allProposed.length > 0
-                              ? "No matching recommendations"
-                              : "No active recommendations"
-                          }
-                          why={
-                            hasFilters
-                              ? "No active recommendations match the current filters."
-                              : "No active detector findings in this window."
-                          }
-                          whatWillAppear="New findings appear here when detectors identify an applicable action."
-                        />
-                        {hasFilters && (
-                          <button type="button" onClick={resetFilters}>
-                            Reset filters
-                          </button>
+                  {lastSaved !== null && <output className="rec-apply-status">{lastSaved}</output>}
+                  {/* Group sections contain cards, so a semantic list would require invalid nested elements. */}
+                  {/* biome-ignore lint/a11y/useSemanticElements: group sections contain their own card structure */}
+                  <div role="list" aria-label="Ranked by weekly impact">
+                    {visibleGroups.length === 0 ? (
+                      visibleWarnings.length === 0 ? (
+                        <div>
+                          <EmptyState
+                            headline={
+                              hasFilters && allProposed.length > 0
+                                ? "No matching recommendations"
+                                : "No active recommendations"
+                            }
+                            why={
+                              hasFilters
+                                ? "No active recommendations match the current filters."
+                                : "No active detector findings in this window."
+                            }
+                            whatWillAppear="New findings appear here when detectors identify an applicable action."
+                            help={{
+                              href: "#/help?topic=recommendations&section=unavailable",
+                              label: "Why recommendations may be empty",
+                            }}
+                          />
+                          {hasFilters && (
+                            <button type="button" className="btn-secondary" onClick={resetFilters}>
+                              Reset filters
+                            </button>
+                          )}
+                        </div>
+                      ) : null
+                    ) : (
+                      <>
+                        {selectedRec !== undefined && (
+                          <RecCard
+                            key={selectedRec.rec_id}
+                            savingsScale={savingsScale}
+                            rec={selectedRec}
+                            showRank={false}
+                            focusRecId={focusRecId}
+                            onDismissFocus={clearFocus}
+                            onDismiss={handleDismiss}
+                            onAdopt={handleAdopt}
+                            onEffectMutated={refresh}
+                          />
                         )}
-                      </div>
-                    ) : null
-                  ) : (
-                    <>
-                      {selectedRec !== undefined && (
+                        {/* UIP-7: each detector family renders as its own visible section. */}
+                        {remainingGroups.map((group) => {
+                          const above = group.recs.slice(0, 3);
+                          const below = group.recs.slice(3);
+                          return (
+                            <div
+                              key={group.detector_id}
+                              className="recs-group-section"
+                              data-detector-id={group.detector_id}
+                            >
+                              <h3 className="recs-group-head">
+                                {group.label}{" "}
+                                <span className="recs-group-count">({group.recs.length})</span>
+                                {group.detector_id !== "MINOR_ITEMS" &&
+                                  group.total_savings_u_per_wk > 0 && (
+                                    <span className="recs-group-total">
+                                      {" "}
+                                      · ${(group.total_savings_u_per_wk / 1_000_000).toFixed(2)}/wk
+                                      total{" "}
+                                      <InfoTip
+                                        label="About the group total"
+                                        content="Sum of the net weekly savings of the cards in this group. Net figures count each token once, so they add up. Groups are ordered by this total."
+                                      />
+                                    </span>
+                                  )}
+                              </h3>
+                              {above.map((rec) => (
+                                <RecCard
+                                  savingsScale={savingsScale}
+                                  key={rec.rec_id}
+                                  rec={rec}
+                                  showRank={false}
+                                  focusRecId={focusRecId}
+                                  // R6-18: only #1 (selectedRec, rendered above) and the
+                                  // deep-link focus target start open; everything else folds.
+                                  defaultFolded={
+                                    rec.rec_id !== selectedRec?.rec_id && rec.rec_id !== focusRecId
+                                  }
+                                  onDismissFocus={clearFocus}
+                                  onDismiss={handleDismiss}
+                                  onAdopt={handleAdopt}
+                                  onEffectMutated={refresh}
+                                />
+                              ))}
+                              {below.length > 0 && (
+                                <details className="recs-group-more">
+                                  <summary>Show {below.length} more</summary>
+                                  {below.map((rec) => (
+                                    <RecCard
+                                      savingsScale={savingsScale}
+                                      key={rec.rec_id}
+                                      rec={rec}
+                                      showRank={false}
+                                      focusRecId={focusRecId}
+                                      defaultFolded={
+                                        rec.rec_id !== selectedRec?.rec_id &&
+                                        rec.rec_id !== focusRecId
+                                      }
+                                      onDismissFocus={clearFocus}
+                                      onDismiss={handleDismiss}
+                                      onAdopt={handleAdopt}
+                                      onEffectMutated={refresh}
+                                    />
+                                  ))}
+                                </details>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+                  </div>
+                  {rankedAdopted.length > 0 && (
+                    <section aria-label="Measuring and reopened recommendations">
+                      <h3>Measuring and reopened</h3>
+                      {rankedAdopted.map((rec) => (
                         <RecCard
-                          rec={selectedRec}
-                          rank={1}
-                          isFlagship={selectedRec.detector_id === "D8"}
+                          key={rec.rec_id}
+                          rec={rec}
+                          showRank={false}
                           focusRecId={focusRecId}
-                          onDismissFocus={clearFocus}
-                          onDismiss={handleDismiss}
-                          onAdopt={handleAdopt}
+                          defaultFolded={
+                            rec.rec_id !== selectedRec?.rec_id && rec.rec_id !== focusRecId
+                          }
                           onEffectMutated={refresh}
                         />
-                      )}
-                      {remainingGroups.length > 0 && (
-                        <details className="recs-remaining-queue">
-                          <summary>
-                            More suggestions (
-                            {remainingGroups.reduce((n, group) => n + group.recs.length, 0)})
-                          </summary>
-                          {remainingGroups.map((group, i) => (
-                            <RecCard
-                              key={group.detector_id}
-                              group={group}
-                              rank={i + 2}
-                              focusRecId={focusRecId}
-                              onDismissFocus={clearFocus}
-                              onDismiss={handleDismiss}
-                              onAdopt={handleAdopt}
-                              onEffectMutated={refresh}
-                            />
-                          ))}
-                        </details>
-                      )}
-                    </>
+                      ))}
+                    </section>
                   )}
                   <p className="kpi-fn" style={{ marginTop: -4, marginBottom: 13 }}>
                     {WASTE_SOURCE_FOOTNOTE}
@@ -628,6 +947,112 @@ export default function RecommendationsPage() {
               );
             })()}
 
+          {/* Investigate section — excluded decisions + rank_warnings. Read-only, no actions. */}
+          {((view.excluded ?? []).length > 0 || (view.rank_warnings ?? []).length > 0) && (
+            <section className="recs-investigate-section" aria-labelledby="recs-investigate-head">
+              <div className="section-head">
+                <h2 id="recs-investigate-head">Investigate</h2>
+              </div>
+              {(view.rank_warnings ?? []).length > 0 && (
+                <ul className="recs-rank-warnings" aria-label="Ranking warnings">
+                  {(view.rank_warnings ?? []).map((w, i) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: warnings are ephemeral, no stable id
+                    <li key={i} className="recs-rank-warning banner banner-warn" role="alert">
+                      {rankingWarningCopy(w.code)}
+                      <details>
+                        <summary>Technical details</summary>
+                        <p>Warning code: {w.code}</p>
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {(view.excluded ?? []).length > 0 && (
+                <>
+                  <p className="recs-excluded-intro">Checked this window — no action needed:</p>
+                  <ul className="recs-excluded-list" aria-label="Checked, no action needed">
+                    {(view.excluded ?? []).map((e) => (
+                      <li key={`${e.subject}:${e.reason}`} className="recs-excluded-item">
+                        <span className="recs-excluded-subject">
+                          {excludedSubjectCopy(e.subject)}
+                        </span>
+                        <span className="recs-excluded-reason">{excludedReasonCopy(e.reason)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </section>
+          )}
+
+          {belowFloorRecs.length > 0 && (
+            <section
+              className="card"
+              aria-label="Below the low-impact threshold"
+              style={{ marginBottom: 13 }}
+            >
+              <details className="recs-history" {...(focusInBelowFloor ? { open: true } : {})}>
+                <summary className="section-head">
+                  <h2>Below the low-impact threshold ({belowFloorRecs.length})</h2>
+                </summary>
+                <p className="rec-ranking-explainer">
+                  Real findings whose weekly savings are too small to rank with the cards above.
+                </p>
+                {applySort(belowFloorRecs, toolbarParams.sort).map((rec) => (
+                  <RecCard
+                    key={rec.rec_id}
+                    rec={rec}
+                    showRank={false}
+                    focusRecId={focusRecId}
+                    defaultFolded={rec.rec_id !== focusRecId}
+                    onDismissFocus={clearFocus}
+                    onDismiss={handleDismiss}
+                    onAdopt={handleAdopt}
+                    onEffectMutated={refresh}
+                  />
+                ))}
+              </details>
+            </section>
+          )}
+
+          {visibleHistory.length > 0 && (
+            <section
+              className="card"
+              aria-label="Recommendation history"
+              style={{ marginBottom: 13 }}
+            >
+              <details className="recs-history" {...(focusInHistory ? { open: true } : {})}>
+                <summary className="section-head">
+                  <h2>Recommendation history ({visibleHistory.length})</h2>
+                </summary>
+                {groupHistory(applySort(visibleHistory, toolbarParams.sort)).map((group) => (
+                  <details
+                    key={group.detector_id}
+                    className="recs-history-group"
+                    {...(focusRecId !== null && group.recs.some((rec) => rec.rec_id === focusRecId)
+                      ? { open: true }
+                      : {})}
+                  >
+                    <summary>
+                      {group.label} · {group.recs.length} card{group.recs.length === 1 ? "" : "s"} ·
+                      newest {group.newest.slice(0, 10)}
+                    </summary>
+                    {group.recs.map((rec) => (
+                      <RecCard
+                        key={rec.rec_id}
+                        rec={rec}
+                        showRank={false}
+                        focusRecId={focusRecId}
+                        onDismissFocus={clearFocus}
+                        onEffectMutated={refresh}
+                      />
+                    ))}
+                  </details>
+                ))}
+              </details>
+            </section>
+          )}
+
           {/* BM1 — Published practice scorecard */}
           {toolbarParams.state === null && (
             <div className="card" style={{ marginBottom: 13 }}>
@@ -644,29 +1069,52 @@ export default function RecommendationsPage() {
               <div className="section-head">
                 <h2>Adopted changes — measured effect</h2>
               </div>
-              {visibleAdopted.length === 0 ? (
+              {toolbarParams.state === "adopted" && rankedAdopted.length > 0 && (
+                <section aria-label="Measuring and reopened recommendations">
+                  <h3>Measuring and reopened</h3>
+                  {rankedAdopted.map((rec) => (
+                    <RecCard
+                      key={rec.rec_id}
+                      rec={rec}
+                      showRank={false}
+                      onEffectMutated={refresh}
+                    />
+                  ))}
+                </section>
+              )}
+              {ledgerAdopted.length === 0 && rankedAdopted.length === 0 ? (
                 <p className="kpi-off-hint">
                   No adopted recommendations in this selection. Modeled savings are never summed
                   into achieved — measured effect appears here once an adopted rec is verified.
                 </p>
-              ) : (
+              ) : ledgerAdopted.length > 0 ? (
                 <ul className="rec-adopted-list">
-                  {visibleAdopted.map((rec) => (
+                  {applySort(ledgerAdopted, toolbarParams.sort).map((rec) => (
                     <li key={rec.rec_id} className="rec-adopted-row">
-                      {rec.effect_cycle != null ? (
-                        <RecCard rec={rec} onEffectMutated={refresh} />
+                      {rec.effect_cycle != null || rec.legacy_effect_verdict != null ? (
+                        <RecCard rec={rec} showRank={false} onEffectMutated={refresh} />
                       ) : (
                         <>
                           <span className="rec-badge" title={rec.detector_id}>
                             {DETECTOR_GROUP_LABELS[rec.detector_id] ?? rec.detector_id}
                           </span>{" "}
                           {rec.lever} <span className="kpi-off-hint">· {rec.state}</span>
+                          {rec.effect_capability?.mode === "MANUAL" && (
+                            <span className="kpi-off-hint">
+                              {" "}
+                              · Effect not measured{" "}
+                              <InfoTip
+                                label="Effect not measured"
+                                content={EFFECT_NOT_MEASURED_HELP}
+                              />
+                            </span>
+                          )}
                         </>
                       )}
                     </li>
                   ))}
                 </ul>
-              )}
+              ) : null}
               <ImpactLedger
                 key={refreshKey}
                 {...(hasFilters ? { visibleRecIds: visibleAdopted.map((rec) => rec.rec_id) } : {})}
@@ -689,7 +1137,7 @@ export default function RecommendationsPage() {
                 </p>
               ) : (
                 <ul className="rec-dismissed-list">
-                  {visibleDismissed.map((rec) => (
+                  {applySort(visibleDismissed, toolbarParams.sort).map((rec) => (
                     <li key={rec.rec_id} className="rec-dismissed-row">
                       <span className="rec-badge" title={rec.detector_id}>
                         {DETECTOR_GROUP_LABELS[rec.detector_id] ?? rec.detector_id}

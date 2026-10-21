@@ -16,16 +16,8 @@ function fmtPct(value: number | null): string {
 
 function StatCard({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div
-      style={{
-        minWidth: 0,
-        padding: 12,
-        border: "1px solid var(--line)",
-        borderRadius: 6,
-        background: "var(--panel2)",
-      }}
-    >
-      <div className="kpi-label">{label}</div>
+    <div className="card kpi">
+      <div className="lbl">{label}</div>
       {children}
     </div>
   );
@@ -44,33 +36,26 @@ export default function WorkspaceOutcomeTable({ rows }: Props) {
   }
 
   return (
-    <div
-      data-testid="workspace-outcome-stat-cards"
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-        gap: 10,
-      }}
-    >
+    <div data-testid="workspace-outcome-stat-cards" className="grid g4">
       <StatCard label="Successful outcome">
-        <div className="kpi-value">{fmtPct(row.success_rate)}</div>
-        <div className="kpi-subval">
+        <div className="v num">{fmtPct(row.success_rate)}</div>
+        <div className="cmp">
           {row.success_n}/{row.terminal_n} terminal work items
         </div>
       </StatCard>
       <StatCard label="Terminal linked work">
-        <div className="kpi-value">
+        <div className="v num">
           {row.terminal_n}/{row.total_n}
         </div>
-        <div className="kpi-subval">terminal linked work items</div>
+        <div className="cmp">terminal linked work items</div>
       </StatCard>
       <StatCard label="Open linked work">
-        <div className="kpi-value">
+        <div className="v num">
           {row.in_progress_n}/{row.total_n}
         </div>
-        <div className="kpi-subval">OPEN/UNREPORTED linked work items</div>
+        <div className="cmp">OPEN/UNREPORTED linked work items</div>
       </StatCard>
-      <div style={{ gridColumn: "1 / -1", color: "var(--text-muted)", fontSize: 11 }}>
+      <div className="foot" style={{ gridColumn: "1 / -1", marginTop: 0 }}>
         Linked work items are early observed signals; outcome methodology remains under validation.{" "}
         <Chip kind="EXPERIMENTAL" />
       </div>

@@ -43,6 +43,9 @@ export type TokenResult = { ok: true; data: string } | { ok: false; reason: stri
 export interface GithubTokenStatus {
   configured: boolean;
   source: "env" | "credential-manager" | null;
+  state?: "configured" | "absent" | "store-error";
+  code?: GithubCredentialCode;
+  epoch?: number;
   /** Human-readable reason + remedy; present only when not configured. */
   reason?: string;
 }
@@ -51,6 +54,31 @@ export interface GithubTokenStatus {
  * Injectable reader type for tests and stubs.
  */
 export type TokenReader = () => Promise<TokenResult>;
+
+export type GithubCredentialCode =
+  | "github-token-not-found"
+  | "non-windows-platform"
+  | "powershell-unavailable"
+  | "credential-read-timeout"
+  | "credential-read-failed";
+
+function credentialCode(reason: string): GithubCredentialCode {
+  if (
+    reason === "github-token-not-found" ||
+    reason === "non-windows-platform" ||
+    reason === "powershell-unavailable" ||
+    reason === "credential-read-timeout"
+  )
+    return reason;
+  return "credential-read-failed";
+}
+
+export interface GithubCredentialSource {
+  readToken(): Promise<TokenResult>;
+  status(): Promise<GithubTokenStatus>;
+  refresh(): Promise<GithubTokenStatus>;
+  readonly epoch: number;
+}
 
 /**
  * PowerShell script that reads the credential blob via advapi32.
@@ -97,6 +125,9 @@ if ([CredMgr]::CredRead("${CREDENTIAL_TARGET}", 1, 0, [ref]$ptr)) {
   } else {
     [CredMgr]::CredFree($ptr)
   }
+} else {
+  $readError = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  if ($readError -ne 1168) { throw 'AW_CREDENTIAL_READ_ERROR' }
 }
 `.trim();
 
@@ -162,77 +193,105 @@ export function runPowerShell(script: string, raw: RawExec = defaultRawExec): Pr
   });
 }
 
-// Successful token, cached for the daemon's lifetime. The first read runs at
-// boot when the event loop is free (the caller defers it until after the
-// synchronous back-scan); every later 10-min poll then reuses this value
-// instead of re-spawning powershell.exe + recompiling Add-Type under load —
-// which is precisely the condition that can make the read slow/hang. Only
-// successful reads are cached, so a not-yet-configured token is still picked
-// up on a later poll. (A token rotated while the daemon runs needs a restart.)
-let cachedToken: string | null = null;
-
-/**
- * Read the GitHub PAT from Windows Credential Manager.
- * Returns {ok:true,data:token} or {ok:false,reason} — never throws.
- */
-export async function readGithubToken(reader?: TokenReader): Promise<TokenResult> {
-  if (reader !== undefined) return reader();
-
-  const envToken = process.env.AW_GITHUB_TOKEN;
-  if (typeof envToken === "string") {
-    const token = envToken.trim();
-    if (token.length > 0) {
-      return { ok: true, data: token };
-    }
-  }
-
-  if (cachedToken !== null) {
-    return { ok: true, data: cachedToken };
-  }
-
-  if (os.platform() !== "win32") {
-    return { ok: false, reason: "non-windows-platform" };
-  }
-
+async function readWindowsCredential(): Promise<TokenResult> {
+  if (os.platform() !== "win32") return { ok: false, reason: "non-windows-platform" };
   try {
     const token = await runPowerShell(PS_SCRIPT);
-    if (token.length === 0) {
-      return { ok: false, reason: "github-token-not-found" };
-    }
-    cachedToken = token;
-    return { ok: true, data: token };
+    return token.length > 0
+      ? { ok: true, data: token }
+      : { ok: false, reason: "github-token-not-found" };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("ENOENT") || msg.includes("not found") || msg.includes("spawn")) {
-      return { ok: false, reason: "powershell-unavailable" };
-    }
-    return { ok: false, reason: `credential-read-failed: ${msg}` };
+    if (/ENOENT|not found|spawn/i.test(msg)) return { ok: false, reason: "powershell-unavailable" };
+    if (msg.includes("hard-timeout") || msg.includes("ETIMEDOUT"))
+      return { ok: false, reason: "credential-read-timeout" };
+    return { ok: false, reason: "credential-read-failed" };
   }
 }
 
-/**
- * Non-secret token status for the Settings UI. Mirrors the O9 usage-reader
- * status pattern (getOAuthStatus): reports whether outcomes sync has a token
- * and from which source, WITHOUT ever returning the token value. When no token
- * is available the reason names the remedy (AW_GITHUB_TOKEN) so the feature is
- * never silently dark. `reader` is injectable for tests.
- */
-export async function getGithubTokenStatus(reader?: TokenReader): Promise<GithubTokenStatus> {
-  if (reader === undefined) {
-    const envToken = process.env.AW_GITHUB_TOKEN;
-    if (typeof envToken === "string" && envToken.trim().length > 0) {
-      return { configured: true, source: "env" };
+/** Cached normal reads; a refresh fences every older in-flight read. */
+export function createGithubCredentialSource(
+  options: {
+    readStore?: TokenReader;
+    envToken?: () => string | undefined;
+    platform?: () => NodeJS.Platform;
+  } = {},
+): GithubCredentialSource {
+  const readStore = options.readStore ?? readWindowsCredential;
+  const envToken = options.envToken ?? (() => process.env.AW_GITHUB_TOKEN);
+  const platform = options.platform ?? (() => os.platform());
+  let epoch = 0;
+  let cachedToken: string | null = null;
+
+  const readToken = async (): Promise<TokenResult> => {
+    const fromEnv = envToken()?.trim();
+    if (fromEnv) return { ok: true, data: fromEnv };
+    if (cachedToken !== null) return { ok: true, data: cachedToken };
+    const startedAt = epoch;
+    let result: TokenResult;
+    try {
+      result = await readStore();
+    } catch {
+      result = { ok: false, reason: "credential-read-failed" };
     }
-  }
-  // reader===undefined here means no env token; delegate to the platform read.
-  // An injected reader stands in for the platform credential source.
-  const result = await readGithubToken(reader);
-  if (result.ok) {
-    return { configured: true, source: "credential-manager" };
-  }
-  const reason =
-    os.platform() === "win32"
-      ? "outcomes sync: no GitHub token — set AW_GITHUB_TOKEN, or store AgentWrangler-GithubToken in Credential Manager"
-      : "outcomes sync: no GitHub token — set AW_GITHUB_TOKEN";
-  return { configured: false, source: null, reason };
+    if (startedAt !== epoch) return readToken();
+    if (result.ok) cachedToken = result.data;
+    return result.ok ? result : { ok: false, reason: credentialCode(result.reason) };
+  };
+
+  const status = async (): Promise<GithubTokenStatus> => {
+    if (envToken()?.trim()) return { configured: true, source: "env", state: "configured", epoch };
+    const result = await readToken();
+    if (result.ok)
+      return { configured: true, source: "credential-manager", state: "configured", epoch };
+    const code = credentialCode(result.reason);
+    const storeError =
+      code === "powershell-unavailable" ||
+      code === "credential-read-timeout" ||
+      code === "credential-read-failed";
+    const reason = storeError
+      ? "Credential store could not be read. Retry, or set AW_GITHUB_TOKEN and restart the daemon."
+      : platform() === "win32"
+        ? "outcomes sync: no GitHub token — set AW_GITHUB_TOKEN, or store AgentWrangler-GithubToken in Credential Manager"
+        : "outcomes sync: no GitHub token — set AW_GITHUB_TOKEN";
+    return {
+      configured: false,
+      source: null,
+      state: storeError ? "store-error" : "absent",
+      code,
+      epoch,
+      reason,
+    };
+  };
+
+  return {
+    readToken,
+    status,
+    refresh: () => {
+      epoch += 1;
+      cachedToken = null;
+      return status();
+    },
+    get epoch() {
+      return epoch;
+    },
+  };
+}
+
+export const githubCredentialSource = createGithubCredentialSource();
+
+export function readGithubToken(reader?: TokenReader): Promise<TokenResult> {
+  return reader === undefined
+    ? githubCredentialSource.readToken()
+    : createGithubCredentialSource({ readStore: reader }).readToken();
+}
+
+export function getGithubTokenStatus(reader?: TokenReader): Promise<GithubTokenStatus> {
+  return reader === undefined
+    ? githubCredentialSource.status()
+    : createGithubCredentialSource({ readStore: reader }).status();
+}
+
+export function refreshGithubTokenStatus(): Promise<GithubTokenStatus> {
+  return githubCredentialSource.refresh();
 }

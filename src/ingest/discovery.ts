@@ -13,6 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { noteScanRootReadable } from "../daemon/readiness.js";
 import type { Db } from "../db/open.js";
 
 export interface DiscoveredFile {
@@ -20,8 +21,21 @@ export interface DiscoveredFile {
   projectSlug: string;
 }
 
-/** Recursively collect every *.jsonl under `dir`, tagging each with `slug`. */
+/** The parity canary's temp workspaces (`…-agentwrangler-canary-<uuid>`) are test runs, not usage. */
+export const CANARY_SLUG_MARK = "agentwrangler-canary-";
+
+/**
+ * The workspace a slug dir belongs to. A git worktree's sessions (`<repo>/.worktrees/<x>`
+ * or `<repo>/.claude/worktrees/<x>`) get their own slug dir; they belong to the repo.
+ */
+export function workspaceSlugFor(slug: string): string {
+  const m = /^(.+?)--(?:claude-)?worktrees-./.exec(slug);
+  return m ? (m[1] as string) : slug;
+}
+
+/** Recursively collect every *.jsonl under `dir`, tagging each with `slug`'s workspace. */
 function collectJsonl(dir: string, slug: string, out: DiscoveredFile[]): void {
+  if (slug.includes(CANARY_SLUG_MARK)) return;
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -35,7 +49,7 @@ function collectJsonl(dir: string, slug: string, out: DiscoveredFile[]): void {
   // session's file_path pointing at the top-level transcript, not a subagent file.
   for (const e of entries) {
     if (e.isFile() && e.name.endsWith(".jsonl")) {
-      out.push({ filePath: path.join(dir, e.name), projectSlug: slug });
+      out.push({ filePath: path.join(dir, e.name), projectSlug: workspaceSlugFor(slug) });
     }
   }
   for (const e of entries) {
@@ -114,7 +128,7 @@ function filesForSlug(
   projectSlug: string,
 ): DiscoveredFile[] {
   return discovered.filter(
-    (file) => file.projectSlug === projectSlug && isInside(dir, file.filePath),
+    (file) => file.projectSlug === workspaceSlugFor(projectSlug) && isInside(dir, file.filePath),
   );
 }
 
@@ -132,9 +146,9 @@ function replaceFullCache(
   const nextRoots = new Map<string, CachedRootDirectory>();
   for (const root of roots) {
     const rootMtimeMs = directoryMtimeMs(root);
-    if (rootMtimeMs === null) continue;
-    const slugDirs = readSlugDirectories(root);
-    if (slugDirs === null) continue;
+    const slugDirs = rootMtimeMs === null ? null : readSlugDirectories(root);
+    noteScanRootReadable(root, slugDirs !== null);
+    if (rootMtimeMs === null || slugDirs === null) continue;
 
     const cachedSlugDirs = new Map<string, CachedSlugDirectory>();
     for (const [dir, slug] of slugDirs) {
@@ -171,6 +185,7 @@ export function refreshDiscoveryCache(
   for (const root of roots) {
     const rootMtimeMs = directoryMtimeMs(root);
     if (rootMtimeMs === null) {
+      noteScanRootReadable(root, false);
       cache.roots.delete(root);
       continue;
     }
@@ -185,6 +200,7 @@ export function refreshDiscoveryCache(
     const rootChanged = isNewRoot || cachedRoot.mtimeMs !== rootMtimeMs;
     if (rootChanged) {
       const currentSlugDirs = readSlugDirectories(root);
+      noteScanRootReadable(root, currentSlugDirs !== null);
       if (currentSlugDirs !== null) {
         const nextSlugDirs = new Map<string, CachedSlugDirectory>();
         for (const [dir, slug] of currentSlugDirs) {
@@ -206,6 +222,7 @@ export function refreshDiscoveryCache(
       continue;
     }
 
+    noteScanRootReadable(root, true);
     for (const [dir, cachedSlug] of cachedRoot.slugDirs) {
       const mtimeMs = directoryMtimeMs(dir);
       if (mtimeMs === null) {

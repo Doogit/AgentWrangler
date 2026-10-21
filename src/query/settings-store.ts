@@ -13,11 +13,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig } from "../daemon/config.js";
+import { resolveScanRoots } from "../daemon/scan-roots.js";
 import type { Db } from "../db/open.js";
+import { getHistoryCoverage, getPipelineStatus } from "../ingest/boot-progress.js";
+import { bumpEnrichmentEpoch } from "../ingest/enrichment-epoch.js";
 import type { Health } from "../ingest/health.js";
 import type { HealthCounters } from "../ingest/types.js";
 import { newHealthCounters } from "../ingest/types.js";
-import { fetchOAuthUsage } from "../oauth/usage.js";
 import type { UsageReader } from "../oauth/usage.js";
 import type {
   ParserHealth,
@@ -27,6 +29,8 @@ import type {
   WorkspaceMapping,
 } from "./api/settings.js";
 import { capWeightExprSql, resolveCapReadCoeff } from "./cap-weighted.js";
+import { readStatuslineUsage } from "./limits/statusline.js";
+import { USAGE_CLI_ENABLED_KEY } from "./limits/usage-sources.js";
 
 // ---------------------------------------------------------------------------
 // Calibration result type (ADR-111)
@@ -71,6 +75,11 @@ function getHealthCounters(): HealthCounters {
   return _health?.snapshot() ?? newHealthCounters();
 }
 
+/** The parser-health part of Settings alone: in-memory counters, no DB or disk reads. */
+export function getParserHealth(): ParserHealth {
+  return toParserHealth(getHealthCounters());
+}
+
 function toParserHealth(c: HealthCounters): ParserHealth {
   return {
     files_seen: c.filesSeen,
@@ -86,14 +95,14 @@ function toParserHealth(c: HealthCounters): ParserHealth {
 // user_config key helpers
 // ---------------------------------------------------------------------------
 
-function configGet(db: Db, key: string): string | null {
+export function configGet(db: Db, key: string): string | null {
   const row = db.prepare("SELECT value FROM user_config WHERE key = ?").get(key) as
     | { value: string | null }
     | undefined;
   return row?.value ?? null;
 }
 
-function configSet(db: Db, key: string, value: string | null): void {
+export function configSet(db: Db, key: string, value: string | null): void {
   db.prepare(
     `INSERT INTO user_config (key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -166,21 +175,7 @@ export function getSettingsData(db: Db): Settings {
   const cfg = loadConfig();
 
   // Overlay DB-persisted values over daemon defaults
-  const scanRootsRaw = configGet(db, "scan_roots");
-  let scanRoots: string[];
-  if (scanRootsRaw !== null) {
-    try {
-      const parsed: unknown = JSON.parse(scanRootsRaw);
-      // Degrade a corrupt/wrong-typed value (e.g. hand-edited DB) to daemon
-      // defaults rather than throwing — a getSettings/reset return-read must
-      // never hard-fail — and never surface a non-array as scan_roots.
-      scanRoots = Array.isArray(parsed) ? (parsed as string[]) : cfg.scanRoots;
-    } catch {
-      scanRoots = cfg.scanRoots;
-    }
-  } else {
-    scanRoots = cfg.scanRoots;
-  }
+  const scanRoots = resolveScanRoots(configGet(db, "scan_roots"), cfg.scanRoots);
 
   const windowRaw = configGet(db, "activity_window_secs");
   const activityWindowSecs: number =
@@ -216,6 +211,7 @@ export function getSettingsData(db: Db): Settings {
     limit_tokens: limitTokens,
     limit_provenance: limitProvenance,
     limit_resets_at: limitResetsAt,
+    cap_read_coeff: resolveCapReadCoeff(db),
     workspace_mappings: readWorkspaceMappings(db),
     parser_health: toParserHealth(getHealthCounters()),
     quarantine_rows: readQuarantineRows(db),
@@ -224,6 +220,7 @@ export function getSettingsData(db: Db): Settings {
     bytes_per_token: bpt,
     bytes_per_token_provenance: bptProvenance,
     bytes_per_token_measured_at: bptMeasuredAt,
+    usage_cli_enabled: configGet(db, USAGE_CLI_ENABLED_KEY) !== "false",
   };
 }
 
@@ -286,6 +283,14 @@ export function applySettingsUpdate(db: Db, update: SettingsUpdate): Settings {
       throw new Error(err);
     }
   }
+  if (
+    update.cap_read_coeff !== undefined &&
+    (!Number.isFinite(update.cap_read_coeff) ||
+      update.cap_read_coeff <= 0 ||
+      update.cap_read_coeff > 1)
+  ) {
+    throw new Error("Cache-read cap coefficient must be greater than 0 and at most 1.");
+  }
 
   // Validate any non-empty repo_canonical shape before writing anything
   if (update.workspace_mappings !== undefined) {
@@ -322,6 +327,9 @@ export function applySettingsUpdate(db: Db, update: SettingsUpdate): Settings {
     if (update.activity_window_secs !== undefined) {
       configSet(db, "activity_window_secs", String(update.activity_window_secs));
     }
+    if (update.cap_read_coeff !== undefined) {
+      configSet(db, "cap_read_coeff", String(update.cap_read_coeff));
+    }
     // R12 — opt-in calibration toggle
     if (update.bytes_per_token_calibration_enabled !== undefined) {
       configSet(
@@ -329,6 +337,9 @@ export function applySettingsUpdate(db: Db, update: SettingsUpdate): Settings {
         "bytes_per_token_calibration_enabled",
         update.bytes_per_token_calibration_enabled ? "true" : null,
       );
+    }
+    if (update.usage_cli_enabled !== undefined) {
+      configSet(db, USAGE_CLI_ENABLED_KEY, update.usage_cli_enabled ? "true" : "false");
     }
     if (update.workspace_mappings !== undefined) {
       const stmt = db.prepare(
@@ -374,6 +385,21 @@ export function applySettingsUpdate(db: Db, update: SettingsUpdate): Settings {
 /** Seven-day nominal window duration (ms) for deriving window_start from resets_at. */
 const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** How much local history is ingested: `loading` while the boot backfill runs. */
+export interface HistoryState {
+  loading: boolean;
+  /** Every turn from here on is ingested (ms); null until the newest week is done. */
+  completeThroughMs: number | null;
+}
+
+function currentHistoryState(): HistoryState {
+  const pipeline = getPipelineStatus();
+  return {
+    loading: pipeline !== null && pipeline.phase !== "done" && pipeline.failed_phase === null,
+    completeThroughMs: getHistoryCoverage()?.complete_through_ms ?? null,
+  };
+}
+
 /**
  * Auto-calibrate `:limit_tokens` from the oauth/usage endpoint (ADR-111).
  *
@@ -388,12 +414,15 @@ const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
  * Guards (mandatory per ADR-111):
  *  - utilization < 0.02 → refuse; < 0.10 proceeds with low confidence.
  *  - any non-200 from oauth/usage → return ok:false, never throw or block.
+ *  - history still loading and the window not yet fully ingested → refuse
+ *    (REL-FIX: a mid-backfill calibration stored 120,281 against ~119M).
  *
- * The `reader` parameter is injectable for tests; defaults to fetchOAuthUsage().
+ * `reader` and `history` are injectable for tests; `reader` defaults to the statusline reader (OAUTH-1).
  */
 export async function calibrateLimit(
   db: Db,
-  reader: UsageReader = fetchOAuthUsage,
+  reader: UsageReader = () => readStatuslineUsage(),
+  history: () => HistoryState = currentHistoryState,
 ): Promise<CalibrateResult> {
   // 1. Fetch utilization
   let usage: Awaited<ReturnType<UsageReader>>;
@@ -438,7 +467,18 @@ export async function calibrateLimit(
   if (!Number.isFinite(resetsAtMs)) {
     return { ok: false, reason: "oauth/usage returned an invalid resets_at timestamp." };
   }
-  const windowStartIso = new Date(resetsAtMs - SEVEN_DAY_MS).toISOString();
+  const windowStartMs = resetsAtMs - SEVEN_DAY_MS;
+  const windowStartIso = new Date(windowStartMs).toISOString();
+
+  // The local sum is only meaningful once every turn in the window is ingested.
+  const hist = history();
+  if (hist.loading && (hist.completeThroughMs === null || hist.completeThroughMs > windowStartMs)) {
+    return {
+      ok: false,
+      reason:
+        "Local history is still loading, so this week's usage is incomplete. Calibrate again once loading finishes.",
+    };
+  }
 
   // 4. Sum CAP-WEIGHTED tokens (Data Model §2A meter: cache reads × COEFF,
   // unverified; input/output/cache-writes full weight) in the window.
@@ -496,6 +536,22 @@ export async function calibrateLimit(
 export const RESET_DATA_TABLES = [
   "reports",
   "apply_jobs",
+  "hre_intervention_locks",
+  "hre_effect_cycle_links",
+  "hre_measurement_methods",
+  "hre_artifact_applications",
+  "hre_artifact_revisions",
+  "hre_recommendation_lifecycle_events",
+  "hre_recommendation_findings",
+  "hre_recommendation_revisions",
+  "hre_recommendations",
+  "hre_findings",
+  "hre_ceu_pools",
+  "hre_composition_snapshots",
+  "hre_capability_observations",
+  "hre_capability_profiles",
+  "hre_handler_retirements",
+  "hre_handler_history",
   "effect_mutation_keys",
   "effect_rollback_operations",
   "effect_guardrail_results",
@@ -510,26 +566,42 @@ export const RESET_DATA_TABLES = [
   "work_record_tombstones",
   "work_records",
   "recommendation_effects",
-  "recommendation_feedback",
+  "recommendation_lifecycle_actions",
   "recommendation_goal_preference",
   "recommendations",
+  "detector_status_live",
+  "detector_week_results",
+  "detector_week_marks",
+  "detector_eval_marks",
+  "detector_quarantine",
+  "setup_grade_snapshots",
+  "judge_verdicts",
+  "ledger_daily",
+  "ledger_daily_top",
+  "ledger_daily_sessions",
+  "ledger_daily_marks",
   "analysis_runs",
   "session_work_links",
   "observed_outcomes",
   "review_findings",
   "work_item_branch_keys",
   "work_items",
+  "subagent_meta",
+  "tool_event_content",
   "tool_event_metadata",
+  "tool_event_skills",
   "tool_events",
   "turns",
   "session_churn",
   "sessions",
   "context_inventory",
   "context_inventory_history",
+  "catalog_items",
   "workspaces",
   "ingest_quarantine",
   "ingest_metric_events",
   "ingest_metric_baselines",
+  "ingest_classifier_baselines",
   "ingest_offsets",
 ] as const;
 
@@ -540,23 +612,58 @@ export const RESET_DATA_TABLES = [
  *     and caches snapshot_ids for the process lifetime). Wiping it while the
  *     daemon runs would orphan those cached ids and make the next re-ingested
  *     turn violate the turns.pricing_snapshot_id FK; it is not ingested session data.
+ *   - limit_snapshots: past Anthropic limit readings; re-ingesting transcripts can't recover them.
+ *   - recommendation_feedback: the user's own relevance verdicts (keyed by opaque identity,
+ *     not rec_id); re-ingesting transcripts can't recover them.
+ *
+ * Rule: a reset never destroys what transcripts can't rebuild. Acted-on recs (any state but
+ * PROPOSED/RETIRED) and the rows hanging off them are kept by RESET_KEEP_ROWS below; the
+ * detector upsert leaves their state/adopted_at alone when re-ingest re-emits them.
  */
 export const RESET_PRESERVED_TABLES = [
   "user_config",
   "schema_migrations",
   "pricing_snapshots",
+  "limit_snapshots",
+  "recommendation_feedback",
 ] as const;
 
+const KEPT_RECS = "SELECT rec_id FROM recommendations WHERE state NOT IN ('PROPOSED','RETIRED')";
+const KEPT_CYCLES = `SELECT cycle_id FROM effect_cycles WHERE rec_id IN (${KEPT_RECS})`;
+
 /**
- * Full data-table wipe (preserves RESET_PRESERVED_TABLES).
+ * Rows of RESET_DATA_TABLES that survive a reset: acted-on recs, their effect cycles
+ * (+ children), apply jobs, legacy effects, lifecycle actions, and the analysis runs
+ * they cite. Parents are deleted after children, so these subqueries still see them.
+ * hre_effect_cycle_links is wiped with the rest of hre_*; a kept cycle loses only that bridge.
+ */
+const RESET_KEEP_ROWS: Partial<Record<(typeof RESET_DATA_TABLES)[number], string>> = {
+  apply_jobs: `rec_id IN (${KEPT_RECS})`,
+  effect_mutation_keys: `cycle_id IN (${KEPT_CYCLES})`,
+  effect_rollback_operations: `cycle_id IN (${KEPT_CYCLES})`,
+  effect_guardrail_results: `cycle_id IN (${KEPT_CYCLES})`,
+  effect_cycles: `rec_id IN (${KEPT_RECS})`,
+  recommendation_effects: `rec_id IN (${KEPT_RECS})`,
+  recommendation_lifecycle_actions: `rec_id IN (${KEPT_RECS})`,
+  recommendations: "state NOT IN ('PROPOSED','RETIRED')",
+  analysis_runs:
+    // IS NOT NULL: a NULL in the IN-set would make NOT(...) NULL and keep every row.
+    "run_id IN (SELECT analysis_run_id FROM recommendations WHERE analysis_run_id IS NOT NULL" +
+    " UNION SELECT run_id FROM apply_jobs WHERE run_id IS NOT NULL)",
+};
+
+/**
+ * Data-table wipe (preserves RESET_PRESERVED_TABLES and RESET_KEEP_ROWS).
  * Executes in a single transaction; sets last_reset_at in user_config.
  * Returns fresh settings after the reset.
  */
 export function resetDatabase(db: Db): Settings {
   db.transaction(() => {
     for (const table of RESET_DATA_TABLES) {
-      db.prepare(`DELETE FROM ${table}`).run();
+      const keep = RESET_KEEP_ROWS[table];
+      db.prepare(`DELETE FROM ${table}${keep ? ` WHERE NOT (${keep})` : ""}`).run();
     }
+    bumpEnrichmentEpoch(db); // the wipe is re-ingested into the same windows
     configSet(db, "last_reset_at", new Date().toISOString());
   })();
 

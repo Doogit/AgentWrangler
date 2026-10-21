@@ -1,6 +1,7 @@
 /** Live Claude Code agent measurements and confirm-gated session termination. */
 
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
+import { withoutAnthropicApiKey } from "../../shared/claude-child-env.js";
 import { capWeightExprSql, resolveCapReadCoeff } from "../cap-weighted.js";
 import { getQueryDb } from "../db-context.js";
 import { type ApiResponse, buildResponse } from "../envelope.js";
@@ -67,7 +68,7 @@ function unavailable(): ApiResponse<AgentsLivenessResult> {
 }
 
 function runAgentsCommand(): Promise<string | null> {
-  const childEnv = { ...process.env };
+  const childEnv = withoutAnthropicApiKey({ ...process.env });
   // biome-ignore lint/performance/noDelete: the child must not inherit Claude's nesting guard.
   delete childEnv.CLAUDECODE;
   for (const key of Object.keys(childEnv)) {
@@ -79,6 +80,7 @@ function runAgentsCommand(): Promise<string | null> {
     child = spawn("claude", ["agents", "--json"], {
       env: childEnv,
       stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
     });
   } catch {
     return Promise.resolve(null);
@@ -115,12 +117,92 @@ function isProcessNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
 }
 
-function pause(milliseconds: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+function pause(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** The process group id of `pid` via `ps`, or null when it can't be read. Never rejects. */
+function readPgid(pid: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "ps",
+        ["-o", "pgid=", "-p", String(pid)],
+        { timeout: 2_000, windowsHide: true },
+        (error, stdout) => {
+          const pgid = Number(String(stdout).trim());
+          resolve(error || !Number.isInteger(pgid) || pgid <= 0 ? null : pgid);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * F3: signal the whole group only when `pid` leads its own group AND the daemon is not in that
+ * group (a daemon started from inside the session would otherwise kill itself). Never throws.
+ */
+async function leadsSeparateGroup(
+  pid: number,
+  pgidOf: (pid: number) => Promise<number | null>,
+): Promise<boolean> {
+  try {
+    const [target, daemon] = await Promise.all([pgidOf(pid), pgidOf(process.pid)]);
+    return target === pid && daemon !== null && daemon !== pid;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Signal the agent's process group (negative pid) so its MCP servers, Bash tool children and
+ * dev servers go too; fall back to the pid alone when the group signal fails (D5, non-Windows).
+ */
+function signalTree(pid: number, signal: NodeJS.Signals, group: boolean): void {
+  if (group) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // fall through to the pid
+    }
+  }
+  process.kill(pid, signal);
+}
+
+/** True while the process group (when signalled) or the pid itself still exists. */
+function treeAlive(pid: number, group: boolean): boolean {
+  if (group) {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      // no group left; check the pid
+    }
+  }
+  try {
+    return isAlive(pid);
+  } catch (error) {
+    if (isProcessNotFound(error)) return false;
+    throw error;
+  }
+}
+
+export interface EndSessionDeps {
+  pgidOf: (pid: number) => Promise<number | null>;
+  /** How long SIGTERM gets before SIGKILL (F2). */
+  graceMs: number;
 }
 
 /** End an agent process only after an explicit user confirmation. */
-export function endSession(pid: unknown, confirm: unknown): EndSessionResult {
+export async function endSession(
+  pid: unknown,
+  confirm: unknown,
+  deps: Partial<EndSessionDeps> = {},
+): Promise<EndSessionResult> {
+  const { pgidOf = readPgid, graceMs = 3_000 } = deps;
   if (confirm !== true) return { ok: false, reason: "confirmation required", status: 400 };
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
     return { ok: false, reason: "invalid pid", status: 400 };
@@ -140,19 +222,24 @@ export function endSession(pid: unknown, confirm: unknown): EndSessionResult {
     if (process.platform === "win32") {
       const result = spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], {
         stdio: "ignore",
+        windowsHide: true,
       });
       if (result.error) throw result.error;
       if (result.status !== 0) throw new Error("taskkill failed");
     } else {
-      process.kill(pid, "SIGTERM");
-      pause(100);
-      try {
-        isAlive(pid);
-      } catch (error) {
-        if (isProcessNotFound(error)) return { ok: true, ended: pid, status: 200 };
-        throw error;
+      const group = await leadsSeparateGroup(pid, pgidOf);
+      signalTree(pid, "SIGTERM", group);
+      // F2: give claude time to flush and stop its children before SIGKILL hits the group.
+      for (let waited = 0; waited < graceMs; waited += 100) {
+        await pause(100);
+        if (!treeAlive(pid, group)) return { ok: true, ended: pid, status: 200 };
       }
-      process.kill(pid, "SIGKILL");
+      try {
+        signalTree(pid, "SIGKILL", group);
+      } catch (error) {
+        // It exited between the check and the kill.
+        if (!isProcessNotFound(error)) throw error;
+      }
     }
     return { ok: true, ended: pid, status: 200 };
   } catch (error) {
@@ -164,10 +251,23 @@ export function endSession(pid: unknown, confirm: unknown): EndSessionResult {
   }
 }
 
-/** Return active Claude Code agents enriched with local, read-only usage measurements. */
-export async function getAgentsLiveness(): Promise<ApiResponse<AgentsLivenessResult>> {
-  if (cached !== null && Date.now() - cached.at < CACHE_MS) return cached.result;
+let inFlight: Promise<ApiResponse<AgentsLivenessResult>> | null = null;
 
+/**
+ * Return active Claude Code agents enriched with local, read-only usage measurements.
+ * Concurrent callers share the one `claude agents` run already in flight (never an older result).
+ */
+export function getAgentsLiveness(): Promise<ApiResponse<AgentsLivenessResult>> {
+  if (cached !== null && Date.now() - cached.at < CACHE_MS) return Promise.resolve(cached.result);
+  if (inFlight === null) {
+    inFlight = measureAgentsLiveness().finally(() => {
+      inFlight = null;
+    });
+  }
+  return inFlight;
+}
+
+async function measureAgentsLiveness(): Promise<ApiResponse<AgentsLivenessResult>> {
   const stdout = await runAgentsCommand();
   if (stdout === null) return unavailable();
 

@@ -1,0 +1,9 @@
+{
+  "id": "C4",
+  "positive": { "fixture": "positive", "expect": "fires" },
+  "near_miss": {
+    "fixture": "near-miss",
+    "target_constant": "C4_MIN_CONSECUTIVE_FAILURES",
+    "expect": "silent"
+  }
+}

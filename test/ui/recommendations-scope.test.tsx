@@ -47,6 +47,10 @@ async function loaded() {
   return result;
 }
 
+function est(basis: "P" | "E" | "O" | "R" | "X", rank: number | null) {
+  return { basis, rank_value_u_per_wk: rank, summable: false, label: `${basis} estimate` };
+}
+
 function titles(container: HTMLElement) {
   // The selected recommendation is a standalone action card; the compact queue
   // retains grouped siblings. Read both surfaces in their displayed order.
@@ -60,12 +64,12 @@ function titles(container: HTMLElement) {
 
 describe("UA2 recommendation ordering and scope", () => {
   it.each(["detector", "workspace"])(
-    "honors newest and within-family modeled sorting in %s groups",
+    "honors newest and estimated-weekly-value sorting in %s groups",
     async (group) => {
       provide([
-        card("older-high", { created_at: "2026-09-01", modeled_savings_u_per_wk: 3_000_000 }),
-        card("newer-low", { created_at: "2026-09-03", modeled_savings_u_per_wk: 2_000_000 }),
-        card("unknown", { created_at: "2026-09-02", modeled_savings_u_per_wk: null }),
+        card("older-high", { created_at: "2026-09-01", estimate: est("P", 3_000_000) }),
+        card("newer-low", { created_at: "2026-09-03", estimate: est("E", 2_000_000) }),
+        card("unknown", { created_at: "2026-09-02", estimate: est("R", null) }),
       ]);
       window.location.hash = `#/recommendations?group=${group}&sort=newest`;
       const { container, getByLabelText } = await loaded();
@@ -74,7 +78,9 @@ describe("UA2 recommendation ordering and scope", () => {
       await waitFor(() =>
         expect(titles(container)).toEqual(["older-high", "newer-low", "unknown"]),
       );
-      expect(container.textContent).toContain("Estimates can overlap; do not add them together.");
+      expect(container.textContent).toContain(
+        "Dollar figures are net of overlaps: each token is counted once, so they add up.",
+      );
       expect(getByLabelText("Sort recommendations").textContent).toContain("Recommended order");
     },
   );
@@ -90,14 +96,29 @@ describe("UA2 recommendation ordering and scope", () => {
     expect(titles(container)).toEqual(["a-newer", "a-older", "b-newest"]);
   });
 
-  it("keeps family policy when workspace sorting by non-comparable estimates", async () => {
+  // P3.L-F: the value sort uses the $ the card shows (pre-L6 fixtures: modeled_savings), not the
+  // stored rank value; X basis is not special-cased.
+  it("sorts estimated weekly value by the shown $ across families", async () => {
     provide([
-      card("first-family", { detector_id: "D2", modeled_savings_u_per_wk: 2_000_000 }),
-      card("second-family", { detector_id: "D8", modeled_savings_u_per_wk: 900_000_000 }),
+      card("x-basis-huge-modeled", {
+        detector_id: "D2",
+        modeled_savings_u_per_wk: 900_000_000,
+        estimate: est("X", 900_000_000),
+      }),
+      card("low-rank", {
+        detector_id: "D2",
+        modeled_savings_u_per_wk: 800_000_000,
+        estimate: est("E", 1_000_000),
+      }),
+      card("high-rank", {
+        detector_id: "D8",
+        modeled_savings_u_per_wk: 1,
+        estimate: est("P", 5_000_000),
+      }),
     ]);
     window.location.hash = "#/recommendations?group=workspace&sort=savings";
     const { container } = await loaded();
-    expect(titles(container)).toEqual(["first-family", "second-family"]);
+    expect(titles(container)).toEqual(["x-basis-huge-modeled", "low-rank", "high-rank"]);
   });
 
   it("uses scope ahead of legacy workspace for warnings, lifecycle lists, summary and ledger", async () => {
@@ -167,73 +188,142 @@ describe("UA2 recommendation ordering and scope", () => {
     );
   });
 
-  it("filters warnings by tier without claiming no findings while a visible warning remains", async () => {
-    const warning = card("only-warning", {
-      detector_id: "D5",
-      modeled_formula: { model: "warning", inputs: {}, kind: "WARNING" },
-    });
-    provide([card("modeled")], [warning]);
-    window.location.hash = "#/recommendations?tier=WARNING";
-    const { container, getByText } = await loaded();
+  // U5.3 item 1: no "More filters" disclosure; every control is visible at load.
+  it("shows Status, Basis, Last seen, Sort and Group by without a disclosure", async () => {
+    provide([card("any", { estimate: est("P", 1) })]);
+    const { container, getByLabelText } = await loaded();
+    expect(container.querySelector(".recs-toolbar details")).toBeNull();
+    expect(container.textContent).not.toContain("More filters");
+    expect(container.textContent).not.toContain("Suggestion type");
+    expect(container.querySelector("[data-toolbar-state='proposed']")).not.toBeNull();
+    expect(
+      [...container.querySelectorAll("[data-toolbar-basis]")].map((chip) => chip.textContent),
+    ).toEqual(["Modeled", "Usage-estimated", "Overlap", "Risk"]);
+    expect((getByLabelText("Last seen") as HTMLSelectElement).value).toBe("all");
+    expect(getByLabelText("Sort recommendations")).not.toBeNull();
+    expect(getByLabelText("Group recommendations by")).not.toBeNull();
+  });
+
+  // U5.3 item 2: Basis filters on estimate.basis P/E/O/R.
+  it.each([
+    ["Modeled", "P", ["p-card"]],
+    ["Usage-estimated", "E", ["e-card-1", "e-card-2"]],
+    ["Overlap", "O", ["o-card"]],
+    ["Risk", "R", ["r-card"]],
+  ] as const)("Basis %s shows only basis-%s cards", async (label, basis, expected) => {
+    provide(
+      [
+        card("p-card", { estimate: est("P", 50) }),
+        card("e-card-1", { estimate: est("E", 40) }),
+        card("o-card", { estimate: est("O", 30) }),
+        card("e-card-2", { estimate: est("E", 20) }),
+        card("r-card", { estimate: est("R", 10) }),
+        card("x-card", { estimate: est("X", null) }),
+      ],
+      [card("limit-warning", { detector_id: "D5", estimate: est("X", null) })],
+    );
+    const { container, getByRole } = await loaded();
+    expect(titles(container)).toHaveLength(6);
+    fireEvent.click(getByRole("button", { name: label }));
+    await waitFor(() => expect(window.location.hash).toContain(`basis=${basis}`));
+    await waitFor(() => expect([...titles(container)].sort()).toEqual([...expected].sort()));
+    expect(container.querySelector("[data-toolbar-state='proposed']")?.textContent).toContain(
+      `(${expected.length})`,
+    );
+    fireEvent.click(getByRole("button", { name: label }));
+    await waitFor(() => expect(titles(container)).toHaveLength(6));
+  });
+
+  // F5 ranks only the current window; Last seen cannot restore stale cards.
+  it.each([
+    ["all", ["now"]],
+    ["30d", ["now"]],
+    ["7d", ["now"]],
+  ] as const)("Last seen %s keeps only current-window ranked cards", async (value, expected) => {
+    provide([
+      card("now", { weeks_ago: 0 }),
+      card("one-week", { weeks_ago: 1 }),
+      card("four-weeks", { weeks_ago: 4 }),
+      card("five-weeks", { weeks_ago: 5 }),
+      card("stale", { weeks_ago: 30 }),
+    ]);
+    const { container, getByLabelText } = await loaded();
+    fireEvent.change(getByLabelText("Last seen"), { target: { value } });
+    await waitFor(() => expect([...titles(container)].sort()).toEqual([...expected].sort()));
+    if (value === "all") expect(window.location.hash).not.toContain("seen=");
+    else expect(window.location.hash).toContain(`seen=${value}`);
+  });
+
+  it("filters warnings by window without claiming no findings while a visible warning remains", async () => {
+    const warning = card("only-warning", { detector_id: "D5", weeks_ago: 0 });
+    provide([card("stale-card", { weeks_ago: 9 })], [warning]);
+    window.location.hash = "#/recommendations?seen=7d";
+    const { container } = await loaded();
     expect(container.querySelector("[data-toolbar-state='proposed']")?.textContent).toContain(
       "(1)",
     );
+    expect(titles(container)).toEqual([]);
     expect(container.textContent).not.toContain("No active recommendations");
+    expect(container.textContent).not.toContain("No matching recommendations");
     expect(container.querySelector(".recs-summary-count-number")?.textContent).toBe("1");
     expect(container.querySelector(".recs-summary-lever")?.textContent).toContain("Most findings:");
-    fireEvent.click(container.querySelector(".recs-toolbar-more summary") as HTMLElement);
-    fireEvent.click(getByText("Warning", { selector: "button" }));
-    await waitFor(() => expect(titles(container)).toEqual(["modeled"]));
   });
 
-  it("clears the proposed-only tier when switching to adopted", async () => {
-    const data = provide([
-      card("warning", {
-        detector_id: "D5",
-        modeled_formula: { model: "warning", inputs: {}, kind: "WARNING" },
-      }),
-    ]);
-    data.adopted = [card("adopted-modeled", { state: "ADOPTED" })];
+  it("clears proposed-only Basis and Last seen when switching to adopted", async () => {
+    const data = provide([card("p-card", { estimate: est("P", 1), weeks_ago: 0 })]);
+    data.adopted = [card("adopted-e", { state: "ADOPTED", estimate: est("E", 1), weeks_ago: 9 })];
+    window.location.hash = "#/recommendations?basis=P&seen=7d";
     const { container, getByRole } = await loaded();
-
-    fireEvent.click(container.querySelector(".recs-toolbar-more summary") as HTMLElement);
-    fireEvent.click(getByRole("button", { name: "Warning" }));
-    await waitFor(() => expect(window.location.hash).toContain("tier=WARNING"));
 
     fireEvent.click(getByRole("button", { name: /Adopted/ }));
     await waitFor(() => expect(window.location.hash).toContain("state=adopted"));
 
-    expect(window.location.hash).not.toContain("tier=");
-    expect(container.querySelector(".rec-adopted-list")?.textContent).toContain("adopted-modeled");
+    expect(window.location.hash).not.toContain("basis=");
+    expect(window.location.hash).not.toContain("seen=");
+    expect(container.querySelector(".rec-adopted-list")?.textContent).toContain("adopted-e");
   });
 
   it.each([
     ["adopted", "ADOPTED", ".rec-adopted-list"],
     ["dismissed", "DISMISSED", ".rec-dismissed-list"],
   ] as const)(
-    "ignores a direct tier hash for %s recommendations",
+    "ignores a direct basis/seen hash for %s recommendations",
     async (state, recommendationState, selector) => {
       const data = provide([]);
-      data[state] = [card(`${state}-modeled`, { state: recommendationState })];
-      window.location.hash = `#/recommendations?state=${state}&tier=WARNING`;
+      data[state] = [
+        card(`${state}-e`, { state: recommendationState, estimate: est("E", 1), weeks_ago: 9 }),
+      ];
+      window.location.hash = `#/recommendations?state=${state}&basis=P&seen=7d`;
 
       const { container } = await loaded();
 
-      expect(container.querySelector("[data-toolbar-tier]")).toBeNull();
-      expect(container.querySelector(selector)?.textContent).toContain(`${state}-modeled`);
+      expect(container.querySelector("[data-toolbar-basis]")).toBeNull();
+      expect(container.querySelector(selector)?.textContent).toContain(`${state}-e`);
       expect(container.querySelector(`[data-toolbar-state='${state}']`)?.textContent).toContain(
         "(1)",
       );
     },
   );
 
-  it("distinguishes filtered-empty and resets filters while retaining the route and sort", async () => {
-    provide([card("available")]);
-    window.location.hash = "#/recommendations?scope=missing&sort=newest";
-    const { getByText, container } = await loaded();
+  // U5.3 item 5: Reset clears narrowing filters AND sort/group/window.
+  it("distinguishes filtered-empty and resets filters, sort, group and window", async () => {
+    provide([card("available", { estimate: est("P", 1), weeks_ago: 0 })]);
+    window.location.hash =
+      "#/recommendations?scope=missing&basis=R&seen=7d&sort=newest&group=workspace";
+    const { getAllByText, container } = await loaded();
     expect(container.textContent).toContain("No matching recommendations");
-    fireEvent.click(getByText("Reset filters"));
+    const [reset] = getAllByText("Reset filters");
+    fireEvent.click(reset as HTMLElement);
     await waitFor(() => expect(titles(container)).toEqual(["available"]));
-    expect(window.location.hash).toBe("#/recommendations?sort=newest");
+    expect(window.location.hash).toBe("#/recommendations");
+  });
+
+  it("offers Reset filters in the toolbar when only sort/group differ from default", async () => {
+    provide([card("available")]);
+    window.location.hash = "#/recommendations?sort=newest&group=workspace";
+    const { container, getByRole } = await loaded();
+    fireEvent.click(getByRole("button", { name: "Reset filters" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/recommendations"));
+    expect(container.querySelector(".recs-toolbar")?.textContent).not.toContain("Reset filters");
   });
 });

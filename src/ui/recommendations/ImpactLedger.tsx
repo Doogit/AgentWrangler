@@ -3,7 +3,7 @@
  *
  * Renders one row per adopted rec with the honesty rails (design §5):
  *   - projected-value chip is always labeled "PROJECTED · not yet verified"; the
- *     cap-weighted figure carries the COEFF caveat; never summed with realized.
+ *     projected value is the card's own modeled $; never summed with realized.
  *   - OBSERVED chip reads "OBSERVED SINCE ADOPTION" — observed, not causal.
  *   - MEASURING shows a clock + "Local check due after <date>" — never a zero-like
  *     placeholder.
@@ -20,6 +20,8 @@ import type { LedgerEntry } from "../../query/api/recommendations-ledger";
 import type { LedgerView } from "../../query/api/recommendations-ledger";
 import type { ApiResponse } from "../../query/envelope";
 import { fetchEfficiencyHeadroom, fetchLedger } from "../api/client";
+import { EFFECT_NOT_MEASURED_HELP } from "../lib/rec-presentation";
+import AsyncErrorState from "../shell/AsyncErrorState";
 import Chip from "../shell/Chip";
 import InfoTip from "../shell/InfoTip";
 import EffectEvidence from "./EffectEvidence";
@@ -27,7 +29,7 @@ import { DETECTOR_GROUP_LABELS } from "./RecCard";
 
 type LoadState =
   | { status: "loading" }
-  | { status: "error"; message: string }
+  | { status: "error" }
   | { status: "ok"; value: ApiResponse<LedgerView> };
 
 type HeadroomState =
@@ -104,12 +106,13 @@ function RealizedLine({ entry }: { entry: LedgerEntry }) {
   }
 
   if (effect === null) {
+    // No cycle and no legacy row: adopted without effect tracking (REL-FIX 2).
     return (
       <div className="ledger-row">
         <span className="ledger-key">Observed result</span>
         <span className="ledger-val">
-          Legacy measurement (read-only) is unavailable. No versioned measurement deadline was
-          recorded.
+          Effect not measured{" "}
+          <InfoTip label="Effect not measured" content={EFFECT_NOT_MEASURED_HELP} />
         </span>
       </div>
     );
@@ -238,13 +241,13 @@ function LedgerRow({ entry }: { entry: LedgerEntry }) {
         </div>
       )}
 
-      {!isRoutingAdvisory && entry.modeled_cap_weighted_u_per_wk !== null && (
+      {!isRoutingAdvisory && entry.modeled_savings_u_per_wk !== null && (
         <div className="ledger-row">
           <span className="ledger-key">Projected weekly value</span>
           <span className="ledger-val">
-            {fmtUsdPerWk(entry.modeled_cap_weighted_u_per_wk)}{" "}
+            {fmtUsdPerWk(entry.modeled_savings_u_per_wk)}{" "}
             <Chip kind="MODELED" label={MODELED_LABEL} />{" "}
-            <Chip kind="LIST_EQUIV" label="ESTIMATED VALUE · public API prices" />
+            <Chip kind="LIST_EQUIV" label="Estimate · public API prices" />
           </span>
         </div>
       )}
@@ -300,7 +303,7 @@ function fmtUsdPerWkHeadroom(microUsd: number): string {
   return `$${dollars.toFixed(2)}/wk`;
 }
 
-/** BM2 headroom summary line — a modeled ceiling, never a "$X wasted" claim. */
+/** Selected-window billed spend attributed to open recommendations. */
 function HeadroomSummary({ entries }: { entries: LedgerEntry[] }) {
   const [state, setState] = useState<HeadroomState>({ status: "loading" });
   const [breakdownOpen, setBreakdownOpen] = useState(false);
@@ -326,17 +329,17 @@ function HeadroomSummary({ entries }: { entries: LedgerEntry[] }) {
 
   const caveat = state.value.meta.qualification.note;
   const opportunities = data.opportunities;
-  const openCount = opportunities?.length ?? data.open_rec_count;
-  const openLabel = openCount === 1 ? "open modeled opportunity" : "open modeled opportunities";
 
   return (
     <div className="headroom-summary ledger-row" data-testid="headroom-summary">
       <span className="ledger-key">
-        Possible improvement <InfoTip label="What possible improvement means" content={caveat} />
+        Addressable spend <InfoTip label="What addressable spend means" content={caveat} />
       </span>
       <span className="ledger-val">
-        {openCount} {openLabel}; {fmtUsdPerWkHeadroom(data.headroom_u_per_wk)} modeled total per
-        week (individual estimates; not additive or measured)
+        {fmtUsdPerWkHeadroom(data.headroom_u_per_wk)} of spend is targeted by open recommendations
+        (each token counted once)
+        {data.unclaimed_rec_count > 0 &&
+          ` · ${data.unclaimed_rec_count} not yet on the claim ledger`}
         {opportunities === undefined ? (
           <span className="kpi-off-hint">
             {" "}
@@ -409,8 +412,8 @@ export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string
       .then((v) => {
         if (!cancelled) setState({ status: "ok", value: v });
       })
-      .catch((e: unknown) => {
-        if (!cancelled) setState({ status: "error", message: String(e) });
+      .catch(() => {
+        if (!cancelled) setState({ status: "error" });
       });
     return () => {
       cancelled = true;
@@ -427,16 +430,7 @@ export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string
   if (state.status === "error") {
     return (
       <div className="impact-ledger">
-        <div className="banner banner-error" role="alert">
-          <span>Impact Ledger unavailable: {state.message}</span>
-          <button
-            type="button"
-            className="banner-retry"
-            onClick={() => setRefreshKey((key) => key + 1)}
-          >
-            Retry
-          </button>
-        </div>
+        <AsyncErrorState resource="impact-ledger" onRetry={() => setRefreshKey((key) => key + 1)} />
       </div>
     );
   }
@@ -456,10 +450,6 @@ export default function ImpactLedger({ visibleRecIds }: { visibleRecIds?: string
 
   return (
     <div className="impact-ledger">
-      <p className="kpi-fn">
-        Cap-weighted estimate uses COEFF={view.cap_read_coeff} (unverified — Anthropic has not
-        published a cap coefficient for cache reads).
-      </p>
       {entries.map((entry) => (
         <LedgerRow key={entry.rec_id} entry={entry} />
       ))}

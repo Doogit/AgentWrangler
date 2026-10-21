@@ -1,0 +1,140 @@
+{
+  "1": {
+    "detector_id": 1,
+    "event_count": 30,
+    "savings_u_per_wk": 191613,
+    "usd_per_wk": 0.19,
+    "weekly_spend_u": 26850000,
+    "pct_of_weekly_spend": 0.7136
+  },
+  "2": {
+    "detector_id": 2,
+    "event_count": 30,
+    "savings_u_per_wk": 1633500,
+    "usd_per_wk": 1.63,
+    "weekly_spend_u": 26850000,
+    "pct_of_weekly_spend": 6.0838
+  },
+  "6": {
+    "detector_id": 6,
+    "event_count": 30,
+    "savings_u_per_wk": 199597,
+    "usd_per_wk": 0.2,
+    "weekly_spend_u": 26850000,
+    "pct_of_weekly_spend": 0.7434
+  },
+  "8": {
+    "detector_id": 8,
+    "event_count": 30,
+    "savings_u_per_wk": 5250000,
+    "usd_per_wk": 5.25,
+    "weekly_spend_u": 26850000,
+    "pct_of_weekly_spend": 19.5531
+  },
+  "A1": {
+    "detector_id": "A1",
+    "avoidable_bytes": 307200,
+    "savings_u_per_wk": 72000,
+    "usd_per_wk": 0.07
+  },
+  "A2": {
+    "detector_id": "A2",
+    "avoidable_bytes": 122880,
+    "savings_u_per_wk": 28800,
+    "usd_per_wk": 0.03
+  },
+  "D12": {
+    "detector_id": "D12",
+    "avoidable_bytes": 6291456,
+    "savings_u_per_wk": 1710490,
+    "usd_per_wk": 1.71
+  },
+  "B1": {
+    "detector_id": "B1",
+    "avoidable_creation_tokens": 150000,
+    "savings_u_per_wk": 258750,
+    "usd_per_wk": 0.26
+  },
+  "B2": {
+    "detector_id": "B2",
+    "avoidable_creation_tokens": 198000,
+    "savings_u_per_wk": null,
+    "usd_per_wk": null
+  },
+  "B3": {
+    "detector_id": "B3",
+    "avoidable_creation_tokens": 70000,
+    "savings_u_per_wk": 120750,
+    "usd_per_wk": 0.12
+  },
+  "B4": {
+    "detector_id": "B4",
+    "avoidable_creation_tokens": 80000,
+    "savings_u_per_wk": null,
+    "usd_per_wk": null
+  },
+  "C5": {
+    "detector_id": "C5",
+    "displayed_ceu": 48000,
+    "loop_excess_error_count": 3,
+    "savings_u_per_wk": null,
+    "usd_per_wk": null
+  },
+  "G11": {
+    "detector_id": "G11",
+    "excess_tokens": 200000,
+    "avoidance_fraction": 0.5,
+    "blended_cache_read_price": 0.3,
+    "savings_u_per_wk": 30000,
+    "usd_per_wk": 0.03
+  },
+  "D7": {
+    "detector_id": "D7",
+    "repeat_excess_cost_u": 75050,
+    "avoidance_fraction": 0.5,
+    "savings_u_per_wk": 37525,
+    "usd_per_wk": 0.04
+  },
+  "D7_XREAD": {
+    "detector_id": "D7_XREAD",
+    "total_redundant_result_bytes": 20000,
+    "total_redundant_read_count": 1,
+    "redundant_path_count": 1,
+    "bytes_per_token": 4,
+    "avoidable_tokens": 5000,
+    "carry_price_usd_per_mtok": 4.35,
+    "savings_u_per_wk": 10875,
+    "usd_per_wk": 0.01
+  },
+  "D10": {
+    "detector_id": "D10",
+    "delta_context_tokens": 100000,
+    "global_turns_per_week": 10,
+    "blended_cache_read_price": 0.3,
+    "savings_u_per_wk": 150000,
+    "usd_per_wk": 0.15
+  },
+  "b3_attribution": {
+    "C7": {
+      "claimed_turn_count": 1,
+      "savings_u_per_wk": 50000,
+      "usd_per_wk": 0.05
+    },
+    "C3": {
+      "claimed_turn_count": 1,
+      "savings_u_per_wk": 50000,
+      "usd_per_wk": 0.05
+    },
+    "C4": {
+      "claimed_turn_count": 1,
+      "savings_u_per_wk": 50000,
+      "usd_per_wk": 0.05
+    },
+    "C1": {
+      "claimed_turn_count": 1,
+      "savings_u_per_wk": 50000,
+      "usd_per_wk": 0.05,
+      "bound": "corpus"
+    }
+  }
+}

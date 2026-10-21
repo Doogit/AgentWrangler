@@ -1,8 +1,8 @@
 /**
  * Fail-open Claude Code PreToolUse hook for AgentWrangler context budgets.
  * It intentionally has no package dependencies, never exits non-zero, and never
- * denies a tool call — both thresholds are warn-only (a deny at the hard threshold
- * would block the very checkpoint/clear it prescribes).
+ * decides a tool call's permission — both thresholds are warn-only (a deny at the hard
+ * threshold would block the very commit/handoff it prescribes).
  */
 
 import * as fs from "node:fs";
@@ -13,51 +13,52 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const REQUEST_TIMEOUT_MS = 500;
-const SOFT_DEBOUNCE_MS = 60_000;
+const DEBOUNCE_MS = 60_000;
 
-/** Convert an endpoint stage to the only hook output it may emit. */
-export function stageToStdout(stage) {
-  if (stage === "hard") {
-    return JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: "Context budget at its urgent threshold.",
-      },
-      additionalContext:
-        "Context budget is at its urgent threshold. Checkpoint now, then run /clear.",
-      systemMessage:
-        "AgentWrangler: context budget at its urgent threshold. Checkpoint now, then run /clear.",
-    });
-  }
-  if (stage === "soft") {
-    return JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: "Context budget approaching its limit.",
-      },
-      additionalContext:
-        "Context budget is approaching its limit. Checkpoint, then run /clear or /compact soon.",
-      systemMessage:
-        "AgentWrangler: context budget is approaching its limit. Checkpoint, then run /clear or /compact soon.",
-    });
-  }
-  return "";
+/** "250k" for 250000; null when the endpoint gave no usable count. */
+function kTokens(n) {
+  return Number.isFinite(n) && n > 0 ? `${Math.round(n / 1000)}k` : null;
 }
 
-function markerPath(sessionId) {
+/**
+ * Convert an endpoint stage to the only hook output it may emit.
+ * additionalContext must sit inside hookSpecificOutput: Claude Code ignores it at the top level,
+ * and systemMessage is shown to the user only. No permissionDecision: an "allow" would skip the
+ * user's permission prompt for the tool call this warning rides on.
+ */
+export function stageToStdout(stage, budget) {
+  const tokens = kTokens(budget?.context_tokens);
+  const at = tokens ? `Context is at ${tokens} tokens. ` : "";
+  let message;
+  if (stage === "hard") {
+    message = `${at}Commit your work now, write a handoff with the repo's handoff skill (or handoff-global), then ask the operator to run /clear.`;
+  } else if (stage === "soft") {
+    message = `${at}Context budget is approaching its limit. Reach a checkpoint soon; at the urgent threshold you will be asked to commit and hand off.`;
+  } else {
+    return "";
+  }
+  return JSON.stringify({
+    hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: message },
+    systemMessage: `AgentWrangler: ${message}`,
+  });
+}
+
+/** Marker key: session, plus agent for a subagent, so a subagent crossing never silences the main thread. */
+function markerPath(sessionId, agentId, stage) {
   const markerRoot =
     process.env.AW_HOOK_MARKER_DIR ?? path.join(os.homedir(), ".agentwrangler", "hook-markers");
-  return path.join(markerRoot, `context-budget-${encodeURIComponent(sessionId)}.marker`);
+  const key =
+    encodeURIComponent(sessionId) + (agentId ? `-agent-${encodeURIComponent(agentId)}` : "");
+  return path.join(markerRoot, `context-budget-${stage}-${key}.marker`);
 }
 
-function shouldEmitSoft(sessionId) {
-  const file = markerPath(sessionId);
+/** One warning per stage per minute, so a reached threshold doesn't land in context on every tool call. */
+function shouldEmit(sessionId, agentId, stage) {
+  const file = markerPath(sessionId, agentId, stage);
   const now = Date.now();
   try {
     const previous = Number(fs.readFileSync(file, "utf8"));
-    if (Number.isFinite(previous) && now - previous < SOFT_DEBOUNCE_MS) return false;
+    if (Number.isFinite(previous) && now - previous < DEBOUNCE_MS) return false;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, String(now), { encoding: "utf8", mode: 0o600 });
     return true;
@@ -87,11 +88,12 @@ function readStdin() {
   });
 }
 
-function fetchBudget(sessionId) {
+function fetchBudget(sessionId, agentId) {
   return new Promise((resolve, reject) => {
-    const port = process.env.AW_PORT ?? "47821";
+    const port = process.env.AW_PORT ?? "2929";
+    const agentParam = agentId ? `&agent_id=${encodeURIComponent(agentId)}` : "";
     const request = http.get(
-      `http://127.0.0.1:${port}/api/context-budget?session_id=${encodeURIComponent(sessionId)}`,
+      `http://127.0.0.1:${port}/api/context-budget?session_id=${encodeURIComponent(sessionId)}${agentParam}`,
       (response) => {
         if (response.statusCode !== 200) {
           response.resume();
@@ -123,10 +125,13 @@ async function main() {
     const input = JSON.parse(await readStdin());
     const sessionId = input?.session_id;
     if (typeof sessionId !== "string" || sessionId.length === 0) return;
-    const budget = await fetchBudget(sessionId);
+    const agentId = typeof input?.agent_id === "string" && input.agent_id ? input.agent_id : null;
+    // A subagent call without an agent_id can't be scoped: warn nothing rather than misattribute.
+    if (agentId === null && input?.agent_type !== undefined) return;
+    const budget = await fetchBudget(sessionId, agentId);
     const stage = budget?.stage;
-    if (stage === "soft" && !shouldEmitSoft(sessionId)) return;
-    const output = stageToStdout(stage);
+    if ((stage === "soft" || stage === "hard") && !shouldEmit(sessionId, agentId, stage)) return;
+    const output = stageToStdout(stage, budget);
     if (output) process.stdout.write(output);
   } catch {
     // Hooks must never block Claude Code if AgentWrangler is unavailable.

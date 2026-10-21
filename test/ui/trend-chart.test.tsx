@@ -19,6 +19,8 @@ import {
   mockHeadroomTrendNoLimit,
   mockHookConfigResponse,
   mockHotSessions,
+  mockLimits,
+  mockLinkageRate,
   mockLiveSessions,
   mockRecommendations,
   mockSuccessRate,
@@ -32,7 +34,16 @@ import TrendChart, {
   xAxisInterval,
 } from "../../src/ui/overview/TrendChart";
 
+import {
+  fetchCacheWriteTrend,
+  fetchFlavorDecomposition,
+  fetchGlobalOverview,
+  fetchLiveSessions,
+  serveOverviewViewFromLegacyMocks,
+} from "./overview/overview-view-from-legacy";
+
 vi.mock("../../src/ui/api/client");
+beforeEach(serveOverviewViewFromLegacyMocks);
 vi.mock("recharts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("recharts")>();
   const { cloneElement } = await import("react");
@@ -50,12 +61,12 @@ beforeEach(() => {
   vi.mocked(client.fetchRecommendations).mockResolvedValue(mockRecommendations());
   vi.mocked(client.fetchSuccessRate).mockResolvedValue(mockSuccessRate());
   vi.mocked(client.fetchBurnStatus).mockResolvedValue(mockBurnStatus());
+  vi.mocked(client.fetchLimits).mockResolvedValue(mockLimits());
+  vi.mocked(client.fetchLinkageRate).mockResolvedValue(mockLinkageRate());
   vi.mocked(client.fetchHookConfig).mockResolvedValue(mockHookConfigResponse(false));
   vi.mocked(client.fetchHotSessions).mockResolvedValue(mockHotSessions());
-  vi.mocked(client.fetchFlavorDecomposition).mockResolvedValue(
-    mockFlavorDecomposition({ preset: "7d" }),
-  );
-  vi.mocked(client.fetchCacheWriteTrend).mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
+  fetchFlavorDecomposition.mockResolvedValue(mockFlavorDecomposition({ preset: "7d" }));
+  fetchCacheWriteTrend.mockResolvedValue(mockCacheWriteTrend({ preset: "7d" }));
   vi.mocked(client.fetchHeadroomTrend).mockResolvedValue(mockHeadroomTrend({ preset: "7d" }));
 });
 
@@ -302,38 +313,33 @@ describe("TrendChart - headroom section", () => {
 // ---------------------------------------------------------------------------
 
 describe("OverviewPage — TrendChart integration", () => {
-  it("renders Spend Over Time section when trends resolve", async () => {
-    vi.mocked(client.fetchGlobalOverview).mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  it("renders Spend by day section when trends resolve", async () => {
+    // overview-v2: TrendChart was replaced by SpendByDayCard ("Spend by day" heading).
+    fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
     vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
-    vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
+    fetchLiveSessions.mockResolvedValue(mockLiveSessions());
     vi.mocked(client.fetchTrends).mockResolvedValue(mockTrends({ preset: "7d" }));
 
-    const { container } = render(<OverviewPage />);
+    render(<OverviewPage />);
 
     await waitFor(() => {
-      const matches = Array.from(container.querySelectorAll("*"));
-      const found = matches.some((el) => el.textContent?.includes("Spend Over Time"));
-      expect(found).toBe(true);
+      expect(screen.getByRole("heading", { name: /spend by day/i })).toBeTruthy();
     });
   });
 
-  it("TrendChart shows error state when fetchTrends rejects (non-fatal to page)", async () => {
-    vi.mocked(client.fetchGlobalOverview).mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
+  it("SpendByDayCard fetchTrends rejection is non-fatal to the page", async () => {
+    // overview-v2: trends error is silent — SpendByDayCard shows empty-state text,
+    // no .banner-error; the KPI section still renders.
+    fetchGlobalOverview.mockResolvedValue(mockGlobalOverview({ preset: "7d" }));
     vi.mocked(client.fetchWorkspaces).mockResolvedValue(mockWorkspaces({ preset: "7d" }));
-    vi.mocked(client.fetchLiveSessions).mockResolvedValue(mockLiveSessions());
+    fetchLiveSessions.mockResolvedValue(mockLiveSessions());
     vi.mocked(client.fetchTrends).mockRejectedValue(new Error("trends-unavailable"));
 
-    const { container } = render(<OverviewPage />);
+    render(<OverviewPage />);
 
-    // The overview KPI data still renders (trends error is non-fatal)
+    // The KPI section heading still appears despite the trends fetch failure.
     await waitFor(() => {
-      expect(container.querySelector(".kpi-grid")).not.toBeNull();
-    });
-
-    // TrendChart section shows error banner
-    await waitFor(() => {
-      const banners = container.querySelectorAll(".banner-error");
-      expect(banners.length).toBeGreaterThan(0);
+      expect(screen.getByRole("heading", { name: /This period/i })).toBeTruthy();
     });
   });
 });
